@@ -415,6 +415,7 @@ INTERNAL {
 	rte_intr_efd_counter_size_get;
 	rte_intr_efd_disable;
 	rte_intr_efd_enable;
+	rte_intr_efd_enable_uintr;
 	rte_intr_efds_index_get;
 	rte_intr_efds_index_set;
 	rte_intr_elist_index_get;
