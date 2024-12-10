@@ -18,7 +18,6 @@ sources += files(
         'eal_vfio.c',
         'eal_vfio_mp_sync.c',
 )
-
 deps += ['kvargs', 'telemetry']
 if has_libnuma
     dpdk_conf.set10('RTE_EAL_NUMA_AWARE_HUGEPAGES', true)
