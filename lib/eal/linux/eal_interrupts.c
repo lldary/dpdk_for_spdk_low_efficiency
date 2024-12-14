@@ -31,10 +31,41 @@
 
 #include "eal_private.h"
 
+#include <x86gprintrin.h>
+
+// #define __USE_GNU
+#include <syscall.h>
+#include <pthread.h>
+#include <sched.h>
+
+#ifndef __NR_uintr_register_handler
+#define __NR_uintr_register_handler	471
+#define __NR_uintr_unregister_handler	472
+#define __NR_uintr_create_fd		473
+#define __NR_uintr_register_sender	474
+#define __NR_uintr_unregister_sender	475
+#define __NR_uintr_wait			476
+#endif
+
+#define uintr_register_handler(handler, flags)	syscall(__NR_uintr_register_handler, handler, flags)
+#define uintr_unregister_handler(flags)		syscall(__NR_uintr_unregister_handler, flags)
+#define uintr_create_fd(vector, flags)		syscall(__NR_uintr_create_fd, vector, flags)
+#define uintr_register_sender(fd, flags)	syscall(__NR_uintr_register_sender, fd, flags)
+#define uintr_unregister_sender(ipi_idx, flags)	syscall(__NR_uintr_unregister_sender, ipi_idx, flags)
+#define uintr_wait(flags)			syscall(__NR_uintr_wait, flags)
+uint64_t temp = 1;
+
+void __attribute__((interrupt))__attribute__((target("general-regs-only", "inline-all-stringops")))
+uintr_handler(struct __uintr_frame *ui_frame,
+	      unsigned long long vector)
+{
+	temp ++;
+}
+
 #define EAL_INTR_EPOLL_WAIT_FOREVER (-1)
 #define NB_OTHER_INTR               1
 
-#define USER_INT
+
 
 static RTE_DEFINE_PER_LCORE(int, _epfd) = -1; /**< epoll fd per thread */
 
@@ -360,14 +391,11 @@ vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle) {
 	if(irq_set->count == 0)
 		return 0;
 
-	#ifdef USER_INT
-#define VFIO_IRQ_SET_DATA_UINTRFD	(1 << 6) /* Data is uintrfd (s32) */
+
+	#define VFIO_IRQ_SET_DATA_UINTRFD	(1 << 6) /* Data is uintrfd (s32) */ // TOFO: 这个还需要存在吗？
 	irq_set->flags = VFIO_IRQ_SET_DATA_UINTRFD | VFIO_IRQ_SET_ACTION_TRIGGER;
 	EAL_LOG(ERR, "Enable MSI-X interrupts for flag %u with uintrfd",
 		irq_set->flags);
-#else
-	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
-#endif
 	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
 	irq_set->start = 1;
 	fd_ptr = (int *) &irq_set->data;
@@ -1659,39 +1687,6 @@ rte_intr_free_epoll_fd(struct rte_intr_handle *intr_handle)
 	}
 }
 
-// #define _GNU_SOURCE
-#ifdef USER_INT
-#include <x86gprintrin.h>
-
-// #define __USE_GNU
-#include <syscall.h>
-#include <pthread.h>
-#include <sched.h>
-
-#ifndef __NR_uintr_register_handler
-#define __NR_uintr_register_handler	471
-#define __NR_uintr_unregister_handler	472
-#define __NR_uintr_create_fd		473
-#define __NR_uintr_register_sender	474
-#define __NR_uintr_unregister_sender	475
-#define __NR_uintr_wait			476
-#endif
-
-#define uintr_register_handler(handler, flags)	syscall(__NR_uintr_register_handler, handler, flags)
-#define uintr_unregister_handler(flags)		syscall(__NR_uintr_unregister_handler, flags)
-#define uintr_create_fd(vector, flags)		syscall(__NR_uintr_create_fd, vector, flags)
-#define uintr_register_sender(fd, flags)	syscall(__NR_uintr_register_sender, fd, flags)
-#define uintr_unregister_sender(ipi_idx, flags)	syscall(__NR_uintr_unregister_sender, ipi_idx, flags)
-#define uintr_wait(flags)			syscall(__NR_uintr_wait, flags)
-uint64_t temp = 1;
-
-void __attribute__((interrupt))__attribute__((target("general-regs-only", "inline-all-stringops")))
-uintr_handler(struct __uintr_frame *ui_frame,
-	      unsigned long long vector)
-{
-	temp ++;
-}
-#endif
 int
 rte_intr_efd_enable(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 {
@@ -1747,23 +1742,18 @@ rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 	uint32_t n = RTE_MIN(nb_efd, (uint32_t)RTE_MAX_RXTX_INTR_VEC_ID);
 
 	assert(nb_efd != 0);
-#ifdef USER_INT
-#define UINTR_HANDLER_FLAG_WAITING_RECEIVER	0x1000
+
+	#define UINTR_HANDLER_FLAG_WAITING_RECEIVER	0x1000 // TODO: 这个定义也一直需要吗？
 	if (uintr_register_handler(uintr_handler, UINTR_HANDLER_FLAG_WAITING_RECEIVER)) {
 		EAL_LOG(ERR,"[FAIL]\tInterrupt handler register error");
 		exit(EXIT_FAILURE);
 	}
-#endif
 
 	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
 		for (i = 0; i < n; i++) {
-#ifdef USER_INT
 			fd = uintr_create_fd(n, 0);
 			EAL_LOG(ERR, "uintr fd %d", fd);
 			_stui();
-#else
-			fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-#endif
 			if (fd < 0) {
 				EAL_LOG(ERR,
 					"can't setup eventfd, error %i (%s)",
@@ -1809,9 +1799,7 @@ rte_intr_efd_disable(struct rte_intr_handle *intr_handle)
 		for (i = 0; i < (uint32_t)rte_intr_nb_efd_get(intr_handle); i++)
 			close(rte_intr_efds_index_get(intr_handle, i));
 	}
-#ifdef USER_INT
 	uintr_unregister_handler(0);
-#endif
 	rte_intr_nb_efd_set(intr_handle, 0);
 	rte_intr_max_intr_set(intr_handle, 0);
 }
