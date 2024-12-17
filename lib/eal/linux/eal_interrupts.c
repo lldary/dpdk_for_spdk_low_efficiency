@@ -1743,11 +1743,11 @@ rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 
 	assert(nb_efd != 0);
 
-	#define UINTR_HANDLER_FLAG_WAITING_RECEIVER	0x1000 // TODO: 这个定义也一直需要吗？
-	if (uintr_register_handler(uintr_handler, UINTR_HANDLER_FLAG_WAITING_RECEIVER)) {
-		EAL_LOG(ERR,"[FAIL]\tInterrupt handler register error");
-		exit(EXIT_FAILURE);
-	}
+	// #define UINTR_HANDLER_FLAG_WAITING_RECEIVER	0x1000 // TODO: 这个定义也一直需要吗？
+	// if (uintr_register_handler(uintr_handler, UINTR_HANDLER_FLAG_WAITING_RECEIVER)) {
+	// 	EAL_LOG(ERR,"[FAIL]\tInterrupt handler register error");
+	// 	exit(EXIT_FAILURE);
+	// }
 
 	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
 		for (i = 0; i < n; i++) {
