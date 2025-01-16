@@ -1748,10 +1748,12 @@ rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 	// 	EAL_LOG(ERR,"[FAIL]\tInterrupt handler register error");
 	// 	exit(EXIT_FAILURE);
 	// }
+	static int temp = 0; // TODO: 临时处理
+	temp++;
 
 	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
 		for (i = 0; i < n; i++) {
-			fd = uintr_create_fd(n, 0);
+			fd = uintr_create_fd(temp + n, 0);
 			EAL_LOG(ERR, "uintr fd %d", fd);
 			_stui();
 			if (fd < 0) {
