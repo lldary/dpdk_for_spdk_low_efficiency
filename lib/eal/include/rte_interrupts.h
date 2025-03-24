@@ -159,7 +159,7 @@ rte_intr_callback_unregister_sync(const struct rte_intr_handle *intr_handle,
  */
 int rte_intr_enable(const struct rte_intr_handle *intr_handle);
 
-int rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle);
+int rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index);
 
 /**
  * It disables the interrupt for the specified handle.

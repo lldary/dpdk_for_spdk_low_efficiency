@@ -338,7 +338,7 @@ vfio_enable_msix(const struct rte_intr_handle *intr_handle) {
 
 /* enable MSI-X interrupts */
 static int
-vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle) {
+vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle, uint32_t index) {
 	int len, ret;
 	char irq_set_buf[MSIX_IRQ_SET_BUF_LEN];
 	struct vfio_irq_set *irq_set;
@@ -350,6 +350,11 @@ vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle) {
 	irq_set->argsz = len;
 	/* 0 < irq_set->count < RTE_MAX_RXTX_INTR_VEC_ID + 1 */
 	irq_set->count = 1;
+
+	EAL_LOG(ERR, "Enable MSI-X interrupts for fd %d index %d",
+		rte_intr_efds_index_get(intr_handle, index - 1), index);
+	if(index != 0)
+		goto index;
 
 
 	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
@@ -405,6 +410,31 @@ vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle) {
 	if (ret) {
 		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d",
 			rte_intr_fd_get(intr_handle));
+		return -1;
+	}
+
+	return 0;
+
+
+index:
+	irq_set->count = 1;
+	#define VFIO_IRQ_SET_DATA_UINTRFD	(1 << 6) /* Data is uintrfd (s32) */ // TOFO: 这个还需要存在吗？
+	irq_set->flags = VFIO_IRQ_SET_DATA_UINTRFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+	EAL_LOG(ERR, "Enable MSI-X interrupts for flag %u with uintrfd",
+		irq_set->flags);
+	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
+	irq_set->start = index;
+	fd_ptr = (int *) &irq_set->data;
+	/* INTR vector offset 0 reserve for non-efds mapping */
+		fd_ptr[RTE_INTR_VEC_ZERO_OFFSET] =
+			rte_intr_efds_index_get(intr_handle, index - 1);
+
+	vfio_dev_fd = rte_intr_dev_fd_get(intr_handle);
+	ret = ioctl(vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
+
+	if (ret) {
+		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d index %d",
+			rte_intr_fd_get(intr_handle), index);
 		return -1;
 	}
 
@@ -863,7 +893,7 @@ out:
 }
 
 int
-rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle)
+rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index)
 {
 	int rc = 0, uio_cfg_fd;
 
@@ -897,7 +927,7 @@ rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle)
 		break;
 #ifdef VFIO_PRESENT
 	case RTE_INTR_HANDLE_VFIO_MSIX:
-		if (vfio_enable_msix_uintr(intr_handle))
+		if (vfio_enable_msix_uintr(intr_handle, index))
 			rc = -1;
 		break;
 	case RTE_INTR_HANDLE_VFIO_MSI:
@@ -1737,8 +1767,10 @@ rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 
 	int vector = sched_getcpu();
 
+	EAL_LOG(ERR, "uintr vector %d dev_fd %u", vector,  intr_handle->nb_efd);
+
 	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
-		for (i = 0; i < n; i++) {
+		for (i = nb_efd - 2; i < n; i++) {
 			fd = uintr_create_fd(vector, 0);
 			EAL_LOG(ERR, "uintr fd %d vector %d", fd, vector);
 			_stui();
