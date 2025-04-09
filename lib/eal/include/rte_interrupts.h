@@ -355,6 +355,10 @@ __rte_internal
 int
 rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd);
 
+__rte_internal
+int
+rte_intr_uintr_enable(struct rte_intr_handle *intr_handle, uint32_t index);
+
 /**
  * @internal
  * It disables the packet I/O interrupt event.

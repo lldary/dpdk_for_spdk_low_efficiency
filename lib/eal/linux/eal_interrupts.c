@@ -1757,6 +1757,51 @@ rte_intr_efd_enable(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 }
 
 int
+rte_intr_uintr_enable(struct rte_intr_handle *intr_handle, uint32_t index)
+{
+	uint32_t i;
+	int fd;
+	uint32_t n = RTE_MIN(RTE_MAX(intr_handle->nb_efd, index), (uint32_t)RTE_MAX_RXTX_INTR_VEC_ID);
+
+	assert(n != 0);
+
+	int vector = sched_getcpu();
+
+	EAL_LOG(ERR, "uintr vector %d dev_fd %u", vector,  intr_handle->nb_efd);
+
+	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
+		uint32_t i = index - 1;
+		{
+			fd = uintr_create_fd(vector, 0);
+			EAL_LOG(ERR, "[ DEBUG ] uintr fd %d vector %d", fd, vector);
+			_stui(); // TODO: 合适吗？
+			if (fd < 0) {
+				EAL_LOG(ERR,
+					"[ DEBUG ] can't setup eventfd, error %i (%s)",
+					errno, strerror(errno));
+				return -errno;
+			}
+
+			if (rte_intr_efds_index_set(intr_handle, i, fd))
+				return -rte_errno;
+		}
+
+		if (rte_intr_nb_efd_set(intr_handle, n))
+			return -rte_errno;
+
+		if (rte_intr_max_intr_set(intr_handle, NB_OTHER_INTR + n))
+			return -rte_errno;
+	} else if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VDEV) {
+		/* only check, initialization would be done in vdev driver.*/
+		return -rte_errno;
+	} else {
+		return -rte_errno;
+	}
+
+	return 0;
+}
+
+int
 rte_intr_efd_enable_uintr(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 {
 	uint32_t i;
