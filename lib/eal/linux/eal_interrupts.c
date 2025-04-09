@@ -338,6 +338,69 @@ vfio_enable_msix(const struct rte_intr_handle *intr_handle) {
 
 /* enable MSI-X interrupts */
 static int
+vfio_enable_msix_index(const struct rte_intr_handle *intr_handle, uint16_t index) {
+	int len, ret;
+	char irq_set_buf[MSIX_IRQ_SET_BUF_LEN];
+	struct vfio_irq_set *irq_set;
+	int *fd_ptr, vfio_dev_fd, i;
+
+	len = sizeof(irq_set_buf);
+
+	irq_set = (struct vfio_irq_set *) irq_set_buf;
+	irq_set->argsz = len;
+	/* 0 < irq_set->count < RTE_MAX_RXTX_INTR_VEC_ID + 1 */
+	irq_set->count = rte_intr_max_intr_get(intr_handle) ?
+		(rte_intr_max_intr_get(intr_handle) >
+		 RTE_MAX_RXTX_INTR_VEC_ID + 1 ?	RTE_MAX_RXTX_INTR_VEC_ID + 1 :
+		 rte_intr_max_intr_get(intr_handle)) : 1;
+
+	irq_set->count = RTE_MIN(irq_set->count, 1);
+
+	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
+	irq_set->start = 0;
+	fd_ptr = (int *) &irq_set->data;
+	/* INTR vector offset 0 reserve for non-efds mapping */
+	fd_ptr[RTE_INTR_VEC_ZERO_OFFSET] = rte_intr_fd_get(intr_handle);
+	for (i = 0; i < rte_intr_nb_efd_get(intr_handle); i++) {
+		fd_ptr[RTE_INTR_VEC_RXTX_OFFSET + i] =
+			rte_intr_efds_index_get(intr_handle, i);
+	}
+
+	vfio_dev_fd = rte_intr_dev_fd_get(intr_handle);
+	ret = ioctl(vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
+
+	if (ret) {
+		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d",
+			rte_intr_fd_get(intr_handle));
+		return -1;
+	}
+
+	/* 设定指定index */
+
+	irq_set->count = RTE_MIN(irq_set->count, 1);
+
+	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
+	irq_set->start = index;
+	fd_ptr = (int *) &irq_set->data;
+	/* INTR vector offset 0 reserve for non-efds mapping */
+	fd_ptr[RTE_INTR_VEC_ZERO_OFFSET] = rte_intr_efds_index_get(intr_handle, index - 1);
+
+	vfio_dev_fd = rte_intr_dev_fd_get(intr_handle);
+	ret = ioctl(vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
+
+	if (ret) {
+		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d",
+			rte_intr_fd_get(intr_handle));
+		return -1;
+	}
+
+	return 0;
+}
+
+/* enable MSI-X interrupts */
+static int
 vfio_enable_msix_uintr(const struct rte_intr_handle *intr_handle, uint32_t index) {
 	int len, ret;
 	char irq_set_buf[MSIX_IRQ_SET_BUF_LEN];
@@ -893,6 +956,76 @@ out:
 }
 
 int
+rte_intr_enable_index(const struct rte_intr_handle *intr_handle, uint16_t index)
+{
+	int rc = 0, uio_cfg_fd;
+
+	if (intr_handle == NULL)
+		return -1;
+
+	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VDEV) {
+		rc = 0;
+		goto out;
+	}
+
+	uio_cfg_fd = rte_intr_dev_fd_get(intr_handle);
+	if (rte_intr_fd_get(intr_handle) < 0 || uio_cfg_fd < 0) {
+		rc = -1;
+		goto out;
+	}
+
+	switch (rte_intr_type_get(intr_handle)) {
+	/* write to the uio fd to enable the interrupt */
+	case RTE_INTR_HANDLE_UIO:
+		// if (uio_intr_enable(intr_handle))
+			rc = -1;
+		break;
+	case RTE_INTR_HANDLE_UIO_INTX:
+		// if (uio_intx_intr_enable(intr_handle))
+			rc = -1;
+		break;
+	/* not used at this moment */
+	case RTE_INTR_HANDLE_ALARM:
+		rc = -1;
+		break;
+#ifdef VFIO_PRESENT
+	case RTE_INTR_HANDLE_VFIO_MSIX:
+		if (vfio_enable_msix_index(intr_handle, index))
+			rc = -1;
+		break;
+	case RTE_INTR_HANDLE_VFIO_MSI:
+		// if (vfio_enable_msi(intr_handle))
+			rc = -1;
+		break;
+	case RTE_INTR_HANDLE_VFIO_LEGACY:
+		// if (vfio_enable_intx(intr_handle))
+			rc = -1;
+		break;
+#ifdef HAVE_VFIO_DEV_REQ_INTERFACE
+	case RTE_INTR_HANDLE_VFIO_REQ:
+		// if (vfio_enable_req(intr_handle))
+			rc = -1;
+		break;
+#endif
+#endif
+	/* not used at this moment */
+	case RTE_INTR_HANDLE_DEV_EVENT:
+		rc = -1;
+		break;
+	/* unknown handle type */
+	default:
+		EAL_LOG(ERR, "Unknown handle type of fd %d",
+			rte_intr_fd_get(intr_handle));
+		rc = -1;
+		break;
+	}
+out:
+	rte_eal_trace_intr_enable(intr_handle, rc);
+	return rc;
+}
+
+
+int
 rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index)
 {
 	int rc = 0, uio_cfg_fd;
@@ -914,11 +1047,11 @@ rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index)
 	switch (rte_intr_type_get(intr_handle)) {
 	/* write to the uio fd to enable the interrupt */
 	case RTE_INTR_HANDLE_UIO:
-		if (uio_intr_enable(intr_handle))
+		// if (uio_intr_enable(intr_handle))
 			rc = -1;
 		break;
 	case RTE_INTR_HANDLE_UIO_INTX:
-		if (uio_intx_intr_enable(intr_handle))
+		// if (uio_intx_intr_enable(intr_handle))
 			rc = -1;
 		break;
 	/* not used at this moment */
@@ -931,16 +1064,16 @@ rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index)
 			rc = -1;
 		break;
 	case RTE_INTR_HANDLE_VFIO_MSI:
-		if (vfio_enable_msi(intr_handle))
+		// if (vfio_enable_msi(intr_handle))
 			rc = -1;
 		break;
 	case RTE_INTR_HANDLE_VFIO_LEGACY:
-		if (vfio_enable_intx(intr_handle))
+		// if (vfio_enable_intx(intr_handle))
 			rc = -1;
 		break;
 #ifdef HAVE_VFIO_DEV_REQ_INTERFACE
 	case RTE_INTR_HANDLE_VFIO_REQ:
-		if (vfio_enable_req(intr_handle))
+		// if (vfio_enable_req(intr_handle))
 			rc = -1;
 		break;
 #endif
@@ -1748,6 +1881,55 @@ rte_intr_efd_enable(struct rte_intr_handle *intr_handle, uint32_t nb_efd)
 		if (rte_intr_efds_index_set(intr_handle, 0, rte_intr_fd_get(intr_handle)))
 			return -rte_errno;
 		if (rte_intr_nb_efd_set(intr_handle, RTE_MIN(nb_efd, 1U)))
+			return -rte_errno;
+		if (rte_intr_max_intr_set(intr_handle, NB_OTHER_INTR))
+			return -rte_errno;
+	}
+
+	return 0;
+}
+
+
+int
+rte_intr_efd_enable_index(struct rte_intr_handle *intr_handle, uint32_t index)
+{
+	uint32_t i;
+	int fd;
+	uint32_t n = RTE_MIN(RTE_MAX(intr_handle->nb_efd, index), (uint32_t)RTE_MAX_RXTX_INTR_VEC_ID);
+
+	assert(n != 0);
+
+	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
+		uint32_t i = index;
+		{
+			fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+			if (fd < 0) {
+				EAL_LOG(ERR,
+					"can't setup eventfd, error %i (%s)",
+					errno, strerror(errno));
+				return -errno;
+			}
+
+			if (rte_intr_efds_index_set(intr_handle, i, fd))
+				return -rte_errno;
+		}
+
+		if (rte_intr_nb_efd_set(intr_handle, n))
+			return -rte_errno;
+
+		if (rte_intr_max_intr_set(intr_handle, NB_OTHER_INTR + n))
+			return -rte_errno;
+	} else if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VDEV) {
+		/* only check, initialization would be done in vdev driver.*/
+		if ((uint64_t)rte_intr_efd_counter_size_get(intr_handle) >
+		    sizeof(union rte_intr_read_buffer)) {
+			EAL_LOG(ERR, "the efd_counter_size is oversized");
+			return -EINVAL;
+		}
+	} else {
+		if (rte_intr_efds_index_set(intr_handle, 0, rte_intr_fd_get(intr_handle)))
+			return -rte_errno;
+		if (rte_intr_nb_efd_set(intr_handle, RTE_MIN(n, 1U)))
 			return -rte_errno;
 		if (rte_intr_max_intr_set(intr_handle, NB_OTHER_INTR))
 			return -rte_errno;

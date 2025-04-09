@@ -159,6 +159,9 @@ rte_intr_callback_unregister_sync(const struct rte_intr_handle *intr_handle,
  */
 int rte_intr_enable(const struct rte_intr_handle *intr_handle);
 
+int rte_intr_enable_index(const struct rte_intr_handle *intr_handle,
+		uint16_t index);
+
 int rte_intr_enable_uintr(const struct rte_intr_handle *intr_handle, uint32_t index);
 
 /**
@@ -350,6 +353,10 @@ rte_intr_free_epoll_fd(struct rte_intr_handle *intr_handle);
 __rte_internal
 int
 rte_intr_efd_enable(struct rte_intr_handle *intr_handle, uint32_t nb_efd);
+
+__rte_internal
+int
+rte_intr_efd_enable_index(struct rte_intr_handle *intr_handle, uint32_t index);
 
 __rte_internal
 int
