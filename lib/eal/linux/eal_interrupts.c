@@ -344,6 +344,9 @@ vfio_enable_msix_index(const struct rte_intr_handle *intr_handle, uint16_t index
 	struct vfio_irq_set *irq_set;
 	int *fd_ptr, vfio_dev_fd, i;
 
+	EAL_LOG(ERR, "Enable MSI-X interrupts for fd %d index %d",
+		rte_intr_efds_index_get(intr_handle, index - 1), index);
+
 	len = sizeof(irq_set_buf);
 
 	irq_set = (struct vfio_irq_set *) irq_set_buf;
@@ -1900,7 +1903,7 @@ rte_intr_efd_enable_index(struct rte_intr_handle *intr_handle, uint32_t index)
 	assert(n != 0);
 
 	if (rte_intr_type_get(intr_handle) == RTE_INTR_HANDLE_VFIO_MSIX) {
-		uint32_t i = index;
+		uint32_t i = index - 1;
 		{
 			fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 			if (fd < 0) {
