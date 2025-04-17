@@ -2,6 +2,8 @@
  * Copyright(c) 2018 Intel Corporation
  */
 
+#include <stdlib.h>
+
 #include <rte_malloc.h>
 #include <rte_eal.h>
 #include <rte_log.h>
@@ -72,7 +74,7 @@ main_loop(struct cperf_benchmark_ctx *ctx, enum rte_comp_xform_type type)
 
 	if (ops == NULL) {
 		RTE_LOG(ERR, USER1,
-			"Can't allocate memory for ops strucures\n");
+			"Can't allocate memory for ops structures\n");
 		return -1;
 	}
 
@@ -82,14 +84,17 @@ main_loop(struct cperf_benchmark_ctx *ctx, enum rte_comp_xform_type type)
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_COMPRESS,
 			.compress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
-				.deflate.huffman = test_data->huffman_enc,
+				.algo = test_data->test_algo,
 				.level = test_data->level,
 				.window_size = test_data->window_sz,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_DEFLATE)
+			xform.compress.deflate.huffman = test_data->huffman_enc;
+		else if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.compress.lz4.flags = test_data->lz4_flags;
 		input_bufs = mem->decomp_bufs;
 		output_bufs = mem->comp_bufs;
 		out_seg_sz = test_data->out_seg_sz;
@@ -97,12 +102,14 @@ main_loop(struct cperf_benchmark_ctx *ctx, enum rte_comp_xform_type type)
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_DECOMPRESS,
 			.decompress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
+				.algo = test_data->test_algo,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.window_size = test_data->window_sz,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.decompress.lz4.flags = test_data->lz4_flags;
 		input_bufs = mem->comp_bufs;
 		output_bufs = mem->decomp_bufs;
 		out_seg_sz = test_data->seg_sz;
@@ -329,15 +336,17 @@ cperf_throughput_test_runner(void *test_ctx)
 	struct cperf_benchmark_ctx *ctx = test_ctx;
 	struct comp_test_data *test_data = ctx->ver.options;
 	uint32_t lcore = rte_lcore_id();
-	static rte_atomic16_t display_once = RTE_ATOMIC16_INIT(0);
+	static uint16_t display_once;
 	int i, ret = EXIT_SUCCESS;
 
 	ctx->ver.mem.lcore_id = lcore;
 
+	uint16_t exp = 0;
 	/*
 	 * printing information about current compression thread
 	 */
-	if (rte_atomic16_test_and_set(&ctx->ver.mem.print_info_once))
+	if (__atomic_compare_exchange_n(&ctx->ver.mem.print_info_once, &exp,
+				1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
 		printf("    lcore: %u,"
 				" driver name: %s,"
 				" device name: %s,"
@@ -355,43 +364,57 @@ cperf_throughput_test_runner(void *test_ctx)
 	 * First the verification part is needed
 	 */
 	if (cperf_verify_test_runner(&ctx->ver)) {
-		ret =  EXIT_FAILURE;
+		ret = EXIT_FAILURE;
 		goto end;
 	}
 
-	/*
-	 * Run the tests twice, discarding the first performance
-	 * results, before the cache is warmed up
-	 */
-	for (i = 0; i < 2; i++) {
-		if (main_loop(ctx, RTE_COMP_COMPRESS) < 0) {
-			ret = EXIT_FAILURE;
-			goto end;
+	if (test_data->test_op & COMPRESS) {
+		/*
+		 * Run the test twice, discarding the first performance
+		 * results, before the cache is warmed up
+		 */
+		for (i = 0; i < 2; i++) {
+			if (main_loop(ctx, RTE_COMP_COMPRESS) < 0) {
+				ret = EXIT_FAILURE;
+				goto end;
+			}
 		}
-	}
 
-	for (i = 0; i < 2; i++) {
-		if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0) {
-			ret = EXIT_FAILURE;
-			goto end;
-		}
-	}
-
-	ctx->comp_tsc_byte =
+		ctx->comp_tsc_byte =
 			(double)(ctx->comp_tsc_duration[test_data->level]) /
-					test_data->input_data_sz;
+						       test_data->input_data_sz;
+		ctx->comp_gbps = rte_get_tsc_hz() / ctx->comp_tsc_byte * 8 /
+								     1000000000;
+	} else {
+		ctx->comp_tsc_byte = 0;
+		ctx->comp_gbps = 0;
+	}
 
-	ctx->decomp_tsc_byte =
+	if (test_data->test_op & DECOMPRESS) {
+		/*
+		 * Run the test twice, discarding the first performance
+		 * results, before the cache is warmed up
+		 */
+		for (i = 0; i < 2; i++) {
+			if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0) {
+				ret = EXIT_FAILURE;
+				goto end;
+			}
+		}
+
+		ctx->decomp_tsc_byte =
 			(double)(ctx->decomp_tsc_duration[test_data->level]) /
-					test_data->input_data_sz;
+						       test_data->input_data_sz;
+		ctx->decomp_gbps = rte_get_tsc_hz() / ctx->decomp_tsc_byte * 8 /
+								     1000000000;
+	} else {
+		ctx->decomp_tsc_byte = 0;
+		ctx->decomp_gbps = 0;
+	}
 
-	ctx->comp_gbps = rte_get_tsc_hz() / ctx->comp_tsc_byte * 8 /
-			1000000000;
-
-	ctx->decomp_gbps = rte_get_tsc_hz() / ctx->decomp_tsc_byte * 8 /
-			1000000000;
-
-	if (rte_atomic16_test_and_set(&display_once)) {
+	exp = 0;
+	if (__atomic_compare_exchange_n(&display_once, &exp, 1, 0,
+			__ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
 		printf("\n%12s%6s%12s%17s%15s%16s\n",
 			"lcore id", "Level", "Comp size", "Comp ratio [%]",
 			"Comp [Gbps]", "Decomp [Gbps]");

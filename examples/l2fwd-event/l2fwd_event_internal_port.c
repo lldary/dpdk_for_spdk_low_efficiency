@@ -40,7 +40,7 @@ l2fwd_event_device_setup_internal_port(struct l2fwd_resources *rsrc)
 		ethdev_count++;
 	}
 
-	/* Event device configurtion */
+	/* Event device configuration */
 	rte_event_dev_info_get(event_d_id, &dev_info);
 
 	/* Enable implicit release */
@@ -71,7 +71,7 @@ l2fwd_event_device_setup_internal_port(struct l2fwd_resources *rsrc)
 		event_d_conf.nb_event_port_enqueue_depth =
 				dev_info.max_event_port_enqueue_depth;
 
-	/* Ignore Master core. */
+	/* Ignore Main core. */
 	num_workers = rte_lcore_count() - 1;
 	if (dev_info.max_event_ports < num_workers)
 		num_workers = dev_info.max_event_ports;
@@ -123,8 +123,10 @@ l2fwd_event_port_setup_internal_port(struct l2fwd_resources *rsrc)
 	if (def_p_conf.enqueue_depth < event_p_conf.enqueue_depth)
 		event_p_conf.enqueue_depth = def_p_conf.enqueue_depth;
 
-	event_p_conf.disable_implicit_release =
-		evt_rsrc->disable_implicit_release;
+	event_p_conf.event_port_cfg = 0;
+	if (evt_rsrc->disable_implicit_release)
+		event_p_conf.event_port_cfg |=
+			RTE_EVENT_PORT_CFG_DISABLE_IMPL_REL;
 
 	for (event_p_id = 0; event_p_id < evt_rsrc->evp.nb_ports;
 								event_p_id++) {
@@ -224,10 +226,32 @@ l2fwd_rx_tx_adapter_setup_internal_port(struct l2fwd_resources *rsrc)
 		rte_panic("Failed to allocate memery for Rx adapter\n");
 	}
 
-
+	/* Assigned ethernet port. 8< */
 	RTE_ETH_FOREACH_DEV(port_id) {
 		if ((rsrc->enabled_port_mask & (1 << port_id)) == 0)
 			continue;
+
+		if (rsrc->evt_vec.enabled) {
+			uint32_t cap;
+
+			if (rte_event_eth_rx_adapter_caps_get(event_d_id,
+							      port_id, &cap))
+				rte_panic(
+					"Failed to get event rx adapter capability");
+
+			if (cap & RTE_EVENT_ETH_RX_ADAPTER_CAP_EVENT_VECTOR) {
+				eth_q_conf.vector_sz = rsrc->evt_vec.size;
+				eth_q_conf.vector_timeout_ns =
+					rsrc->evt_vec.timeout_ns;
+				eth_q_conf.vector_mp = rsrc->evt_vec_pool;
+				eth_q_conf.rx_queue_flags |=
+				RTE_EVENT_ETH_RX_ADAPTER_QUEUE_EVENT_VECTOR;
+			} else {
+				rte_panic(
+					"Rx adapter doesn't support event vector");
+			}
+		}
+
 		ret = rte_event_eth_rx_adapter_create(adapter_id, event_d_id,
 						&evt_rsrc->def_p_conf);
 		if (ret)
@@ -284,6 +308,7 @@ l2fwd_rx_tx_adapter_setup_internal_port(struct l2fwd_resources *rsrc)
 		evt_rsrc->tx_adptr.tx_adptr[adapter_id] = adapter_id;
 		adapter_id++;
 	}
+	/* >8 End of assigned ethernet port. */
 }
 
 void

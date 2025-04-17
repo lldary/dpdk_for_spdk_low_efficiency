@@ -19,7 +19,7 @@
 #pragma GCC diagnostic error "-Wpedantic"
 #endif
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_ether.h>
 #include <rte_interrupts.h>
 #include <rte_mempool.h>
@@ -74,12 +74,11 @@ enum mlx4_mp_req_type {
 	MLX4_MP_REQ_STOP_RXTX,
 };
 
-/* Pameters for IPC. */
+/* Parameters for IPC. */
 struct mlx4_mp_param {
 	enum mlx4_mp_req_type type;
 	int port_id;
 	int result;
-	RTE_STD_C11
 	union {
 		uintptr_t addr; /* MLX4_MP_REQ_CREATE_MR */
 	} args;
@@ -176,7 +175,7 @@ struct mlx4_priv {
 	uint32_t tso_max_payload_sz; /**< Max supported TSO payload size. */
 	uint32_t hw_rss_max_qps; /**< Max Rx Queues supported by RSS. */
 	uint64_t hw_rss_sup; /**< Supported RSS hash fields (Verbs format). */
-	struct rte_intr_handle intr_handle; /**< Port interrupt handle. */
+	struct rte_intr_handle *intr_handle; /**< Port interrupt handle. */
 	struct mlx4_drop *drop; /**< Shared resources for drop flow rules. */
 	struct {
 		uint32_t dev_gen; /* Generation number to flush local caches. */
@@ -196,6 +195,10 @@ struct mlx4_priv {
 
 #define PORT_ID(priv) ((priv)->dev_data->port_id)
 #define ETH_DEV(priv) (&rte_eth_devices[PORT_ID(priv)])
+
+int mlx4_proc_priv_init(struct rte_eth_dev *dev);
+void mlx4_proc_priv_uninit(struct rte_eth_dev *dev);
+
 
 /* mlx4_ethdev.c */
 
@@ -226,7 +229,8 @@ int mlx4_flow_ctrl_get(struct rte_eth_dev *dev,
 		       struct rte_eth_fc_conf *fc_conf);
 int mlx4_flow_ctrl_set(struct rte_eth_dev *dev,
 		       struct rte_eth_fc_conf *fc_conf);
-const uint32_t *mlx4_dev_supported_ptypes_get(struct rte_eth_dev *dev);
+const uint32_t *mlx4_dev_supported_ptypes_get(struct rte_eth_dev *dev,
+					      size_t *no_of_elements);
 int mlx4_is_removed(struct rte_eth_dev *dev);
 
 /* mlx4_intr.c */

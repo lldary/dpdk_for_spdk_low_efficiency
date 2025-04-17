@@ -17,7 +17,6 @@
 #include <rte_memory.h>
 #include <rte_memzone.h>
 #include <rte_eal.h>
-#include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_log.h>
 #include <rte_per_lcore.h>
@@ -268,4 +267,7 @@ main(int argc, char *argv[])
 
 		need_flush = 1;
 	}
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 }

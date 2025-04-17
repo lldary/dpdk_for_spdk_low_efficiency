@@ -1,11 +1,44 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2019-2020 Broadcom
+ * Copyright(c) 2019-2023 Broadcom
  * All rights reserved.
  */
 
 #include "bitalloc.h"
 
 #define BITALLOC_MAX_LEVELS 6
+
+/* Finds the last bit set plus 1, equivalent to gcc __builtin_fls */
+static int
+ba_fls(bitalloc_word_t v)
+{
+	int c = 32;
+
+	if (!v)
+		return 0;
+
+	if (!(v & 0xFFFF0000u)) {
+		v <<= 16;
+		c -= 16;
+	}
+	if (!(v & 0xFF000000u)) {
+		v <<= 8;
+		c -= 8;
+	}
+	if (!(v & 0xF0000000u)) {
+		v <<= 4;
+		c -= 4;
+	}
+	if (!(v & 0xC0000000u)) {
+		v <<= 2;
+		c -= 2;
+	}
+	if (!(v & 0x80000000u)) {
+		v <<= 1;
+		c -= 1;
+	}
+
+	return c;
+}
 
 /* Finds the first bit set plus 1, equivalent to gcc __builtin_ffs */
 static int
@@ -31,7 +64,7 @@ ba_ffs(bitalloc_word_t v)
 }
 
 int
-ba_init(struct bitalloc *pool, int size)
+ba_init(struct bitalloc *pool, int size, bool free)
 {
 	bitalloc_word_t *mem = (bitalloc_word_t *)pool;
 	int       i;
@@ -67,9 +100,11 @@ ba_init(struct bitalloc *pool, int size)
 		pool->storage[offset++] = words[--lev];
 	}
 
-	/* Free the entire pool */
-	for (i = 0; i < size; i++)
-		ba_free(pool, i);
+	/* Free the entire pool if it is required*/
+	if (free) {
+		for (i = 0; i < size; i++)
+			ba_free(pool, i);
+	}
 
 	return 0;
 }
@@ -118,6 +153,79 @@ ba_alloc(struct bitalloc *pool)
 	int clear = 0;
 
 	return ba_alloc_helper(pool, 0, 1, 32, 0, &clear);
+}
+
+/**
+ * Help function to alloc entry from highest available index
+ *
+ * Searching the pool from highest index for the empty entry.
+ *
+ * [in] pool
+ *   Pointer to the resource pool
+ *
+ * [in] offset
+ *   Offset of the storage in the pool
+ *
+ * [in] words
+ *   Number of words in this level
+ *
+ * [in] size
+ *   Number of entries in this level
+ *
+ * [in] index
+ *   Index of words that has the entry
+ *
+ * [in] clear
+ *   Indicate if a bit needs to be clear due to the entry is allocated
+ *
+ * Returns:
+ *     0 - Success
+ *    -1 - Failure
+ */
+static int
+ba_alloc_reverse_helper(struct bitalloc *pool,
+			int offset,
+			int words,
+			unsigned int size,
+			int index,
+			int *clear)
+{
+	bitalloc_word_t *storage = &pool->storage[offset];
+	int loc = ba_fls(storage[index]);
+	int r;
+
+	if (loc == 0)
+		return -1;
+
+	loc--;
+
+	if (pool->size > size) {
+		r = ba_alloc_reverse_helper(pool,
+					    offset + words + 1,
+					    storage[words],
+					    size * 32,
+					    index * 32 + loc,
+					    clear);
+	} else {
+		r = index * 32 + loc;
+		*clear = 1;
+		pool->free_count--;
+	}
+
+	if (*clear) {
+		storage[index] &= ~(1 << loc);
+		*clear = (storage[index] == 0);
+	}
+
+	return r;
+}
+
+int
+ba_alloc_reverse(struct bitalloc *pool)
+{
+	int clear = 0;
+
+	return ba_alloc_reverse_helper(pool, 0, 1, 32, 0, &clear);
 }
 
 static int

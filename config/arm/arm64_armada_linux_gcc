@@ -1,6 +1,6 @@
 [binaries]
-c = 'aarch64-linux-gnu-gcc'
-cpp = 'aarch64-linux-gnu-cpp'
+c = ['ccache', 'aarch64-linux-gnu-gcc']
+cpp = ['ccache', 'aarch64-linux-gnu-g++']
 ar = 'aarch64-linux-gnu-ar'
 as = 'aarch64-linux-gnu-as'
 strip = 'aarch64-linux-gnu-strip'
@@ -14,4 +14,4 @@ cpu = 'armv8-a'
 endian = 'little'
 
 [properties]
-implementor_id = '0x56'
+platform = 'armada'

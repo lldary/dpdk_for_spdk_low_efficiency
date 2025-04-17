@@ -6,6 +6,7 @@
 #include <rte_log.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
+#include <rte_ether.h>
 #include <rte_security.h>
 #include <rte_security_driver.h>
 
@@ -199,7 +200,6 @@
 			expected_mempool_usage, mempool_usage);		\
 } while (0)
 
-
 /**
  * Mockup structures and functions for rte_security_ops;
  *
@@ -218,7 +218,7 @@
  * increases .called counter. Function returns value stored in .ret field
  * of the structure.
  * In case of some parameters in some functions the expected value is unknown
- * and cannot be detrmined prior to call. Such parameters are stored
+ * and cannot be determined prior to call. Such parameters are stored
  * in structure and can be compared or analyzed later in test case code.
  *
  * Below structures and functions follow the rules just described.
@@ -234,28 +234,29 @@
 static struct mock_session_create_data {
 	void *device;
 	struct rte_security_session_conf *conf;
-	struct rte_security_session *sess;
+	void *sess;
 	struct rte_mempool *mp;
+	struct rte_mempool *priv_mp;
 
 	int ret;
 
 	int called;
 	int failed;
-} mock_session_create_exp = {NULL, NULL, NULL, NULL, 0, 0, 0};
+} mock_session_create_exp = {NULL, NULL, NULL, NULL, NULL, 0, 0, 0};
 
 static int
 mock_session_create(void *device,
 		struct rte_security_session_conf *conf,
-		struct rte_security_session *sess,
-		struct rte_mempool *mp)
+		struct rte_security_session *sess)
 {
 	mock_session_create_exp.called++;
 
 	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_session_create_exp, device);
 	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_session_create_exp, conf);
-	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_session_create_exp, mp);
 
-	mock_session_create_exp.sess = sess;
+	if (mock_session_create_exp.ret == 0) {
+		mock_session_create_exp.sess = sess;
+	}
 
 	return mock_session_create_exp.ret;
 }
@@ -267,7 +268,7 @@ mock_session_create(void *device,
  */
 static struct mock_session_update_data {
 	void *device;
-	struct rte_security_session *sess;
+	void *sess;
 	struct rte_security_session_conf *conf;
 
 	int ret;
@@ -321,7 +322,7 @@ mock_session_get_size(void *device)
  */
 static struct mock_session_stats_get_data {
 	void *device;
-	struct rte_security_session *sess;
+	void *sess;
 	struct rte_security_stats *stats;
 
 	int ret;
@@ -351,7 +352,7 @@ mock_session_stats_get(void *device,
  */
 static struct mock_session_destroy_data {
 	void *device;
-	struct rte_security_session *sess;
+	void *sess;
 
 	int ret;
 
@@ -363,7 +364,6 @@ static int
 mock_session_destroy(void *device, struct rte_security_session *sess)
 {
 	mock_session_destroy_exp.called++;
-
 	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_session_destroy_exp, device);
 	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_session_destroy_exp, sess);
 
@@ -377,7 +377,7 @@ mock_session_destroy(void *device, struct rte_security_session *sess)
  */
 static struct mock_set_pkt_metadata_data {
 	void *device;
-	struct rte_security_session *sess;
+	void *sess;
 	struct rte_mbuf *m;
 	void *params;
 
@@ -401,43 +401,6 @@ mock_set_pkt_metadata(void *device,
 	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_set_pkt_metadata_exp, params);
 
 	return mock_set_pkt_metadata_exp.ret;
-}
-
-/**
- * get_userdata mockup
- *
- * Verified parameters: device, md.
- * The userdata parameter works as an output parameter, so a passed address
- * is verified not to be NULL and filled with userdata stored in structure.
- */
-static struct mock_get_userdata_data {
-	void *device;
-	uint64_t md;
-	void *userdata;
-
-	int ret;
-
-	int called;
-	int failed;
-} mock_get_userdata_exp = {NULL, 0UL, NULL, 0, 0, 0};
-
-static int
-mock_get_userdata(void *device,
-		uint64_t md,
-		void **userdata)
-{
-	mock_get_userdata_exp.called++;
-
-	MOCK_TEST_ASSERT_POINTER_PARAMETER(mock_get_userdata_exp, device);
-	MOCK_TEST_ASSERT_U64_PARAMETER(mock_get_userdata_exp, md);
-
-	MOCK_TEST_ASSERT_NOT_NULL(mock_get_userdata_exp.failed,
-			userdata,
-			"Expecting parameter userdata not to be NULL but it's %p",
-			userdata);
-	*userdata = mock_get_userdata_exp.userdata;
-
-	return mock_get_userdata_exp.ret;
 }
 
 /**
@@ -483,7 +446,6 @@ struct rte_security_ops mock_ops = {
 	.session_stats_get = mock_session_stats_get,
 	.session_destroy = mock_session_destroy,
 	.set_pkt_metadata = mock_set_pkt_metadata,
-	.get_userdata = mock_get_userdata,
 	.capabilities_get = mock_capabilities_get,
 };
 
@@ -513,7 +475,7 @@ static struct security_testsuite_params {
 static struct security_unittest_params {
 	struct rte_security_ctx ctx;
 	struct rte_security_session_conf conf;
-	struct rte_security_session *sess;
+	void *sess;
 } unittest_params = {
 	.ctx = {
 		.device = NULL,
@@ -523,9 +485,12 @@ static struct security_unittest_params {
 	.sess = NULL,
 };
 
-#define SECURITY_TEST_MEMPOOL_NAME "SecurityTestsMempoolName"
+#define SECURITY_TEST_MEMPOOL_NAME "SecurityTestMp"
+#define SECURITY_TEST_PRIV_MEMPOOL_NAME "SecurityTestPrivMp"
 #define SECURITY_TEST_MEMPOOL_SIZE 15
-#define SECURITY_TEST_SESSION_OBJECT_SIZE sizeof(struct rte_security_session)
+#define SECURITY_TEST_SESSION_PRIV_OBJ_SZ 64
+#define SECURITY_TEST_SESSION_OBJ_SZ (sizeof(struct rte_security_session) + \
+					SECURITY_TEST_SESSION_PRIV_OBJ_SZ)
 
 /**
  * testsuite_setup initializes whole test suite parameters.
@@ -539,11 +504,12 @@ testsuite_setup(void)
 	ts_params->session_mpool = rte_mempool_create(
 			SECURITY_TEST_MEMPOOL_NAME,
 			SECURITY_TEST_MEMPOOL_SIZE,
-			SECURITY_TEST_SESSION_OBJECT_SIZE,
+			SECURITY_TEST_SESSION_OBJ_SZ,
 			0, 0, NULL, NULL, NULL, NULL,
 			SOCKET_ID_ANY, 0);
 	TEST_ASSERT_NOT_NULL(ts_params->session_mpool,
 			"Cannot create mempool %s\n", rte_strerror(rte_errno));
+
 	return TEST_SUCCESS;
 }
 
@@ -580,7 +546,6 @@ ut_setup(void)
 	mock_session_stats_get_exp.called = 0;
 	mock_session_destroy_exp.called = 0;
 	mock_set_pkt_metadata_exp.called = 0;
-	mock_get_userdata_exp.called = 0;
 	mock_capabilities_get_exp.called = 0;
 
 	mock_session_create_exp.failed = 0;
@@ -589,7 +554,6 @@ ut_setup(void)
 	mock_session_stats_get_exp.failed = 0;
 	mock_session_destroy_exp.failed = 0;
 	mock_set_pkt_metadata_exp.failed = 0;
-	mock_get_userdata_exp.failed = 0;
 	mock_capabilities_get_exp.failed = 0;
 
 	return TEST_SUCCESS;
@@ -646,7 +610,7 @@ ut_setup_with_session(void)
 {
 	struct security_unittest_params *ut_params = &unittest_params;
 	struct security_testsuite_params *ts_params = &testsuite_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	int ret = ut_setup();
 	if (ret != TEST_SUCCESS)
@@ -697,7 +661,7 @@ test_session_create_inv_context(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	sess = rte_security_session_create(NULL, &ut_params->conf,
 			ts_params->session_mpool);
@@ -719,7 +683,7 @@ test_session_create_inv_context_ops(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	ut_params->ctx.ops = NULL;
 
@@ -743,7 +707,7 @@ test_session_create_inv_context_ops_fun(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	ut_params->ctx.ops = &empty_ops;
 
@@ -766,7 +730,7 @@ test_session_create_inv_configuration(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	sess = rte_security_session_create(&ut_params->ctx, NULL,
 			ts_params->session_mpool);
@@ -780,16 +744,16 @@ test_session_create_inv_configuration(void)
 }
 
 /**
- * Test execution of rte_security_session_create with NULL mp parameter
+ * Test execution of rte_security_session_create with NULL session
+ * mempool
  */
 static int
 test_session_create_inv_mempool(void)
 {
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
-	sess = rte_security_session_create(&ut_params->ctx, &ut_params->conf,
-			NULL);
+	sess = rte_security_session_create(&ut_params->ctx, &ut_params->conf, NULL);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_create,
 			sess, NULL, "%p");
 	TEST_ASSERT_MOCK_CALLS(mock_session_create_exp, 0);
@@ -808,8 +772,8 @@ test_session_create_mempool_empty(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *tmp[SECURITY_TEST_MEMPOOL_SIZE];
-	struct rte_security_session *sess;
+	void *tmp[SECURITY_TEST_MEMPOOL_SIZE];
+	void *sess;
 
 	/* Get all available objects from mempool. */
 	int i, ret;
@@ -831,8 +795,10 @@ test_session_create_mempool_empty(void)
 	TEST_ASSERT_SESSION_COUNT(0);
 
 	/* Put objects back to the pool. */
-	for (i = 0; i < SECURITY_TEST_MEMPOOL_SIZE; ++i)
-		rte_mempool_put(ts_params->session_mpool, (void *)(tmp[i]));
+	for (i = 0; i < SECURITY_TEST_MEMPOOL_SIZE; ++i) {
+		rte_mempool_put(ts_params->session_mpool,
+				(void *)(tmp[i]));
+	}
 	TEST_ASSERT_MEMPOOL_USAGE(0);
 
 	return TEST_SUCCESS;
@@ -847,7 +813,7 @@ test_session_create_ops_failure(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	mock_session_create_exp.device = NULL;
 	mock_session_create_exp.conf = &ut_params->conf;
@@ -873,7 +839,7 @@ test_session_create_success(void)
 {
 	struct security_testsuite_params *ts_params = &testsuite_params;
 	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_session *sess;
+	void *sess;
 
 	mock_session_create_exp.device = NULL;
 	mock_session_create_exp.conf = &ut_params->conf;
@@ -1054,7 +1020,7 @@ test_session_get_size_inv_context(void)
 	unsigned int ret = rte_security_session_get_size(NULL);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_get_size,
 			ret, 0, "%u");
-	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 0);
+	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 1);
 
 	return TEST_SUCCESS;
 }
@@ -1072,7 +1038,7 @@ test_session_get_size_inv_context_ops(void)
 	unsigned int ret = rte_security_session_get_size(&ut_params->ctx);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_get_size,
 			ret, 0, "%u");
-	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 0);
+	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 1);
 
 	return TEST_SUCCESS;
 }
@@ -1090,7 +1056,7 @@ test_session_get_size_inv_context_ops_fun(void)
 	unsigned int ret = rte_security_session_get_size(&ut_params->ctx);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_get_size,
 			ret, 0, "%u");
-	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 0);
+	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 1);
 
 	return TEST_SUCCESS;
 }
@@ -1109,8 +1075,8 @@ test_session_get_size_ops_failure(void)
 
 	unsigned int ret = rte_security_session_get_size(&ut_params->ctx);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_get_size,
-			ret, 0, "%u");
-	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 1);
+			ret, 64, "%u");
+	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 2);
 
 	return TEST_SUCCESS;
 }
@@ -1124,12 +1090,12 @@ test_session_get_size_success(void)
 	struct security_unittest_params *ut_params = &unittest_params;
 
 	mock_session_get_size_exp.device = NULL;
-	mock_session_get_size_exp.ret = 1024;
+	mock_session_get_size_exp.ret = 64;
 
 	unsigned int ret = rte_security_session_get_size(&ut_params->ctx);
 	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_session_get_size,
-			ret, 1024U, "%u");
-	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 1);
+			ret, 128U, "%u");
+	TEST_ASSERT_MOCK_CALLS(mock_session_get_size_exp, 2);
 
 	return TEST_SUCCESS;
 }
@@ -1562,121 +1528,6 @@ test_set_pkt_metadata_success(void)
 	return TEST_SUCCESS;
 }
 
-
-/**
- * rte_security_get_userdata tests
- */
-
-/**
- * Test execution of rte_security_get_userdata with NULL instance
- */
-static int
-test_get_userdata_inv_context(void)
-{
-#ifdef RTE_DEBUG
-	uint64_t md = 0xDEADBEEF;
-
-	void *ret = rte_security_get_userdata(NULL, md);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_get_userdata,
-			ret, NULL, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_get_userdata_exp, 0);
-
-	return TEST_SUCCESS;
-#else
-	return TEST_SKIPPED;
-#endif
-}
-
-/**
- * Test execution of rte_security_get_userdata with invalid
- * security operations structure (NULL)
- */
-static int
-test_get_userdata_inv_context_ops(void)
-{
-#ifdef RTE_DEBUG
-	struct security_unittest_params *ut_params = &unittest_params;
-	uint64_t md = 0xDEADBEEF;
-	ut_params->ctx.ops = NULL;
-
-	void *ret = rte_security_get_userdata(&ut_params->ctx, md);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_get_userdata,
-			ret, NULL, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_get_userdata_exp, 0);
-
-	return TEST_SUCCESS;
-#else
-	return TEST_SKIPPED;
-#endif
-}
-
-/**
- * Test execution of rte_security_get_userdata with empty
- * security operations
- */
-static int
-test_get_userdata_inv_context_ops_fun(void)
-{
-	struct security_unittest_params *ut_params = &unittest_params;
-	uint64_t md = 0xDEADBEEF;
-	ut_params->ctx.ops = &empty_ops;
-
-	void *ret = rte_security_get_userdata(&ut_params->ctx, md);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_get_userdata,
-			ret, NULL, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_get_userdata_exp, 0);
-
-	return TEST_SUCCESS;
-}
-
-/**
- * Test execution of rte_security_get_userdata when get_userdata
- * security operation fails
- */
-static int
-test_get_userdata_ops_failure(void)
-{
-	struct security_unittest_params *ut_params = &unittest_params;
-	uint64_t md = 0xDEADBEEF;
-	void *userdata = (void *)0x7E577E57;
-
-	mock_get_userdata_exp.device = NULL;
-	mock_get_userdata_exp.md = md;
-	mock_get_userdata_exp.userdata = userdata;
-	mock_get_userdata_exp.ret = -1;
-
-	void *ret = rte_security_get_userdata(&ut_params->ctx, md);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_get_userdata,
-			ret, NULL, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_get_userdata_exp, 1);
-
-	return TEST_SUCCESS;
-}
-
-/**
- * Test execution of rte_security_get_userdata in successful execution path
- */
-static int
-test_get_userdata_success(void)
-{
-	struct security_unittest_params *ut_params = &unittest_params;
-	uint64_t md = 0xDEADBEEF;
-	void *userdata = (void *)0x7E577E57;
-
-	mock_get_userdata_exp.device = NULL;
-	mock_get_userdata_exp.md = md;
-	mock_get_userdata_exp.userdata = userdata;
-	mock_get_userdata_exp.ret = 0;
-
-	void *ret = rte_security_get_userdata(&ut_params->ctx, md);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_get_userdata,
-			ret, userdata, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_get_userdata_exp, 1);
-
-	return TEST_SUCCESS;
-}
-
-
 /**
  * rte_security_capabilities_get tests
  */
@@ -1978,41 +1829,6 @@ test_capability_get_no_matching_protocol(void)
 }
 
 /**
- * Test execution of rte_security_capability_get when macsec protocol
- * is searched and capabilities table contain proper entry.
- * However macsec records search is not supported in rte_security.
- */
-static int
-test_capability_get_no_support_for_macsec(void)
-{
-	struct security_unittest_params *ut_params = &unittest_params;
-	struct rte_security_capability_idx idx = {
-		.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
-		.protocol = RTE_SECURITY_PROTOCOL_MACSEC,
-	};
-	struct rte_security_capability capabilities[] = {
-		{
-			.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
-			.protocol = RTE_SECURITY_PROTOCOL_MACSEC,
-		},
-		{
-			.action = RTE_SECURITY_ACTION_TYPE_NONE,
-		},
-	};
-
-	mock_capabilities_get_exp.device = NULL;
-	mock_capabilities_get_exp.ret = capabilities;
-
-	const struct rte_security_capability *ret;
-	ret = rte_security_capability_get(&ut_params->ctx, &idx);
-	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_capability_get,
-			ret, NULL, "%p");
-	TEST_ASSERT_MOCK_CALLS(mock_capabilities_get_exp, 1);
-
-	return TEST_SUCCESS;
-}
-
-/**
  * Test execution of rte_security_capability_get when capabilities table
  * does not contain entry with matching ipsec proto field
  */
@@ -2269,6 +2085,89 @@ test_capability_get_pdcp_match(void)
 }
 
 /**
+ * Test execution of rte_security_capability_get when capabilities table
+ * does not contain entry with matching DOCSIS direction field
+ */
+static int
+test_capability_get_docsis_mismatch_direction(void)
+{
+	struct security_unittest_params *ut_params = &unittest_params;
+	struct rte_security_capability_idx idx = {
+		.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
+		.protocol = RTE_SECURITY_PROTOCOL_DOCSIS,
+		.docsis = {
+			.direction = RTE_SECURITY_DOCSIS_DOWNLINK
+		},
+	};
+	struct rte_security_capability capabilities[] = {
+		{
+			.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
+			.protocol = RTE_SECURITY_PROTOCOL_DOCSIS,
+			.docsis = {
+				.direction = RTE_SECURITY_DOCSIS_UPLINK
+			},
+		},
+		{
+			.action = RTE_SECURITY_ACTION_TYPE_NONE,
+		},
+	};
+
+	mock_capabilities_get_exp.device = NULL;
+	mock_capabilities_get_exp.ret = capabilities;
+
+	const struct rte_security_capability *ret;
+	ret = rte_security_capability_get(&ut_params->ctx, &idx);
+	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_capability_get,
+			ret, NULL, "%p");
+	TEST_ASSERT_MOCK_CALLS(mock_capabilities_get_exp, 1);
+
+	return TEST_SUCCESS;
+}
+
+/**
+ * Test execution of rte_security_capability_get when capabilities table
+ * contains matching DOCSIS entry
+ */
+static int
+test_capability_get_docsis_match(void)
+{
+	struct security_unittest_params *ut_params = &unittest_params;
+	struct rte_security_capability_idx idx = {
+		.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
+		.protocol = RTE_SECURITY_PROTOCOL_DOCSIS,
+		.docsis = {
+			.direction = RTE_SECURITY_DOCSIS_UPLINK
+		},
+	};
+	struct rte_security_capability capabilities[] = {
+		{
+			.action = RTE_SECURITY_ACTION_TYPE_INLINE_CRYPTO,
+		},
+		{
+			.action = RTE_SECURITY_ACTION_TYPE_LOOKASIDE_PROTOCOL,
+			.protocol = RTE_SECURITY_PROTOCOL_DOCSIS,
+			.docsis = {
+				.direction = RTE_SECURITY_DOCSIS_UPLINK
+			},
+		},
+		{
+			.action = RTE_SECURITY_ACTION_TYPE_NONE,
+		},
+	};
+
+	mock_capabilities_get_exp.device = NULL;
+	mock_capabilities_get_exp.ret = capabilities;
+
+	const struct rte_security_capability *ret;
+	ret = rte_security_capability_get(&ut_params->ctx, &idx);
+	TEST_ASSERT_MOCK_FUNCTION_CALL_RET(rte_security_capability_get,
+			ret, &capabilities[1], "%p");
+	TEST_ASSERT_MOCK_CALLS(mock_capabilities_get_exp, 1);
+
+	return TEST_SUCCESS;
+}
+
+/**
  * Declaration of testcases
  */
 static struct unit_test_suite security_testsuite  = {
@@ -2359,17 +2258,6 @@ static struct unit_test_suite security_testsuite  = {
 				test_set_pkt_metadata_success),
 
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_get_userdata_inv_context),
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_get_userdata_inv_context_ops),
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_get_userdata_inv_context_ops_fun),
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_get_userdata_ops_failure),
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_get_userdata_success),
-
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capabilities_get_inv_context),
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capabilities_get_inv_context_ops),
@@ -2397,8 +2285,6 @@ static struct unit_test_suite security_testsuite  = {
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capability_get_no_matching_protocol),
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
-				test_capability_get_no_support_for_macsec),
-		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capability_get_ipsec_mismatch_proto),
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capability_get_ipsec_mismatch_mode),
@@ -2410,6 +2296,10 @@ static struct unit_test_suite security_testsuite  = {
 				test_capability_get_pdcp_mismatch_domain),
 		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
 				test_capability_get_pdcp_match),
+		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
+				test_capability_get_docsis_mismatch_direction),
+		TEST_CASE_ST(ut_setup_with_session, ut_teardown,
+				test_capability_get_docsis_match),
 
 		TEST_CASES_END() /**< NULL terminate unit test array */
 	}
@@ -2424,4 +2314,4 @@ test_security(void)
 	return unit_test_suite_runner(&security_testsuite);
 }
 
-REGISTER_TEST_COMMAND(security_autotest, test_security);
+REGISTER_FAST_TEST(security_autotest, false, true, test_security);

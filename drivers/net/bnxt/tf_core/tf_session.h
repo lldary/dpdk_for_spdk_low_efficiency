@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2019-2020 Broadcom
+ * Copyright(c) 2019-2023 Broadcom
  * All rights reserved.
  */
 
@@ -8,23 +8,46 @@
 
 #include <stdint.h>
 #include <stdlib.h>
-
 #include "bitalloc.h"
 #include "tf_core.h"
+#include "tf_device.h"
 #include "tf_rm.h"
-#include "tf_tbl.h"
+#include "tf_resources.h"
+#include "stack.h"
+#include "ll.h"
+
+/**
+ * The Session module provides session control support. A session is
+ * to the ULP layer known as a session_info instance. The session
+ * private data is the actual session.
+ *
+ * Session manages:
+ *   - The device and all the resources related to the device.
+ *   - Any session sharing between ULP applications
+ */
 
 /** Session defines
  */
-#define TF_SESSIONS_MAX	          1          /** max # sessions */
 #define TF_SESSION_ID_INVALID     0xFFFFFFFF /** Invalid Session ID define */
 
-/** Session
+/**
+ * At this stage we are using fixed size entries so that each
+ * stack entry represents either 2 or 4 RT (f/n)blocks. So we
+ * take the total block allocation for truflow and divide that
+ * by either 2 or 4.
+ */
+#ifdef TF_EM_ENTRY_IPV4_ONLY
+#define TF_SESSION_EM_ENTRY_SIZE 2 /* 2 blocks per entry */
+#else
+#define TF_SESSION_EM_ENTRY_SIZE 4 /* 4 blocks per entry */
+#endif
+
+/**
+ * Session
  *
  * Shared memory containing private TruFlow session information.
  * Through this structure the session can keep track of resource
- * allocations and (if so configured) any shadow copy of flow
- * information.
+ * allocations. It also holds info about Session Clients.
  *
  * Memory is assigned to the Truflow instance by way of
  * tf_open_session. Memory is allocated and owned by i.e. ULP.
@@ -33,19 +56,144 @@
  * tf_session_info.
  */
 struct tf_session {
-	/** TrueFlow Version. Used to control the structure layout
+	/** TruFlow Version. Used to control the structure layout
 	 * when sharing sessions. No guarantee that a secondary
 	 * process would come from the same version of an executable.
 	 */
 	struct tf_session_version ver;
 
-	/** Device type, provided by tf_open_session().
-	 */
-	enum tf_device_type device_type;
-
-	/** Session ID, allocated by FW on tf_open_session().
+	/**
+	 * Session ID, allocated by FW on tf_open_session()
 	 */
 	union tf_session_id session_id;
+
+	/**
+	 * Boolean controlling the use and availability of shared session.
+	 * Shared session will allow the application to share resources
+	 * on the firmware side without having to allocate them on firmware.
+	 * Additional private session core_data will be allocated if this
+	 * boolean is set to 'true', default 'false'.
+	 *
+	 */
+	bool shared_session;
+
+	/**
+	 * Boolean controlling the split of hardware resources for hotupgrade.
+	 */
+	bool shared_session_hotup;
+
+	/**
+	 * This flag indicates the shared session on firmware side is created
+	 * by this session. Some privileges may be assigned to this session.
+	 *
+	 */
+	bool shared_session_creator;
+
+	/**
+	 * Session Reference Count. To keep track of functions per
+	 * session the ref_count is updated. There is also a
+	 * parallel TruFlow Firmware ref_count in case the TruFlow
+	 * Core goes away without informing the Firmware.
+	 */
+	uint8_t ref_count;
+
+	/**
+	 * Session Reference Count for attached sessions. To keep
+	 * track of application sharing of a session the
+	 * ref_count_attach is updated.
+	 */
+	uint8_t ref_count_attach;
+
+	/**
+	 * Device handle
+	 */
+	struct tf_dev_info dev;
+	/**
+	 * Device init flag. False if Device is not fully initialized,
+	 * else true.
+	 */
+	bool dev_init;
+
+	/**
+	 * Linked list of clients registered for this session
+	 */
+	struct ll client_ll;
+
+	/**
+	 * em ext db reference for the session
+	 */
+	void *em_ext_db_handle;
+
+	/**
+	 * tcam db reference for the session
+	 */
+	void *tcam_db_handle;
+
+	/**
+	 * table db reference for the session
+	 */
+	void *tbl_db_handle;
+
+	/**
+	 * identifier db reference for the session
+	 */
+	void *id_db_handle;
+
+	/**
+	 * em db reference for the session
+	 */
+	void *em_db_handle;
+
+	/**
+	 * EM allocator for session
+	 */
+	void *em_pool[TF_DIR_MAX];
+
+	/**
+	 * tcam db reference for the session
+	 */
+	void *tcam_shared_db_handle;
+
+	/**
+	 * SRAM db reference for the session
+	 */
+	void *sram_handle;
+
+	/**
+	 * if table db reference for the session
+	 */
+	void *if_tbl_db_handle;
+
+	/**
+	 * global db reference for the session
+	 */
+	void *global_db_handle;
+
+	/**
+	 * Number of slices per row for WC TCAM
+	 */
+	uint16_t wc_num_slices_per_row;
+
+	/**
+	 * Indicates if TCAM is controlled by TCAM Manager
+	 */
+	int tcam_mgr_control[TF_DIR_MAX][TF_TCAM_TBL_TYPE_MAX];
+
+};
+
+/**
+ * Session Client
+ *
+ * Shared memory for each of the Session Clients. A session can have
+ * one or more clients.
+ */
+struct tf_session_client {
+	/**
+	 * Linked list of clients
+	 */
+	struct ll_entry ll_entry; /* For inserting in link list, must be
+				   * first field of struct.
+				   */
 
 	/**
 	 * String containing name of control channel interface to be
@@ -57,238 +205,570 @@ struct tf_session {
 	char ctrl_chan_name[TF_SESSION_NAME_MAX];
 
 	/**
-	 * Boolean controlling the use and availability of shadow
-	 * copy. Shadow copy will allow the TruFlow Core to keep track
-	 * of resource content on the firmware side without having to
-	 * query firmware. Additional private session core_data will
-	 * be allocated if this boolean is set to 'true', default
-	 * 'false'.
-	 *
-	 * Size of memory depends on the NVM Resource settings for the
-	 * control channel.
+	 * Firmware FID, learned at time of Session Client create.
 	 */
-	bool shadow_copy;
+	uint16_t fw_fid;
 
 	/**
-	 * Session Reference Count. To keep track of functions per
-	 * session the ref_count is incremented. There is also a
-	 * parallel TruFlow Firmware ref_count in case the TruFlow
-	 * Core goes away without informing the Firmware.
+	 * Session Client ID, allocated by FW on tf_register_session()
 	 */
-	uint8_t ref_count;
-
-	/** Session HW and SRAM resources */
-	struct tf_rm_db resc;
-
-	/* Session HW resource pools */
-
-	/** RX L2 CTXT TCAM Pool */
-	BITALLOC_INST(TF_L2_CTXT_TCAM_POOL_NAME_RX, TF_NUM_L2_CTXT_TCAM);
-	/** TX L2 CTXT TCAM Pool */
-	BITALLOC_INST(TF_L2_CTXT_TCAM_POOL_NAME_TX, TF_NUM_L2_CTXT_TCAM);
-
-	/** RX Profile Func Pool */
-	BITALLOC_INST(TF_PROF_FUNC_POOL_NAME_RX, TF_NUM_PROF_FUNC);
-	/** TX Profile Func Pool */
-	BITALLOC_INST(TF_PROF_FUNC_POOL_NAME_TX, TF_NUM_PROF_FUNC);
-
-	/** RX Profile TCAM Pool */
-	BITALLOC_INST(TF_PROF_TCAM_POOL_NAME_RX, TF_NUM_PROF_TCAM);
-	/** TX Profile TCAM Pool */
-	BITALLOC_INST(TF_PROF_TCAM_POOL_NAME_TX, TF_NUM_PROF_TCAM);
-
-	/** RX EM Profile ID Pool */
-	BITALLOC_INST(TF_EM_PROF_ID_POOL_NAME_RX, TF_NUM_EM_PROF_ID);
-	/** TX EM Key Pool */
-	BITALLOC_INST(TF_EM_PROF_ID_POOL_NAME_TX, TF_NUM_EM_PROF_ID);
-
-	/** RX WC Profile Pool */
-	BITALLOC_INST(TF_WC_TCAM_PROF_ID_POOL_NAME_RX, TF_NUM_WC_PROF_ID);
-	/** TX WC Profile Pool */
-	BITALLOC_INST(TF_WC_TCAM_PROF_ID_POOL_NAME_TX, TF_NUM_WC_PROF_ID);
-
-	/* TBD, how do we want to handle EM records ?*/
-	/* EM Records are not controlled by way of a pool */
-
-	/** RX WC TCAM Pool */
-	BITALLOC_INST(TF_WC_TCAM_POOL_NAME_RX, TF_NUM_WC_TCAM_ROW);
-	/** TX WC TCAM Pool */
-	BITALLOC_INST(TF_WC_TCAM_POOL_NAME_TX, TF_NUM_WC_TCAM_ROW);
-
-	/** RX Meter Profile Pool */
-	BITALLOC_INST(TF_METER_PROF_POOL_NAME_RX, TF_NUM_METER_PROF);
-	/** TX Meter Profile Pool */
-	BITALLOC_INST(TF_METER_PROF_POOL_NAME_TX, TF_NUM_METER_PROF);
-
-	/** RX Meter Instance Pool */
-	BITALLOC_INST(TF_METER_INST_POOL_NAME_RX, TF_NUM_METER);
-	/** TX Meter Pool */
-	BITALLOC_INST(TF_METER_INST_POOL_NAME_TX, TF_NUM_METER);
-
-	/** RX Mirror Configuration Pool*/
-	BITALLOC_INST(TF_MIRROR_POOL_NAME_RX, TF_NUM_MIRROR);
-	/** RX Mirror Configuration Pool */
-	BITALLOC_INST(TF_MIRROR_POOL_NAME_TX, TF_NUM_MIRROR);
-
-	/** RX UPAR Pool */
-	BITALLOC_INST(TF_UPAR_POOL_NAME_RX, TF_NUM_UPAR);
-	/** TX UPAR Pool */
-	BITALLOC_INST(TF_UPAR_POOL_NAME_TX, TF_NUM_UPAR);
-
-	/** RX SP TCAM Pool */
-	BITALLOC_INST(TF_SP_TCAM_POOL_NAME_RX, TF_NUM_SP_TCAM);
-	/** TX SP TCAM Pool */
-	BITALLOC_INST(TF_SP_TCAM_POOL_NAME_TX, TF_NUM_SP_TCAM);
-
-	/** RX FKB Pool */
-	BITALLOC_INST(TF_FKB_POOL_NAME_RX, TF_NUM_FKB);
-	/** TX FKB Pool */
-	BITALLOC_INST(TF_FKB_POOL_NAME_TX, TF_NUM_FKB);
-
-	/** RX Table Scope Pool */
-	BITALLOC_INST(TF_TBL_SCOPE_POOL_NAME_RX, TF_NUM_TBL_SCOPE);
-	/** TX Table Scope Pool */
-	BITALLOC_INST(TF_TBL_SCOPE_POOL_NAME_TX, TF_NUM_TBL_SCOPE);
-
-	/** RX L2 Func Pool */
-	BITALLOC_INST(TF_L2_FUNC_POOL_NAME_RX, TF_NUM_L2_FUNC);
-	/** TX L2 Func Pool */
-	BITALLOC_INST(TF_L2_FUNC_POOL_NAME_TX, TF_NUM_L2_FUNC);
-
-	/** RX Epoch0 Pool */
-	BITALLOC_INST(TF_EPOCH0_POOL_NAME_RX, TF_NUM_EPOCH0);
-	/** TX Epoch0 Pool */
-	BITALLOC_INST(TF_EPOCH0_POOL_NAME_TX, TF_NUM_EPOCH0);
-
-	/** TX Epoch1 Pool */
-	BITALLOC_INST(TF_EPOCH1_POOL_NAME_RX, TF_NUM_EPOCH1);
-	/** TX Epoch1 Pool */
-	BITALLOC_INST(TF_EPOCH1_POOL_NAME_TX, TF_NUM_EPOCH1);
-
-	/** RX MetaData Profile Pool */
-	BITALLOC_INST(TF_METADATA_POOL_NAME_RX, TF_NUM_METADATA);
-	/** TX MetaData Profile Pool */
-	BITALLOC_INST(TF_METADATA_POOL_NAME_TX, TF_NUM_METADATA);
-
-	/** RX Connection Tracking State Pool */
-	BITALLOC_INST(TF_CT_STATE_POOL_NAME_RX, TF_NUM_CT_STATE);
-	/** TX Connection Tracking State Pool */
-	BITALLOC_INST(TF_CT_STATE_POOL_NAME_TX, TF_NUM_CT_STATE);
-
-	/** RX Range Profile Pool */
-	BITALLOC_INST(TF_RANGE_PROF_POOL_NAME_RX, TF_NUM_RANGE_PROF);
-	/** TX Range Profile Pool */
-	BITALLOC_INST(TF_RANGE_PROF_POOL_NAME_TX, TF_NUM_RANGE_PROF);
-
-	/** RX Range Pool */
-	BITALLOC_INST(TF_RANGE_ENTRY_POOL_NAME_RX, TF_NUM_RANGE_ENTRY);
-	/** TX Range Pool */
-	BITALLOC_INST(TF_RANGE_ENTRY_POOL_NAME_TX, TF_NUM_RANGE_ENTRY);
-
-	/** RX LAG Pool */
-	BITALLOC_INST(TF_LAG_ENTRY_POOL_NAME_RX, TF_NUM_LAG_ENTRY);
-	/** TX LAG Pool */
-	BITALLOC_INST(TF_LAG_ENTRY_POOL_NAME_TX, TF_NUM_LAG_ENTRY);
-
-	/* Session SRAM pools */
-
-	/** RX Full Action Record Pool */
-	BITALLOC_INST(TF_SRAM_FULL_ACTION_POOL_NAME_RX,
-		      TF_RSVD_SRAM_FULL_ACTION_RX);
-	/** TX Full Action Record Pool */
-	BITALLOC_INST(TF_SRAM_FULL_ACTION_POOL_NAME_TX,
-		      TF_RSVD_SRAM_FULL_ACTION_TX);
-
-	/** RX Multicast Group Pool, only RX is supported */
-	BITALLOC_INST(TF_SRAM_MCG_POOL_NAME_RX,
-		      TF_RSVD_SRAM_MCG_RX);
-
-	/** RX Encap 8B Pool*/
-	BITALLOC_INST(TF_SRAM_ENCAP_8B_POOL_NAME_RX,
-		      TF_RSVD_SRAM_ENCAP_8B_RX);
-	/** TX Encap 8B Pool*/
-	BITALLOC_INST(TF_SRAM_ENCAP_8B_POOL_NAME_TX,
-		      TF_RSVD_SRAM_ENCAP_8B_TX);
-
-	/** RX Encap 16B Pool */
-	BITALLOC_INST(TF_SRAM_ENCAP_16B_POOL_NAME_RX,
-		      TF_RSVD_SRAM_ENCAP_16B_RX);
-	/** TX Encap 16B Pool */
-	BITALLOC_INST(TF_SRAM_ENCAP_16B_POOL_NAME_TX,
-		      TF_RSVD_SRAM_ENCAP_16B_TX);
-
-	/** TX Encap 64B Pool, only TX is supported */
-	BITALLOC_INST(TF_SRAM_ENCAP_64B_POOL_NAME_TX,
-		      TF_RSVD_SRAM_ENCAP_64B_TX);
-
-	/** RX Source Properties SMAC Pool */
-	BITALLOC_INST(TF_SRAM_SP_SMAC_POOL_NAME_RX,
-		      TF_RSVD_SRAM_SP_SMAC_RX);
-	/** TX Source Properties SMAC Pool */
-	BITALLOC_INST(TF_SRAM_SP_SMAC_POOL_NAME_TX,
-		      TF_RSVD_SRAM_SP_SMAC_TX);
-
-	/** TX Source Properties SMAC IPv4 Pool, only TX is supported */
-	BITALLOC_INST(TF_SRAM_SP_SMAC_IPV4_POOL_NAME_TX,
-		      TF_RSVD_SRAM_SP_SMAC_IPV4_TX);
-
-	/** TX Source Properties SMAC IPv6 Pool, only TX is supported */
-	BITALLOC_INST(TF_SRAM_SP_SMAC_IPV6_POOL_NAME_TX,
-		      TF_RSVD_SRAM_SP_SMAC_IPV6_TX);
-
-	/** RX Counter 64B Pool */
-	BITALLOC_INST(TF_SRAM_STATS_64B_POOL_NAME_RX,
-		      TF_RSVD_SRAM_COUNTER_64B_RX);
-	/** TX Counter 64B Pool */
-	BITALLOC_INST(TF_SRAM_STATS_64B_POOL_NAME_TX,
-		      TF_RSVD_SRAM_COUNTER_64B_TX);
-
-	/** RX NAT Source Port Pool */
-	BITALLOC_INST(TF_SRAM_NAT_SPORT_POOL_NAME_RX,
-		      TF_RSVD_SRAM_NAT_SPORT_RX);
-	/** TX NAT Source Port Pool */
-	BITALLOC_INST(TF_SRAM_NAT_SPORT_POOL_NAME_TX,
-		      TF_RSVD_SRAM_NAT_SPORT_TX);
-
-	/** RX NAT Destination Port Pool */
-	BITALLOC_INST(TF_SRAM_NAT_DPORT_POOL_NAME_RX,
-		      TF_RSVD_SRAM_NAT_DPORT_RX);
-	/** TX NAT Destination Port Pool */
-	BITALLOC_INST(TF_SRAM_NAT_DPORT_POOL_NAME_TX,
-		      TF_RSVD_SRAM_NAT_DPORT_TX);
-
-	/** RX NAT Source IPv4 Pool */
-	BITALLOC_INST(TF_SRAM_NAT_S_IPV4_POOL_NAME_RX,
-		      TF_RSVD_SRAM_NAT_S_IPV4_RX);
-	/** TX NAT Source IPv4 Pool */
-	BITALLOC_INST(TF_SRAM_NAT_S_IPV4_POOL_NAME_TX,
-		      TF_RSVD_SRAM_NAT_S_IPV4_TX);
-
-	/** RX NAT Destination IPv4 Pool */
-	BITALLOC_INST(TF_SRAM_NAT_D_IPV4_POOL_NAME_RX,
-		      TF_RSVD_SRAM_NAT_D_IPV4_RX);
-	/** TX NAT IPv4 Destination Pool */
-	BITALLOC_INST(TF_SRAM_NAT_D_IPV4_POOL_NAME_TX,
-		      TF_RSVD_SRAM_NAT_D_IPV4_TX);
-
-	/**
-	 * Pools not allocated from HCAPI RM
-	 */
-
-	/** RX L2 Ctx Remap ID  Pool */
-	BITALLOC_INST(TF_L2_CTXT_REMAP_POOL_NAME_RX, TF_NUM_L2_CTXT_TCAM);
-	/** TX L2 Ctx Remap ID Pool */
-	BITALLOC_INST(TF_L2_CTXT_REMAP_POOL_NAME_TX, TF_NUM_L2_CTXT_TCAM);
-
-	/** CRC32 seed table */
-#define TF_LKUP_SEED_MEM_SIZE 512
-	uint32_t lkup_em_seed_mem[TF_DIR_MAX][TF_LKUP_SEED_MEM_SIZE];
-
-	/** Lookup3 init values */
-	uint32_t lkup_lkup3_init_cfg[TF_DIR_MAX];
-
-	/** Table scope array */
-	struct tf_tbl_scope_cb tbl_scopes[TF_NUM_TBL_SCOPE];
+	union tf_session_client_id session_client_id;
 };
 
+/**
+ * Session open parameter definition
+ */
+struct tf_session_open_session_parms {
+	/**
+	 * [in] Pointer to the TF open session configuration
+	 */
+	struct tf_open_session_parms *open_cfg;
+};
+
+/**
+ * Session attach parameter definition
+ */
+struct tf_session_attach_session_parms {
+	/**
+	 * [in] Pointer to the TF attach session configuration
+	 */
+	struct tf_attach_session_parms *attach_cfg;
+};
+
+/**
+ * Session close parameter definition
+ */
+struct tf_session_close_session_parms {
+	/**
+	 * []
+	 */
+	uint8_t *ref_count;
+	/**
+	 * []
+	 */
+	union tf_session_id *session_id;
+};
+
+/**
+ * @page session Session Management
+ *
+ * @ref tf_session_open_session
+ *
+ * @ref tf_session_attach_session
+ *
+ * @ref tf_session_close_session
+ *
+ * @ref tf_session_is_fid_supported
+ *
+ * @ref tf_session_get_session_internal
+ *
+ * @ref tf_session_get_session
+ *
+ * @ref tf_session_get_session_client
+ *
+ * @ref tf_session_find_session_client_by_name
+ *
+ * @ref tf_session_find_session_client_by_fid
+ *
+ * @ref tf_session_get_device
+ *
+ * @ref tf_session_get_fw_session_id
+ *
+ * @ref tf_session_get_session_id
+ *
+ * @ref tf_session_is_shared_session_creator
+ *
+ * @ref tf_session_get_db
+ *
+ * @ref tf_session_set_db
+ *
+ * @ref tf_session_get_bp
+ *
+ * @ref tf_session_is_shared_session
+ *
+ * @ref tf_session_get_tcam_shared_db
+ *
+ * @ref tf_session_set_tcam_shared_db
+ *
+ * @ref tf_session_get_sram_db
+ *
+ * @ref tf_session_set_sram_db
+ */
+
+/**
+ * Creates a host session with a corresponding firmware session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [in] parms
+ *   Pointer to the session open parameters
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_open_session(struct tf *tfp,
+			    struct tf_session_open_session_parms *parms);
+
+/**
+ * Attaches a previous created session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [in] parms
+ *   Pointer to the session attach parameters
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_attach_session(struct tf *tfp,
+			      struct tf_session_attach_session_parms *parms);
+
+/**
+ * Closes a previous created session. Only possible if previous
+ * registered Clients had been unregistered first.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [in/out] parms
+ *   Pointer to the session close parameters.
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EUSERS) if clients are still registered with the session.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_close_session(struct tf *tfp,
+			     struct tf_session_close_session_parms *parms);
+
+/**
+ * Verifies that the fid is supported by the session. Used to assure
+ * that a function i.e. client/control channel is registered with the
+ * session.
+ *
+ * [in] tfs
+ *   Pointer to TF Session handle
+ *
+ * [in] fid
+ *   FID value to check
+ *
+ * Returns
+ *   - (true) if successful, else false
+ *   - (-EINVAL) on failure.
+ */
+bool
+tf_session_is_fid_supported(struct tf_session *tfs,
+			    uint16_t fid);
+
+/**
+ * Looks up the private session information from the TF session
+ * info. Does not perform a fid check against the registered
+ * clients. Should be used if tf_session_get_session() was used
+ * previously i.e. at the TF API boundary.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] tfs
+ *   Pointer pointer to the session
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get_session_internal(struct tf *tfp,
+				    struct tf_session **tfs);
+
+/**
+ * Looks up the private session information from the TF session
+ * info. Performs a fid check against the clients on the session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] tfs
+ *   Pointer pointer to the session
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get_session(struct tf *tfp,
+			   struct tf_session **tfs);
+
+/**
+ * Looks up client within the session.
+ *
+ * [in] tfs
+ *   Pointer pointer to the session
+ *
+ * [in] session_client_id
+ *   Client id to look for within the session
+ *
+ * Returns
+ *   client if successful.
+ *   - (NULL) on failure, client not found.
+ */
+struct tf_session_client *
+tf_session_get_session_client(struct tf_session *tfs,
+			      union tf_session_client_id session_client_id);
+
+/**
+ * Looks up client using name within the session.
+ *
+ * [in] session, pointer to the session
+ *
+ * [in] session_client_name, name of the client to lookup in the session
+ *
+ * Returns:
+ *   - Pointer to the session, if found.
+ *   - (NULL) on failure, client not found.
+ */
+struct tf_session_client *
+tf_session_find_session_client_by_name(struct tf_session *tfs,
+				       const char *ctrl_chan_name);
+
+/**
+ * Looks up client using the fid.
+ *
+ * [in] session, pointer to the session
+ *
+ * [in] fid, fid of the client to find
+ *
+ * Returns:
+ *   - Pointer to the session, if found.
+ *   - (NULL) on failure, client not found.
+ */
+struct tf_session_client *
+tf_session_find_session_client_by_fid(struct tf_session *tfs,
+				      uint16_t fid);
+
+/**
+ * Looks up the device information from the TF Session.
+ *
+ * [in] tfs
+ *   Pointer to session handle
+ *
+ * [out] tfd
+ *   Pointer to the device
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get_device(struct tf_session *tfs,
+			  struct tf_dev_info **tfd);
+
+/**
+ * Returns the session and the device from the tfp.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] tfs
+ *   Pointer to the session
+ *
+ * [out] tfd
+ *   Pointer to the device
+
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get(struct tf *tfp,
+		   struct tf_session **tfs,
+		   struct tf_dev_info **tfd);
+
+/**
+ * Looks up the FW Session id the requested TF handle.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] session_id
+ *   Pointer to the session_id
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get_fw_session_id(struct tf *tfp,
+				 uint8_t *fw_session_id);
+
+/**
+ * Looks up the Session id the requested TF handle.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] session_id
+ *   Pointer to the session_id
+ *
+ * Returns
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int tf_session_get_session_id(struct tf *tfp,
+			      union tf_session_id *session_id);
+
+/**
+ * API to get the em_ext_db from tf_session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] em_ext_db_handle, pointer to eem handle
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_get_em_ext_db(struct tf *tfp,
+			void **em_ext_db_handle);
+
+/**
+ * API to set the em_ext_db in tf_session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [in] em_ext_db_handle, pointer to eem handle
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_set_em_ext_db(struct tf *tfp,
+			void *em_ext_db_handle);
+
+/**
+ * API to get the db from tf_session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [out] db_handle, pointer to db handle
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_get_db(struct tf *tfp,
+		   enum tf_module_type type,
+		  void **db_handle);
+
+/**
+ * API to set the db in tf_session.
+ *
+ * [in] tfp
+ *   Pointer to TF handle
+ *
+ * [in] db_handle, pointer to db handle
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_set_db(struct tf *tfp,
+		   enum tf_module_type type,
+		  void *db_handle);
+
+/**
+ * Check if the session is shared session.
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - true if it is shared session
+ *   - false if it is not shared session
+ */
+static inline bool
+tf_session_is_shared_session(struct tf_session *tfs)
+{
+	return tfs->shared_session;
+}
+
+/**
+ * Check if the session is shared session for hot upgrade.
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - true if it is shared session for hot upgrade
+ *   - false if it is not shared session for hot upgrade
+ */
+static inline bool
+tf_session_is_shared_hotup_session(struct tf_session *tfs)
+{
+	return tfs->shared_session_hotup;
+}
+
+/**
+ * Check if the session is the shared session creator
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - true if it is the shared session creator
+ *   - false if it is not the shared session creator
+ */
+static inline bool
+tf_session_is_shared_session_creator(struct tf_session *tfs)
+{
+	return tfs->shared_session_creator;
+}
+
+/**
+ * Get the pointer to the parent bnxt struct
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - the pointer to the parent bnxt struct
+ */
+static inline struct bnxt*
+tf_session_get_bp(struct tf *tfp)
+{
+	return tfp->bp;
+}
+
+/**
+ * Set the pointer to the tcam shared database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - the pointer to the parent bnxt struct
+ */
+int
+tf_session_set_tcam_shared_db(struct tf *tfp,
+			      void *tcam_shared_db_handle);
+
+/**
+ * Get the pointer to the tcam shared database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - the pointer to the parent bnxt struct
+ */
+int
+tf_session_get_tcam_shared_db(struct tf *tfp,
+			      void **tcam_shared_db_handle);
+
+/**
+ * Set the pointer to the SRAM database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - the pointer to the parent bnxt struct
+ */
+int
+tf_session_set_sram_db(struct tf *tfp,
+		       void *sram_handle);
+
+/**
+ * Get the pointer to the SRAM database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - the pointer to the parent bnxt struct
+ */
+int
+tf_session_get_sram_db(struct tf *tfp,
+		       void **sram_handle);
+
+/**
+ * Set the pointer to the global cfg database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_set_global_db(struct tf *tfp,
+			 void *global_handle);
+
+/**
+ * Get the pointer to the global cfg database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_get_global_db(struct tf *tfp,
+			 void **global_handle);
+
+/**
+ * Set the pointer to the if table cfg database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_set_if_tbl_db(struct tf *tfp,
+			 void *if_tbl_handle);
+
+/**
+ * Get the pointer to the if table cfg database
+ *
+ * [in] session, pointer to the session
+ *
+ * Returns:
+ *   - (0) if successful.
+ *   - (-EINVAL) on failure.
+ */
+int
+tf_session_get_if_tbl_db(struct tf *tfp,
+			 void **if_tbl_handle);
+
+/**
+ * Set hot upgrade session state.
+ *
+ * [in] tfp
+ *   Pointer to session handle
+ *
+ * [in] parms
+ *   Hot upgrade session state parms
+ *
+ * Returns:
+ *  0 on Success else internal Truflow error
+ */
+int
+tf_session_set_hotup_state(struct tf *tfp,
+			   struct tf_set_session_hotup_state_parms *parms);
+
+/**
+ * Get hot upgrade session state.
+ *
+ * [in] tfp
+ *   Pointer to session handle
+ *
+ * [out] parms
+ *   Pointer to hot upgrade session state parms
+ *
+ * Returns:
+ *  0 on Success else internal Truflow error
+ */
+int
+tf_session_get_hotup_state(struct tf *tfp,
+			   struct tf_get_session_hotup_state_parms *parms);
 #endif /* _TF_SESSION_H_ */

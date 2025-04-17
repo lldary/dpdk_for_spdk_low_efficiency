@@ -172,7 +172,7 @@ If there are not enough objects in the ring (this is detected by checking prod_t
 
 .. figure:: img/ring-dequeue1.*
 
-   Dequeue last step
+   Dequeue first step
 
 
 Dequeue Second Step
@@ -359,6 +359,8 @@ That should help users to configure ring in the most suitable way for his
 specific usage scenarios.
 Currently supported modes:
 
+.. _Ring_Library_MPMC_Mode:
+
 MP/MC (default one)
 ~~~~~~~~~~~~~~~~~~~
 
@@ -369,10 +371,14 @@ per core) this is usually the most suitable and fastest synchronization mode.
 As a well known limitation - it can perform quite pure on some overcommitted
 scenarios.
 
+.. _Ring_Library_SPSC_Mode:
+
 SP/SC
 ~~~~~
 Single-producer (/single-consumer) mode. In this mode only one thread at a time
 is allowed to enqueue (/dequeue) objects to (/from) the ring.
+
+.. _Ring_Library_MT_RTS_Mode:
 
 MP_RTS/MC_RTS
 ~~~~~~~~~~~~~
@@ -389,6 +395,8 @@ To achieve that RTS requires 2 64-bit CAS for each enqueue(/dequeue) operation:
 one for head update, second for tail update.
 In comparison the original MP/MC algorithm requires one 32-bit CAS
 for head update and waiting/spinning on tail value.
+
+.. _Ring_Library_MT_HTS_Mode:
 
 MP_HTS/MC_HTS
 ~~~~~~~~~~~~~
@@ -442,6 +450,47 @@ selected. As an example of usage:
     }
 
 Note that between ``_start_`` and ``_finish_`` none other thread can proceed
+with enqueue(/dequeue) operation till ``_finish_`` completes.
+
+Ring Peek Zero Copy API
+-----------------------
+
+Along with the advantages of the peek APIs, zero copy APIs provide the ability
+to copy the data to the ring memory directly without the need for temporary
+storage (for ex: array of mbufs on the stack).
+
+These APIs make it possible to split public enqueue/dequeue API into 3 phases:
+
+* enqueue/dequeue start
+
+* copy data to/from the ring
+
+* enqueue/dequeue finish
+
+Note that this API is available only for two sync modes:
+
+*   Single Producer/Single Consumer (SP/SC)
+
+*   Multi-producer/Multi-consumer with Head/Tail Sync (HTS)
+
+It is a user responsibility to create/init ring with appropriate sync modes.
+Following is an example of usage:
+
+.. code-block:: c
+
+    /* Reserve space on the ring */
+    n = rte_ring_enqueue_zc_burst_start(r, 32, &zcd, NULL);
+    /* Pkt I/O core polls packets from the NIC */
+    if (n != 0) {
+        nb_rx = rte_eth_rx_burst(portid, queueid, zcd->ptr1, zcd->n1);
+        if (nb_rx == zcd->n1 && n != zcd->n1)
+            nb_rx += rte_eth_rx_burst(portid, queueid, zcd->ptr2,
+							n - zcd->n1);
+        /* Provide packets to the packet processing cores */
+        rte_ring_enqueue_zc_finish(r, nb_rx);
+    }
+
+Note that between ``_start_`` and ``_finish_`` no other thread can proceed
 with enqueue(/dequeue) operation till ``_finish_`` completes.
 
 References

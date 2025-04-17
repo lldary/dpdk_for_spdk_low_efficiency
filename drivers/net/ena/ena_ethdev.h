@@ -6,10 +6,16 @@
 #ifndef _ENA_ETHDEV_H_
 #define _ENA_ETHDEV_H_
 
+#include <rte_atomic.h>
+#include <rte_ether.h>
+#include <ethdev_driver.h>
+#include <ethdev_pci.h>
 #include <rte_cycles.h>
 #include <rte_pci.h>
 #include <rte_bus_pci.h>
 #include <rte_timer.h>
+#include <rte_dev.h>
+#include <rte_net.h>
 
 #include "ena_com.h"
 
@@ -23,6 +29,9 @@
 #define ENA_RX_BUF_MIN_SIZE	1400
 #define ENA_DEFAULT_RING_SIZE	1024
 
+#define ENA_RX_RSS_TABLE_LOG_SIZE	7
+#define ENA_RX_RSS_TABLE_SIZE		(1 << ENA_RX_RSS_TABLE_LOG_SIZE)
+
 #define ENA_MIN_MTU		128
 
 #define ENA_MMIO_DISABLE_REG_READ	BIT(0)
@@ -30,9 +39,16 @@
 #define ENA_WD_TIMEOUT_SEC	3
 #define ENA_DEVICE_KALIVE_TIMEOUT (ENA_WD_TIMEOUT_SEC * rte_get_timer_hz())
 
+#define ENA_TX_TIMEOUT			(5 * rte_get_timer_hz())
+#define ENA_MAX_TX_TIMEOUT_SECONDS	60
+#define ENA_MONITORED_TX_QUEUES		3
+#define ENA_DEFAULT_MISSING_COMP	256U
+
+#define ENA_MAX_CONTROL_PATH_POLL_INTERVAL_MSEC 1000
+
 /* While processing submitted and completed descriptors (rx and tx path
  * respectively) in a loop it is desired to:
- *  - perform batch submissions while populating sumbissmion queue
+ *  - perform batch submissions while populating submission queue
  *  - avoid blocking transmission of other packets during cleanup phase
  * Hence the utilization ratio of 1/8 of a queue size or max value if the size
  * of the ring is very big - like 8k Rx rings.
@@ -40,8 +56,29 @@
 #define ENA_REFILL_THRESH_DIVIDER      8
 #define ENA_REFILL_THRESH_PACKET       256
 
+/*
+ * The max customer metrics is equal or bigger than the ENI metrics. That
+ * assumption simplifies the fallback to the legacy metrics mechanism.
+ */
+#define ENA_MAX_CUSTOMER_METRICS	6
+
 #define ENA_IDX_NEXT_MASKED(idx, mask) (((idx) + 1) & (mask))
 #define ENA_IDX_ADD_MASKED(idx, n, mask) (((idx) + (n)) & (mask))
+
+#define ENA_RX_RSS_TABLE_LOG_SIZE	7
+#define ENA_RX_RSS_TABLE_SIZE		(1 << ENA_RX_RSS_TABLE_LOG_SIZE)
+
+#define ENA_HASH_KEY_SIZE		40
+
+#define ENA_ALL_RSS_HF (RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV4_UDP | \
+			RTE_ETH_RSS_NONFRAG_IPV6_TCP | RTE_ETH_RSS_NONFRAG_IPV6_UDP)
+
+#define ENA_IO_TXQ_IDX(q)		(2 * (q))
+#define ENA_IO_RXQ_IDX(q)		(2 * (q) + 1)
+/* Reversed version of ENA_IO_RXQ_IDX */
+#define ENA_IO_RXQ_IDX_REV(q)		(((q) - 1) / 2)
+
+extern struct ena_shared_data *ena_shared_data;
 
 struct ena_adapter;
 
@@ -50,10 +87,20 @@ enum ena_ring_type {
 	ENA_RING_TYPE_TX = 2,
 };
 
+typedef enum ena_llq_policy_t {
+	ENA_LLQ_POLICY_DISABLED    = 0, /* Host queues */
+	ENA_LLQ_POLICY_RECOMMENDED = 1, /* Device recommendation */
+	ENA_LLQ_POLICY_NORMAL      = 2, /* 128B long LLQ entry */
+	ENA_LLQ_POLICY_LARGE       = 3, /* 256B long LLQ entry */
+	ENA_LLQ_POLICY_LAST,
+} ena_llq_policy;
+
 struct ena_tx_buffer {
 	struct rte_mbuf *mbuf;
 	unsigned int tx_descs;
 	unsigned int num_of_bufs;
+	uint64_t timestamp;
+	bool print_once;
 	struct ena_com_buf bufs[ENA_PKT_MAX_BUFS];
 };
 
@@ -76,19 +123,20 @@ struct ena_stats_tx {
 	u64 cnt;
 	u64 bytes;
 	u64 prepare_ctx_err;
-	u64 linearize;
-	u64 linearize_failed;
 	u64 tx_poll;
 	u64 doorbells;
 	u64 bad_req_id;
 	u64 available_desc;
+	u64 missed_tx;
 };
 
 struct ena_stats_rx {
 	u64 cnt;
 	u64 bytes;
 	u64 refill_partial;
-	u64 bad_csum;
+	u64 l3_csum_bad;
+	u64 l4_csum_bad;
+	u64 l4_csum_good;
 	u64 mbuf_alloc_fail;
 	u64 bad_desc_num;
 	u64 bad_req_id;
@@ -97,9 +145,14 @@ struct ena_stats_rx {
 struct ena_ring {
 	u16 next_to_use;
 	u16 next_to_clean;
+	uint64_t last_cleanup_ticks;
 
 	enum ena_ring_type type;
 	enum ena_admin_placement_policy_type tx_mem_queue_type;
+
+	/* Indicate there are Tx packets pushed to the device and wait for db */
+	bool pkts_without_db;
+
 	/* Holds the empty requests for TX/RX OOO completions */
 	union {
 		uint16_t *empty_tx_reqs;
@@ -116,6 +169,11 @@ struct ena_ring {
 
 	struct ena_com_io_cq *ena_com_io_cq;
 	struct ena_com_io_sq *ena_com_io_sq;
+
+	union {
+		uint16_t tx_free_thresh;
+		uint16_t rx_free_thresh;
+	};
 
 	struct ena_com_rx_buf_info ena_bufs[ENA_PKT_MAX_BUFS]
 						__rte_cache_aligned;
@@ -141,6 +199,8 @@ struct ena_ring {
 	};
 
 	unsigned int numa_socket_id;
+
+	uint32_t missing_tx_completion_threshold;
 } __rte_cache_aligned;
 
 enum ena_adapter_state {
@@ -171,18 +231,62 @@ struct ena_stats_dev {
 	u64 tx_drops;
 };
 
+struct ena_stats_metrics {
+	/*
+	 * The number of packets shaped due to inbound aggregate BW
+	 * allowance being exceeded
+	 */
+	uint64_t bw_in_allowance_exceeded;
+	/*
+	 * The number of packets shaped due to outbound aggregate BW
+	 * allowance being exceeded
+	 */
+	uint64_t bw_out_allowance_exceeded;
+	/* The number of packets shaped due to PPS allowance being exceeded */
+	uint64_t pps_allowance_exceeded;
+	/*
+	 * The number of packets shaped due to connection tracking
+	 * allowance being exceeded and leading to failure in establishment
+	 * of new connections
+	 */
+	uint64_t conntrack_allowance_exceeded;
+	/*
+	 * The number of packets shaped due to linklocal packet rate
+	 * allowance being exceeded
+	 */
+	uint64_t linklocal_allowance_exceeded;
+	 /*
+	  * The number of available connections
+	  */
+	uint64_t conntrack_allowance_available;
+};
+
+struct ena_stats_srd {
+	/* Describes which ENA Express features are enabled */
+	uint64_t ena_srd_mode;
+
+	/* Number of packets transmitted over ENA SRD */
+	uint64_t ena_srd_tx_pkts;
+
+	/* Number of packets transmitted or could have been transmitted over ENA SRD */
+	uint64_t ena_srd_eligible_tx_pkts;
+
+	/* Number of packets received over ENA SRD */
+	uint64_t ena_srd_rx_pkts;
+
+	/* Percentage of the ENA SRD resources that is in use */
+	uint64_t ena_srd_resource_utilization;
+};
+
 struct ena_offloads {
-	bool tso4_supported;
-	bool tx_csum_supported;
-	bool rx_csum_supported;
+	uint32_t tx_offloads;
+	uint32_t rx_offloads;
 };
 
 /* board specific private data structure */
 struct ena_adapter {
 	/* OS defined structs */
-	struct rte_pci_device *pdev;
-	struct rte_eth_dev_data *rte_eth_dev_data;
-	struct rte_eth_dev *rte_dev;
+	struct rte_eth_dev_data *edev_data;
 
 	struct ena_com_dev ena_dev __rte_cache_aligned;
 
@@ -200,6 +304,13 @@ struct ena_adapter {
 	u16 max_mtu;
 	struct ena_offloads offloads;
 
+	/* The admin queue isn't protected by the lock and is used to
+	 * retrieve statistics from the device. As there is no guarantee that
+	 * application won't try to get statistics from multiple threads, it is
+	 * safer to lock the queue to avoid admin queue failure.
+	 */
+	rte_spinlock_t admin_lock;
+
 	int id_number;
 	char name[ENA_NAME_MAX_LEN];
 	u8 mac_addr[RTE_ETHER_ADDR_LEN];
@@ -210,11 +321,6 @@ struct ena_adapter {
 	struct ena_driver_stats *drv_stats;
 	enum ena_adapter_state state;
 
-	uint64_t tx_supported_offloads;
-	uint64_t tx_selected_offloads;
-	uint64_t rx_supported_offloads;
-	uint64_t rx_selected_offloads;
-
 	bool link_status;
 
 	enum ena_regs_reset_reason_types reset_reason;
@@ -224,12 +330,51 @@ struct ena_adapter {
 	uint64_t keep_alive_timeout;
 
 	struct ena_stats_dev dev_stats;
+	struct ena_admin_basic_stats basic_stats;
+
+	u32 indirect_table[ENA_RX_RSS_TABLE_SIZE];
+
+	uint32_t all_aenq_groups;
+	uint32_t active_aenq_groups;
 
 	bool trigger_reset;
-
-	bool wd_state;
-
+	bool enable_llq;
 	bool use_large_llq_hdr;
+	bool use_normal_llq_hdr;
+	ena_llq_policy llq_header_policy;
+
+	uint32_t last_tx_comp_qid;
+	uint64_t missing_tx_completion_to;
+	uint64_t missing_tx_completion_budget;
+	uint64_t tx_cleanup_stall_delay;
+
+	uint64_t memzone_cnt;
+
+	/* Time (in microseconds) of the control path queues monitoring interval */
+	uint64_t control_path_poll_interval;
+
+	/*
+	 * Helper variables for holding the information about the supported
+	 * metrics.
+	 */
+	uint64_t metrics_stats[ENA_MAX_CUSTOMER_METRICS] __rte_cache_aligned;
+	uint16_t metrics_num;
+	struct ena_stats_srd srd_stats __rte_cache_aligned;
 };
+
+int ena_mp_indirect_table_set(struct ena_adapter *adapter);
+int ena_mp_indirect_table_get(struct ena_adapter *adapter,
+			      uint32_t *indirect_table);
+int ena_rss_reta_update(struct rte_eth_dev *dev,
+			struct rte_eth_rss_reta_entry64 *reta_conf,
+			uint16_t reta_size);
+int ena_rss_reta_query(struct rte_eth_dev *dev,
+		       struct rte_eth_rss_reta_entry64 *reta_conf,
+		       uint16_t reta_size);
+int ena_rss_hash_update(struct rte_eth_dev *dev,
+			struct rte_eth_rss_conf *rss_conf);
+int ena_rss_hash_conf_get(struct rte_eth_dev *dev,
+			  struct rte_eth_rss_conf *rss_conf);
+int ena_rss_configure(struct ena_adapter *adapter);
 
 #endif /* _ENA_ETHDEV_H_ */

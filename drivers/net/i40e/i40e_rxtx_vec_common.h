@@ -5,11 +5,15 @@
 #ifndef _I40E_RXTX_VEC_COMMON_H_
 #define _I40E_RXTX_VEC_COMMON_H_
 #include <stdint.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 
 #include "i40e_ethdev.h"
 #include "i40e_rxtx.h"
+
+#ifndef __INTEL_COMPILER
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#endif
 
 static inline uint16_t
 reassemble_packets(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_bufs,
@@ -95,6 +99,16 @@ i40e_tx_free_bufs(struct i40e_tx_queue *txq)
 	  * tx_next_dd - (tx_rs_thresh-1)
 	  */
 	txep = &txq->sw_ring[txq->tx_next_dd - (n - 1)];
+
+	if (txq->offloads & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE) {
+		for (i = 0; i < n; i++) {
+			free[i] = txep[i].mbuf;
+			/* no need to reset txep[i].mbuf in vector path */
+		}
+		rte_mempool_put_bulk(free[0]->pool, (void **)free, n);
+		goto done;
+	}
+
 	m = rte_pktmbuf_prefree_seg(txep[0].mbuf);
 	if (likely(m != NULL)) {
 		free[0] = m;
@@ -122,6 +136,7 @@ i40e_tx_free_bufs(struct i40e_tx_queue *txq)
 		}
 	}
 
+done:
 	/* buffers were freed, update counters */
 	txq->nb_tx_free = (uint16_t)(txq->nb_tx_free + txq->tx_rs_thresh);
 	txq->tx_next_dd = (uint16_t)(txq->tx_next_dd + txq->tx_rs_thresh);
@@ -186,6 +201,7 @@ i40e_rxq_vec_setup_default(struct i40e_rx_queue *rxq)
 	rte_compiler_barrier();
 	p = (uintptr_t)&mb_def.rearm_data;
 	rxq->mbuf_initializer = *(uint64_t *)p;
+	rxq->rx_using_sse = 1;
 	return 0;
 }
 
@@ -196,21 +212,12 @@ i40e_rx_vec_dev_conf_condition_check_default(struct rte_eth_dev *dev)
 	struct i40e_adapter *ad =
 		I40E_DEV_PRIVATE_TO_ADAPTER(dev->data->dev_private);
 	struct rte_eth_rxmode *rxmode = &dev->data->dev_conf.rxmode;
-	struct rte_fdir_conf *fconf = &dev->data->dev_conf.fdir_conf;
 	struct i40e_rx_queue *rxq;
 	uint16_t desc, i;
 	bool first_queue;
 
-	/* no fdir support */
-	if (fconf->mode != RTE_FDIR_MODE_NONE)
-		return -1;
-
-	 /* no header split support */
-	if (rxmode->offloads & DEV_RX_OFFLOAD_HEADER_SPLIT)
-		return -1;
-
 	/* no QinQ support */
-	if (rxmode->offloads & DEV_RX_OFFLOAD_VLAN_EXTEND)
+	if (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_EXTEND)
 		return -1;
 
 	/**
@@ -252,4 +259,5 @@ i40e_rx_vec_dev_conf_condition_check_default(struct rte_eth_dev *dev)
 	return -1;
 #endif
 }
+
 #endif

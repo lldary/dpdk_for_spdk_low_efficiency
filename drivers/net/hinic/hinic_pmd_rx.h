@@ -8,17 +8,17 @@
 #define HINIC_DEFAULT_RX_FREE_THRESH	32
 
 #define HINIC_RSS_OFFLOAD_ALL ( \
-	ETH_RSS_IPV4 | \
-	ETH_RSS_FRAG_IPV4 |\
-	ETH_RSS_NONFRAG_IPV4_TCP | \
-	ETH_RSS_NONFRAG_IPV4_UDP | \
-	ETH_RSS_IPV6 | \
-	ETH_RSS_FRAG_IPV6 | \
-	ETH_RSS_NONFRAG_IPV6_TCP | \
-	ETH_RSS_NONFRAG_IPV6_UDP | \
-	ETH_RSS_IPV6_EX | \
-	ETH_RSS_IPV6_TCP_EX | \
-	ETH_RSS_IPV6_UDP_EX)
+	RTE_ETH_RSS_IPV4 | \
+	RTE_ETH_RSS_FRAG_IPV4 |\
+	RTE_ETH_RSS_NONFRAG_IPV4_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV4_UDP | \
+	RTE_ETH_RSS_IPV6 | \
+	RTE_ETH_RSS_FRAG_IPV6 | \
+	RTE_ETH_RSS_NONFRAG_IPV6_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_UDP | \
+	RTE_ETH_RSS_IPV6_EX | \
+	RTE_ETH_RSS_IPV6_TCP_EX | \
+	RTE_ETH_RSS_IPV6_UDP_EX)
 
 enum rq_completion_fmt {
 	RQ_COMPLETE_SGE = 1
@@ -35,7 +35,11 @@ struct hinic_rq_cqe {
 	u32 rss_hash;
 
 	u32 rsvd[4];
+#if defined(RTE_ARCH_ARM64)
 } __rte_cache_aligned;
+#else
+};
+#endif
 
 struct hinic_rq_cqe_sect {
 	struct hinic_sge	sge;

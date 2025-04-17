@@ -2,6 +2,8 @@
  * Copyright(c) 2019 Intel Corporation
  */
 
+#include <stdlib.h>
+
 #include <rte_malloc.h>
 #include <rte_eal.h>
 #include <rte_log.h>
@@ -76,7 +78,6 @@ cperf_cyclecount_op_setup(struct rte_comp_op **ops,
 
 	for (iter = 0; iter < num_iter; iter++) {
 		uint32_t remaining_ops = mem->total_bufs;
-		uint32_t total_deq_ops = 0;
 		uint32_t total_enq_ops = 0;
 		uint16_t num_enq = 0;
 		uint16_t num_deq = 0;
@@ -136,7 +137,6 @@ cperf_cyclecount_op_setup(struct rte_comp_op **ops,
 			/* instead of the real dequeue operation */
 			num_deq = num_ops;
 
-			total_deq_ops += num_deq;
 			rte_mempool_put_bulk(mem->op_pool,
 					     (void **)ops, num_deq);
 		}
@@ -177,29 +177,33 @@ main_loop(struct cperf_cyclecount_ctx *ctx, enum rte_comp_xform_type type)
 
 	/* one array for both enqueue and dequeue */
 	ops = rte_zmalloc_socket(NULL,
-		2 * mem->total_bufs * sizeof(struct rte_comp_op *),
+		(test_data->burst_sz + mem->total_bufs) *
+		sizeof(struct rte_comp_op *),
 		0, rte_socket_id());
 
 	if (ops == NULL) {
 		RTE_LOG(ERR, USER1,
-			"Can't allocate memory for ops strucures\n");
+			"Can't allocate memory for ops structures\n");
 		return -1;
 	}
 
-	deq_ops = &ops[mem->total_bufs];
+	deq_ops = &ops[test_data->burst_sz];
 
 	if (type == RTE_COMP_COMPRESS) {
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_COMPRESS,
 			.compress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
-				.deflate.huffman = test_data->huffman_enc,
+				.algo = test_data->test_algo,
 				.level = test_data->level,
 				.window_size = test_data->window_sz,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_DEFLATE)
+			xform.compress.deflate.huffman = test_data->huffman_enc;
+		else if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.compress.lz4.flags = test_data->lz4_flags;
 		input_bufs = mem->decomp_bufs;
 		output_bufs = mem->comp_bufs;
 		out_seg_sz = test_data->out_seg_sz;
@@ -207,12 +211,14 @@ main_loop(struct cperf_cyclecount_ctx *ctx, enum rte_comp_xform_type type)
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_DECOMPRESS,
 			.decompress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
+				.algo = test_data->test_algo,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.window_size = test_data->window_sz,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.decompress.lz4.flags = test_data->lz4_flags;
 		input_bufs = mem->comp_bufs;
 		output_bufs = mem->decomp_bufs;
 		out_seg_sz = test_data->seg_sz;
@@ -275,7 +281,7 @@ main_loop(struct cperf_cyclecount_ctx *ctx, enum rte_comp_xform_type type)
 			/* Allocate compression operations */
 			if (ops_needed && rte_mempool_get_bulk(
 						mem->op_pool,
-						(void **)ops,
+						(void **)&ops[ops_unused],
 						ops_needed) != 0) {
 				RTE_LOG(ERR, USER1,
 				      "Could not allocate enough operations\n");
@@ -468,7 +474,7 @@ cperf_cyclecount_test_runner(void *test_ctx)
 	struct cperf_cyclecount_ctx *ctx = test_ctx;
 	struct comp_test_data *test_data = ctx->ver.options;
 	uint32_t lcore = rte_lcore_id();
-	static rte_atomic16_t display_once = RTE_ATOMIC16_INIT(0);
+	static uint16_t display_once;
 	static rte_spinlock_t print_spinlock;
 	int i;
 
@@ -488,10 +494,12 @@ cperf_cyclecount_test_runner(void *test_ctx)
 
 	ctx->ver.mem.lcore_id = lcore;
 
+	uint16_t exp = 0;
 	/*
 	 * printing information about current compression thread
 	 */
-	if (rte_atomic16_test_and_set(&ctx->ver.mem.print_info_once))
+	if (__atomic_compare_exchange_n(&ctx->ver.mem.print_info_once, &exp,
+				1, 0, __ATOMIC_RELAXED,  __ATOMIC_RELAXED))
 		printf("    lcore: %u,"
 				" driver name: %s,"
 				" device name: %s,"
@@ -511,46 +519,64 @@ cperf_cyclecount_test_runner(void *test_ctx)
 	if (cperf_verify_test_runner(&ctx->ver))
 		return EXIT_FAILURE;
 
-	/*
-	 * Run the tests twice, discarding the first performance
-	 * results, before the cache is warmed up
-	 */
+	if (test_data->test_op & COMPRESS) {
+		/*
+		 * Run the test twice, discarding the first performance
+		 * results, before the cache is warmed up
+		 */
+		for (i = 0; i < 2; i++) {
+			if (main_loop(ctx, RTE_COMP_COMPRESS) < 0)
+				return EXIT_FAILURE;
+		}
 
-	/* C O M P R E S S */
-	for (i = 0; i < 2; i++) {
-		if (main_loop(ctx, RTE_COMP_COMPRESS) < 0)
-			return EXIT_FAILURE;
+		ops_enq_retries_comp = ctx->ops_enq_retries;
+		ops_deq_retries_comp = ctx->ops_deq_retries;
+
+		duration_enq_per_op_comp = ctx->duration_enq /
+				(ctx->ver.mem.total_bufs * test_data->num_iter);
+		duration_deq_per_op_comp = ctx->duration_deq /
+				(ctx->ver.mem.total_bufs * test_data->num_iter);
+	} else {
+		ops_enq_retries_comp = 0;
+		ops_deq_retries_comp = 0;
+
+		duration_enq_per_op_comp = 0;
+		duration_deq_per_op_comp = 0;
 	}
 
-	ops_enq_retries_comp = ctx->ops_enq_retries;
-	ops_deq_retries_comp = ctx->ops_deq_retries;
+	if (test_data->test_op & DECOMPRESS) {
+		/*
+		 * Run the test twice, discarding the first performance
+		 * results, before the cache is warmed up
+		 */
+		for (i = 0; i < 2; i++) {
+			if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0)
+				return EXIT_FAILURE;
+		}
 
-	duration_enq_per_op_comp = ctx->duration_enq /
-			(ctx->ver.mem.total_bufs * test_data->num_iter);
-	duration_deq_per_op_comp = ctx->duration_deq /
-			(ctx->ver.mem.total_bufs * test_data->num_iter);
+		ops_enq_retries_decomp = ctx->ops_enq_retries;
+		ops_deq_retries_decomp = ctx->ops_deq_retries;
 
-	/* D E C O M P R E S S */
-	for (i = 0; i < 2; i++) {
-		if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0)
-			return EXIT_FAILURE;
+		duration_enq_per_op_decomp = ctx->duration_enq /
+				(ctx->ver.mem.total_bufs * test_data->num_iter);
+		duration_deq_per_op_decomp = ctx->duration_deq /
+				(ctx->ver.mem.total_bufs * test_data->num_iter);
+	} else {
+		ops_enq_retries_decomp = 0;
+		ops_deq_retries_decomp = 0;
+
+		duration_enq_per_op_decomp = 0;
+		duration_deq_per_op_decomp = 0;
 	}
-
-	ops_enq_retries_decomp = ctx->ops_enq_retries;
-	ops_deq_retries_decomp = ctx->ops_deq_retries;
-
-	duration_enq_per_op_decomp = ctx->duration_enq /
-			(ctx->ver.mem.total_bufs * test_data->num_iter);
-	duration_deq_per_op_decomp = ctx->duration_deq /
-			(ctx->ver.mem.total_bufs * test_data->num_iter);
 
 	duration_setup_per_op = ctx->duration_op /
 			(ctx->ver.mem.total_bufs * test_data->num_iter);
 
 	/* R E P O R T processing */
-	if (rte_atomic16_test_and_set(&display_once)) {
+	rte_spinlock_lock(&print_spinlock);
 
-		rte_spinlock_lock(&print_spinlock);
+	if (display_once == 0) {
+		display_once = 1;
 
 		printf("\nLegend for the table\n"
 		"  - Retries section: number of retries for the following operations:\n"
@@ -559,7 +585,7 @@ cperf_cyclecount_test_runner(void *test_ctx)
 		"    [D-e] - decompression enqueue\n"
 		"    [D-d] - decompression dequeue\n"
 		"  - Cycles section: number of cycles per 'op' for the following operations:\n"
-		"    setup/op - memory allocation, op configuration and memory dealocation\n"
+		"    setup/op - memory allocation, op configuration and memory deallocation\n"
 		"    [C-e] - compression enqueue\n"
 		"    [C-d] - compression dequeue\n"
 		"    [D-e] - decompression enqueue\n"
@@ -578,11 +604,7 @@ cperf_cyclecount_test_runner(void *test_ctx)
 			"setup/op",
 			"[C-e]", "[C-d]",
 			"[D-e]", "[D-d]");
-
-		rte_spinlock_unlock(&print_spinlock);
 	}
-
-	rte_spinlock_lock(&print_spinlock);
 
 	printf("%12u"
 	       "%6u"

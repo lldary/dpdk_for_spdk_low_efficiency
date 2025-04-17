@@ -19,18 +19,18 @@ Supported Feature Flags
 
    - "OOP SGL In SGL Out" feature flag stands for
      "Out-of-place Scatter-gather list Input, Scatter-gather list Output",
-     which means pmd supports different scatter-gather styled input and output buffers
-     (i.e. both can consists of multiple segments).
+     which means PMD supports different scatter-gather styled input and output buffers
+     (i.e. both can consist of multiple segments).
 
    - "OOP SGL In LB Out" feature flag stands for
      "Out-of-place Scatter-gather list Input, Linear Buffers Output",
-     which means PMD supports input from scatter-gathered styled buffers,
+     which means PMD supports input from scatter-gather styled buffers,
      outputting linear buffers (i.e. single segment).
 
    - "OOP LB In SGL Out" feature flag stands for
      "Out-of-place Linear Buffers Input, Scatter-gather list Output",
      which means PMD supports input from linear buffer, outputting
-     scatter-gathered styled buffers.
+     scatter-gather styled buffers.
 
    - "OOP LB In LB Out" feature flag stands for
      "Out-of-place Linear Buffers Input, Linear Buffers Output",
@@ -45,6 +45,12 @@ Supported Feature Flags
 
    - "Digest encrypted" feature flag means PMD support hash-cipher cases,
      where generated digest is appended to and encrypted with the data.
+
+   - "CIPHER_MULTIPLE_DATA_UNITS" feature flag means PMD support operations
+      on multiple data-units message.
+
+   - "CIPHER_WRAPPED_KEY" feature flag means PMD support wrapped key in cipher
+      xform.
 
 
 Supported Cipher Algorithms
@@ -74,3 +80,10 @@ Supported Asymmetric Algorithms
 .. _table_crypto_pmd_asym_algos:
 
 .. include:: overview_asym_table.txt
+
+Supported Operating Systems
+-------------------------------
+
+.. _table_crypto_pmd_os:
+
+.. include:: overview_os_table.txt

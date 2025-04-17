@@ -10,13 +10,15 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+#include <time.h>
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_ethdev.h>
 #include <rte_string_fns.h>
 #include <rte_memzone.h>
 #include <rte_malloc.h>
 #include <rte_atomic.h>
+#include <rte_alarm.h>
 #include <rte_branch_prediction.h>
 #include <rte_ether.h>
 #include <rte_common.h>
@@ -24,14 +26,17 @@
 #include <rte_cycles.h>
 #include <rte_memory.h>
 #include <rte_eal.h>
-#include <rte_dev.h>
-#include <rte_bus_vmbus.h>
+#include <dev_driver.h>
+#include <bus_vmbus_driver.h>
 
 #include "hn_logs.h"
 #include "hn_var.h"
 #include "hn_nvs.h"
 #include "hn_rndis.h"
 #include "ndis.h"
+
+#define RNDIS_TIMEOUT_SEC 60
+#define RNDIS_DELAY_MS    10
 
 #define HN_RNDIS_XFER_SIZE		0x4000
 
@@ -62,7 +67,7 @@ hn_rndis_rid(struct hn_data *hv)
 
 static void *hn_rndis_alloc(size_t size)
 {
-	return rte_zmalloc("RNDIS", size, PAGE_SIZE);
+	return rte_zmalloc("RNDIS", size, rte_mem_page_size());
 }
 
 #ifdef RTE_LIBRTE_NETVSC_DEBUG_DUMP
@@ -260,18 +265,18 @@ static int hn_nvs_send_rndis_ctrl(struct vmbus_channel *chan,
 		return -EINVAL;
 	}
 
-	if (unlikely(reqlen > PAGE_SIZE)) {
+	if (unlikely(reqlen > rte_mem_page_size())) {
 		PMD_DRV_LOG(ERR, "RNDIS request %u greater than page size",
 			    reqlen);
 		return -EINVAL;
 	}
 
-	sg.page = addr / PAGE_SIZE;
+	sg.page = addr / rte_mem_page_size();
 	sg.ofs  = addr & PAGE_MASK;
 	sg.len  = reqlen;
 
-	if (sg.ofs + reqlen >  PAGE_SIZE) {
-		PMD_DRV_LOG(ERR, "RNDIS request crosses page bounary");
+	if (sg.ofs + reqlen >  rte_mem_page_size()) {
+		PMD_DRV_LOG(ERR, "RNDIS request crosses page boundary");
 		return -EINVAL;
 	}
 
@@ -279,6 +284,15 @@ static int hn_nvs_send_rndis_ctrl(struct vmbus_channel *chan,
 
 	return hn_nvs_send_sglist(chan, &sg, 1,
 				  &nvs_rndis, sizeof(nvs_rndis), 0U, NULL);
+}
+
+/*
+ * Alarm callback to process link changed notifications.
+ * Can not directly since link_status is discovered while reading ring
+ */
+static void hn_rndis_link_alarm(void *arg)
+{
+	rte_eth_dev_callback_process(arg, RTE_ETH_EVENT_INTR_LSC, NULL);
 }
 
 void hn_rndis_link_status(struct rte_eth_dev *dev, const void *msg)
@@ -298,11 +312,8 @@ void hn_rndis_link_status(struct rte_eth_dev *dev, const void *msg)
 	case RNDIS_STATUS_LINK_SPEED_CHANGE:
 	case RNDIS_STATUS_MEDIA_CONNECT:
 	case RNDIS_STATUS_MEDIA_DISCONNECT:
-		if (dev->data->dev_conf.intr_conf.lsc &&
-		    hn_dev_link_update(dev, 0) == 0)
-			_rte_eth_dev_callback_process(dev,
-						      RTE_ETH_EVENT_INTR_LSC,
-						      NULL);
+		if (dev->data->dev_conf.intr_conf.lsc)
+			rte_eal_alarm_set(10, hn_rndis_link_alarm, dev);
 		break;
 	default:
 		PMD_DRV_LOG(NOTICE, "unknown RNDIS indication: %#x",
@@ -318,7 +329,8 @@ void hn_rndis_receive_response(struct hn_data *hv,
 
 	hn_rndis_dump(data);
 
-	if (len < sizeof(3 * sizeof(uint32_t))) {
+	/* Check we can read first three data fields from RNDIS header */
+	if (len < 3 * sizeof(uint32_t)) {
 		PMD_DRV_LOG(ERR,
 			    "missing RNDIS header %u", len);
 		return;
@@ -347,7 +359,7 @@ void hn_rndis_receive_response(struct hn_data *hv,
 	rte_smp_wmb();
 
 	if (rte_atomic32_cmpset(&hv->rndis_pending, hdr->rid, 0) == 0) {
-		PMD_DRV_LOG(ERR,
+		PMD_DRV_LOG(NOTICE,
 			    "received id %#x pending id %#x",
 			    hdr->rid, (uint32_t)hv->rndis_pending);
 	}
@@ -370,6 +382,11 @@ static int hn_rndis_exec1(struct hn_data *hv,
 		return -EIO;
 	}
 
+	if (rid == 0) {
+		PMD_DRV_LOG(ERR, "Invalid request id");
+		return -EINVAL;
+	}
+
 	if (comp != NULL &&
 	    rte_atomic32_cmpset(&hv->rndis_pending, 0, rid) == 0) {
 		PMD_DRV_LOG(ERR,
@@ -384,9 +401,26 @@ static int hn_rndis_exec1(struct hn_data *hv,
 	}
 
 	if (comp) {
+		time_t start = time(NULL);
+
 		/* Poll primary channel until response received */
-		while (hv->rndis_pending == rid)
+		while (hv->rndis_pending == rid) {
+			if (hv->closed)
+				return -ENETDOWN;
+
+			if (time(NULL) - start > RNDIS_TIMEOUT_SEC) {
+				PMD_DRV_LOG(ERR,
+					    "RNDIS response timed out");
+
+				rte_atomic32_cmpset(&hv->rndis_pending, rid, 0);
+				return -ETIMEDOUT;
+			}
+
+			if (rte_vmbus_chan_rx_empty(hv->primary->chan))
+				rte_delay_ms(RNDIS_DELAY_MS);
+
 			hn_process_events(hv, 0, 1);
+		}
 
 		memcpy(comp, hv->rndis_resp, comp_len);
 	}
@@ -446,7 +480,7 @@ hn_rndis_query(struct hn_data *hv, uint32_t oid,
 		return -ENOMEM;
 
 	comp_len = sizeof(*comp) + odlen;
-	comp = rte_zmalloc("QUERY", comp_len, PAGE_SIZE);
+	comp = rte_zmalloc("QUERY", comp_len, rte_mem_page_size());
 	if (!comp) {
 		error = -ENOMEM;
 		goto done;
@@ -677,15 +711,15 @@ hn_rndis_query_rsscaps(struct hn_data *hv,
 
 	hv->rss_offloads = 0;
 	if (caps.ndis_caps & NDIS_RSS_CAP_IPV4)
-		hv->rss_offloads |= ETH_RSS_IPV4
-			| ETH_RSS_NONFRAG_IPV4_TCP
-			| ETH_RSS_NONFRAG_IPV4_UDP;
+		hv->rss_offloads |= RTE_ETH_RSS_IPV4
+			| RTE_ETH_RSS_NONFRAG_IPV4_TCP
+			| RTE_ETH_RSS_NONFRAG_IPV4_UDP;
 	if (caps.ndis_caps & NDIS_RSS_CAP_IPV6)
-		hv->rss_offloads |= ETH_RSS_IPV6
-			| ETH_RSS_NONFRAG_IPV6_TCP;
+		hv->rss_offloads |= RTE_ETH_RSS_IPV6
+			| RTE_ETH_RSS_NONFRAG_IPV6_TCP;
 	if (caps.ndis_caps & NDIS_RSS_CAP_IPV6_EX)
-		hv->rss_offloads |= ETH_RSS_IPV6_EX
-			| ETH_RSS_IPV6_TCP_EX;
+		hv->rss_offloads |= RTE_ETH_RSS_IPV6_EX
+			| RTE_ETH_RSS_IPV6_TCP_EX;
 
 	/* Commit! */
 	*rxr_cnt0 = rxr_cnt;
@@ -703,7 +737,7 @@ hn_rndis_set(struct hn_data *hv, uint32_t oid, const void *data, uint32_t dlen)
 	int error;
 
 	reqlen = sizeof(*req) + dlen;
-	req = rte_zmalloc("RNDIS_SET", reqlen, PAGE_SIZE);
+	req = rte_zmalloc("RNDIS_SET", reqlen, rte_mem_page_size());
 	if (!req)
 		return -ENOMEM;
 
@@ -767,7 +801,7 @@ int hn_rndis_conf_offload(struct hn_data *hv,
 		params.ndis_hdr.ndis_size = NDIS_OFFLOAD_PARAMS_SIZE;
 	}
 
-	if (tx_offloads & DEV_TX_OFFLOAD_TCP_CKSUM) {
+	if (tx_offloads & RTE_ETH_TX_OFFLOAD_TCP_CKSUM) {
 		if (hwcaps.ndis_csum.ndis_ip4_txcsum & NDIS_TXCSUM_CAP_TCP4)
 			params.ndis_tcp4csum = NDIS_OFFLOAD_PARAM_TX;
 		else
@@ -779,7 +813,7 @@ int hn_rndis_conf_offload(struct hn_data *hv,
 			goto unsupported;
 	}
 
-	if (rx_offloads & DEV_RX_OFFLOAD_TCP_CKSUM) {
+	if (rx_offloads & RTE_ETH_RX_OFFLOAD_TCP_CKSUM) {
 		if ((hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_TCP4)
 		    == NDIS_RXCSUM_CAP_TCP4)
 			params.ndis_tcp4csum |= NDIS_OFFLOAD_PARAM_RX;
@@ -793,7 +827,7 @@ int hn_rndis_conf_offload(struct hn_data *hv,
 			goto unsupported;
 	}
 
-	if (tx_offloads & DEV_TX_OFFLOAD_UDP_CKSUM) {
+	if (tx_offloads & RTE_ETH_TX_OFFLOAD_UDP_CKSUM) {
 		if (hwcaps.ndis_csum.ndis_ip4_txcsum & NDIS_TXCSUM_CAP_UDP4)
 			params.ndis_udp4csum = NDIS_OFFLOAD_PARAM_TX;
 		else
@@ -806,7 +840,7 @@ int hn_rndis_conf_offload(struct hn_data *hv,
 			goto unsupported;
 	}
 
-	if (rx_offloads & DEV_TX_OFFLOAD_UDP_CKSUM) {
+	if (rx_offloads & RTE_ETH_TX_OFFLOAD_UDP_CKSUM) {
 		if (hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_UDP4)
 			params.ndis_udp4csum |= NDIS_OFFLOAD_PARAM_RX;
 		else
@@ -818,21 +852,21 @@ int hn_rndis_conf_offload(struct hn_data *hv,
 			goto unsupported;
 	}
 
-	if (tx_offloads & DEV_TX_OFFLOAD_IPV4_CKSUM) {
+	if (tx_offloads & RTE_ETH_TX_OFFLOAD_IPV4_CKSUM) {
 		if ((hwcaps.ndis_csum.ndis_ip4_txcsum & NDIS_TXCSUM_CAP_IP4)
 		    == NDIS_TXCSUM_CAP_IP4)
 			params.ndis_ip4csum = NDIS_OFFLOAD_PARAM_TX;
 		else
 			goto unsupported;
 	}
-	if (rx_offloads & DEV_RX_OFFLOAD_IPV4_CKSUM) {
+	if (rx_offloads & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) {
 		if (hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_IP4)
 			params.ndis_ip4csum |= NDIS_OFFLOAD_PARAM_RX;
 		else
 			goto unsupported;
 	}
 
-	if (tx_offloads & DEV_TX_OFFLOAD_TCP_TSO) {
+	if (tx_offloads & RTE_ETH_TX_OFFLOAD_TCP_TSO) {
 		if (hwcaps.ndis_lsov2.ndis_ip4_encap & NDIS_OFFLOAD_ENCAP_8023)
 			params.ndis_lsov2_ip4 = NDIS_OFFLOAD_LSOV2_ON;
 		else
@@ -874,41 +908,41 @@ int hn_rndis_get_offload(struct hn_data *hv,
 		return error;
 	}
 
-	dev_info->tx_offload_capa = DEV_TX_OFFLOAD_MULTI_SEGS |
-				    DEV_TX_OFFLOAD_VLAN_INSERT;
+	dev_info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
+				    RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
 
 	if ((hwcaps.ndis_csum.ndis_ip4_txcsum & HN_NDIS_TXCSUM_CAP_IP4)
 	    == HN_NDIS_TXCSUM_CAP_IP4)
-		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_IPV4_CKSUM;
+		dev_info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM;
 
 	if ((hwcaps.ndis_csum.ndis_ip4_txcsum & HN_NDIS_TXCSUM_CAP_TCP4)
 	    == HN_NDIS_TXCSUM_CAP_TCP4 &&
 	    (hwcaps.ndis_csum.ndis_ip6_txcsum & HN_NDIS_TXCSUM_CAP_TCP6)
 	    == HN_NDIS_TXCSUM_CAP_TCP6)
-		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_TCP_CKSUM;
+		dev_info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
 
 	if ((hwcaps.ndis_csum.ndis_ip4_txcsum & NDIS_TXCSUM_CAP_UDP4) &&
 	    (hwcaps.ndis_csum.ndis_ip6_txcsum & NDIS_TXCSUM_CAP_UDP6))
-		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_UDP_CKSUM;
+		dev_info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_UDP_CKSUM;
 
 	if ((hwcaps.ndis_lsov2.ndis_ip4_encap & NDIS_OFFLOAD_ENCAP_8023) &&
 	    (hwcaps.ndis_lsov2.ndis_ip6_opts & HN_NDIS_LSOV2_CAP_IP6)
 	    == HN_NDIS_LSOV2_CAP_IP6)
-		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_TCP_TSO;
+		dev_info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_TCP_TSO;
 
-	dev_info->rx_offload_capa = DEV_RX_OFFLOAD_VLAN_STRIP |
-				    DEV_RX_OFFLOAD_RSS_HASH;
+	dev_info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_VLAN_STRIP |
+				    RTE_ETH_RX_OFFLOAD_RSS_HASH;
 
 	if (hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_IP4)
-		dev_info->rx_offload_capa |= DEV_RX_OFFLOAD_IPV4_CKSUM;
+		dev_info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_IPV4_CKSUM;
 
 	if ((hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_TCP4) &&
 	    (hwcaps.ndis_csum.ndis_ip6_rxcsum & NDIS_RXCSUM_CAP_TCP6))
-		dev_info->rx_offload_capa |= DEV_RX_OFFLOAD_TCP_CKSUM;
+		dev_info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
 
 	if ((hwcaps.ndis_csum.ndis_ip4_rxcsum & NDIS_RXCSUM_CAP_UDP4) &&
 	    (hwcaps.ndis_csum.ndis_ip6_rxcsum & NDIS_RXCSUM_CAP_UDP6))
-		dev_info->rx_offload_capa |= DEV_RX_OFFLOAD_UDP_CKSUM;
+		dev_info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_UDP_CKSUM;
 
 	return 0;
 }
@@ -1071,10 +1105,17 @@ hn_rndis_get_eaddr(struct hn_data *hv, uint8_t *eaddr)
 	if (error)
 		return error;
 
-	PMD_DRV_LOG(INFO, "MAC address %02x:%02x:%02x:%02x:%02x:%02x",
+	PMD_DRV_LOG(INFO, "MAC address " RTE_ETHER_ADDR_PRT_FMT,
 		    eaddr[0], eaddr[1], eaddr[2],
 		    eaddr[3], eaddr[4], eaddr[5]);
 	return 0;
+}
+
+int
+hn_rndis_get_mtu(struct hn_data *hv, uint32_t *mtu)
+{
+	return hn_rndis_query(hv, OID_GEN_MAXIMUM_FRAME_SIZE, NULL, 0,
+			       mtu, sizeof(uint32_t));
 }
 
 int
@@ -1101,6 +1142,10 @@ hn_rndis_attach(struct hn_data *hv)
 void
 hn_rndis_detach(struct hn_data *hv)
 {
+	struct rte_eth_dev *dev = &rte_eth_devices[hv->port_id];
+
+	rte_eal_alarm_cancel(hn_rndis_link_alarm, dev);
+
 	/* Halt the RNDIS. */
 	hn_rndis_halt(hv);
 }

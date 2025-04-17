@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2020 Broadcom
+ * Copyright(c) 2014-2023 Broadcom
  * All rights reserved.
  */
 
@@ -11,13 +11,17 @@
 #include "tf_ext_flow_handle.h"
 #include "ulp_mark_mgr.h"
 #include "bnxt_tf_common.h"
-#include "ulp_template_db.h"
+#include "ulp_template_db_enum.h"
 #include "ulp_template_struct.h"
 
 #define ULP_MARK_DB_ENTRY_SET_VALID(mark_info) ((mark_info)->flags |=\
 						BNXT_ULP_MARK_VALID)
 #define ULP_MARK_DB_ENTRY_IS_INVALID(mark_info) (!((mark_info)->flags &\
 						   BNXT_ULP_MARK_VALID))
+#define ULP_MARK_DB_ENTRY_SET_VFR_ID(mark_info) ((mark_info)->flags |=\
+						 BNXT_ULP_MARK_VFR_ID)
+#define ULP_MARK_DB_ENTRY_IS_VFR_ID(mark_info) ((mark_info)->flags &\
+						BNXT_ULP_MARK_VFR_ID)
 #define ULP_MARK_DB_ENTRY_IS_GLOBAL_HW_FID(mark_info) ((mark_info)->flags &\
 						BNXT_ULP_MARK_GLOBAL_HW_FID)
 
@@ -69,13 +73,19 @@ ulp_mark_db_init(struct bnxt_ulp_context *ctxt)
 		return -EINVAL;
 	}
 
+	if (!dparms->mark_db_lfid_entries || !dparms->mark_db_gfid_entries) {
+		BNXT_TF_DBG(DEBUG, "mark Table is not allocated\n");
+		bnxt_ulp_cntxt_ptr2_mark_db_set(ctxt, NULL);
+		return 0;
+	}
+
 	mark_tbl = rte_zmalloc("ulp_rx_mark_tbl_ptr",
 			       sizeof(struct bnxt_ulp_mark_tbl), 0);
 	if (!mark_tbl)
 		goto mem_error;
 
 	/* Need to allocate 2 * Num flows to account for hash type bit.*/
-	mark_tbl->lfid_num_entries = dparms->lfid_entries;
+	mark_tbl->lfid_num_entries = dparms->mark_db_lfid_entries;
 	mark_tbl->lfid_tbl = rte_zmalloc("ulp_rx_em_flow_mark_table",
 					 mark_tbl->lfid_num_entries *
 					 sizeof(struct bnxt_lfid_mark_info),
@@ -84,7 +94,10 @@ ulp_mark_db_init(struct bnxt_ulp_context *ctxt)
 		goto mem_error;
 
 	/* Need to allocate 2 * Num flows to account for hash type bit */
-	mark_tbl->gfid_num_entries = dparms->gfid_entries;
+	mark_tbl->gfid_num_entries = dparms->mark_db_gfid_entries;
+	if (!mark_tbl->gfid_num_entries)
+		goto gfid_not_required;
+
 	mark_tbl->gfid_tbl = rte_zmalloc("ulp_rx_eem_flow_mark_table",
 					 mark_tbl->gfid_num_entries *
 					 sizeof(struct bnxt_gfid_mark_info),
@@ -103,18 +116,21 @@ ulp_mark_db_init(struct bnxt_ulp_context *ctxt)
 	mark_tbl->gfid_mask	= (mark_tbl->gfid_num_entries / 2) - 1;
 	mark_tbl->gfid_type_bit = (mark_tbl->gfid_num_entries / 2);
 
-	BNXT_TF_DBG(DEBUG, "GFID Max = 0x%08x\nGFID MASK = 0x%08x\n",
+	BNXT_TF_DBG(DEBUG, "GFID Max = 0x%08x GFID MASK = 0x%08x\n",
 		    mark_tbl->gfid_num_entries - 1,
 		    mark_tbl->gfid_mask);
 
+gfid_not_required:
 	/* Add the mark tbl to the ulp context. */
 	bnxt_ulp_cntxt_ptr2_mark_db_set(ctxt, mark_tbl);
 	return 0;
 
 mem_error:
-	rte_free(mark_tbl->gfid_tbl);
-	rte_free(mark_tbl->lfid_tbl);
-	rte_free(mark_tbl);
+	if (mark_tbl) {
+		rte_free(mark_tbl->gfid_tbl);
+		rte_free(mark_tbl->lfid_tbl);
+		rte_free(mark_tbl);
+	}
 	BNXT_TF_DBG(DEBUG, "Failed to allocate memory for mark mgr\n");
 	return -ENOMEM;
 }
@@ -153,6 +169,8 @@ ulp_mark_db_deinit(struct bnxt_ulp_context *ctxt)
  *
  * fid [in] The flow id that is returned by HW in BD
  *
+ * vfr_flag [out].it indicatesif mark is vfr_id or mark id
+ *
  * mark [out] The mark that is associated with the FID
  *
  */
@@ -160,6 +178,7 @@ int32_t
 ulp_mark_db_mark_get(struct bnxt_ulp_context *ctxt,
 		     bool is_gfid,
 		     uint32_t fid,
+		     uint32_t *vfr_flag,
 		     uint32_t *mark)
 {
 	struct bnxt_ulp_mark_tbl *mtbl;
@@ -169,10 +188,8 @@ ulp_mark_db_mark_get(struct bnxt_ulp_context *ctxt,
 		return -EINVAL;
 
 	mtbl = bnxt_ulp_cntxt_ptr2_mark_db_get(ctxt);
-	if (!mtbl) {
-		BNXT_TF_DBG(ERR, "Unable to get Mark Table\n");
+	if (!mtbl)
 		return -EINVAL;
-	}
 
 	idx = ulp_mark_db_idx_get(is_gfid, fid, mtbl);
 
@@ -181,18 +198,14 @@ ulp_mark_db_mark_get(struct bnxt_ulp_context *ctxt,
 		    ULP_MARK_DB_ENTRY_IS_INVALID(&mtbl->gfid_tbl[idx]))
 			return -EINVAL;
 
-		BNXT_TF_DBG(DEBUG, "Get GFID[0x%0x] = 0x%0x\n",
-			    idx, mtbl->gfid_tbl[idx].mark_id);
-
+		*vfr_flag = ULP_MARK_DB_ENTRY_IS_VFR_ID(&mtbl->gfid_tbl[idx]);
 		*mark = mtbl->gfid_tbl[idx].mark_id;
 	} else {
 		if (idx >= mtbl->lfid_num_entries ||
 		    ULP_MARK_DB_ENTRY_IS_INVALID(&mtbl->lfid_tbl[idx]))
 			return -EINVAL;
 
-		BNXT_TF_DBG(DEBUG, "Get LFID[0x%0x] = 0x%0x\n",
-			    idx, mtbl->lfid_tbl[idx].mark_id);
-
+		*vfr_flag = ULP_MARK_DB_ENTRY_IS_VFR_ID(&mtbl->lfid_tbl[idx]);
 		*mark = mtbl->lfid_tbl[idx].mark_id;
 	}
 
@@ -249,8 +262,12 @@ ulp_mark_db_mark_add(struct bnxt_ulp_context *ctxt,
 			BNXT_TF_DBG(ERR, "Mark index greater than allocated\n");
 			return -EINVAL;
 		}
+		BNXT_TF_DBG(DEBUG, "Set LFID[0x%0x] = 0x%0x\n", fid, mark);
 		mtbl->lfid_tbl[fid].mark_id = mark;
 		ULP_MARK_DB_ENTRY_SET_VALID(&mtbl->lfid_tbl[fid]);
+
+		if (mark_flag & BNXT_ULP_MARK_VFR_ID)
+			ULP_MARK_DB_ENTRY_SET_VFR_ID(&mtbl->lfid_tbl[fid]);
 	}
 
 	return 0;

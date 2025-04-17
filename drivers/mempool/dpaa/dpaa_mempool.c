@@ -36,7 +36,9 @@ struct dpaa_memseg_list rte_dpaa_memsegs
 	= TAILQ_HEAD_INITIALIZER(rte_dpaa_memsegs);
 
 struct dpaa_bp_info *rte_dpaa_bpid_info;
-int dpaa_logtype_mempool;
+
+RTE_LOG_REGISTER_DEFAULT(dpaa_logtype_mempool, NOTICE);
+#define RTE_LOGTYPE_DPAA_MEMPOOL dpaa_logtype_mempool
 
 static int
 dpaa_mbuf_create_pool(struct rte_mempool *mp)
@@ -52,7 +54,7 @@ dpaa_mbuf_create_pool(struct rte_mempool *mp)
 
 	MEMPOOL_INIT_FUNC_TRACE();
 
-	if (unlikely(!RTE_PER_LCORE(dpaa_io))) {
+	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
 			DPAA_MEMPOOL_ERR(
@@ -133,6 +135,7 @@ dpaa_mbuf_free_pool(struct rte_mempool *mp)
 		DPAA_MEMPOOL_INFO("BMAN pool freed for bpid =%d",
 				  bp_info->bpid);
 		rte_free(mp->pool_data);
+		bp_info->bp = NULL;
 		mp->pool_data = NULL;
 	}
 }
@@ -168,7 +171,7 @@ dpaa_mbuf_free_bulk(struct rte_mempool *pool,
 	DPAA_MEMPOOL_DPDEBUG("Request to free %d buffers in bpid = %d",
 			     n, bp_info->bpid);
 
-	if (unlikely(!RTE_PER_LCORE(dpaa_io))) {
+	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
 			DPAA_MEMPOOL_ERR("rte_dpaa_portal_init failed with ret: %d",
@@ -223,7 +226,7 @@ dpaa_mbuf_alloc_bulk(struct rte_mempool *pool,
 		return -1;
 	}
 
-	if (unlikely(!RTE_PER_LCORE(dpaa_io))) {
+	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
 			DPAA_MEMPOOL_ERR("rte_dpaa_portal_init failed with ret: %d",
@@ -256,7 +259,7 @@ dpaa_mbuf_alloc_bulk(struct rte_mempool *pool,
 		}
 		/* assigning mbuf from the acquired objects */
 		for (i = 0; (i < ret) && bufs[i].addr; i++) {
-			/* TODO-errata - objerved that bufs may be null
+			/* TODO-errata - observed that bufs may be null
 			 * i.e. first buffer is valid, remaining 6 buffers
 			 * may be null.
 			 */
@@ -356,11 +359,4 @@ static const struct rte_mempool_ops dpaa_mpool_ops = {
 	.populate = dpaa_populate,
 };
 
-MEMPOOL_REGISTER_OPS(dpaa_mpool_ops);
-
-RTE_INIT(dpaa_mp_init_log)
-{
-	dpaa_logtype_mempool = rte_log_register("mempool.dpaa");
-	if (dpaa_logtype_mempool >= 0)
-		rte_log_set_level(dpaa_logtype_mempool, RTE_LOG_NOTICE);
-}
+RTE_MEMPOOL_REGISTER_OPS(dpaa_mpool_ops);

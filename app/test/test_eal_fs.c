@@ -8,8 +8,17 @@
 #include <string.h>
 #include <errno.h>
 
-/* eal_filesystem.h is not a public header file, so use relative path */
-#include "../../lib/librte_eal/common/eal_filesystem.h"
+#include "eal_filesystem.h"
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_eal_fs(void)
+{
+	printf("eal_fs not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
 
 static int
 test_parse_sysfs_value(void)
@@ -174,4 +183,6 @@ test_eal_fs(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(eal_fs_autotest, test_eal_fs);
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_FAST_TEST(eal_fs_autotest, true, true, test_eal_fs);

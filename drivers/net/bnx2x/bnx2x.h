@@ -16,7 +16,7 @@
 
 #include <rte_byteorder.h>
 #include <rte_spinlock.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_io.h>
 
 #include "bnx2x_osal.h"
@@ -30,58 +30,12 @@
 
 #include "elink.h"
 
-#ifndef RTE_EXEC_ENV_FREEBSD
-#include <linux/pci_regs.h>
-
-#define PCIY_PMG                       PCI_CAP_ID_PM
-#define PCIY_MSI                       PCI_CAP_ID_MSI
-#define PCIY_EXPRESS                   PCI_CAP_ID_EXP
-#define PCIY_MSIX                      PCI_CAP_ID_MSIX
-#define PCIR_EXPRESS_DEVICE_STA        PCI_EXP_TYPE_RC_EC
-#define PCIM_EXP_STA_TRANSACTION_PND   PCI_EXP_DEVSTA_TRPND
-#define PCIR_EXPRESS_LINK_STA          PCI_EXP_LNKSTA
-#define PCIM_LINK_STA_WIDTH            PCI_EXP_LNKSTA_NLW
-#define PCIM_LINK_STA_SPEED            PCI_EXP_LNKSTA_CLS
-#define PCIR_EXPRESS_DEVICE_CTL        PCI_EXP_DEVCTL
-#define PCIM_EXP_CTL_MAX_PAYLOAD       PCI_EXP_DEVCTL_PAYLOAD
-#define PCIM_EXP_CTL_MAX_READ_REQUEST  PCI_EXP_DEVCTL_READRQ
-#define PCIR_POWER_STATUS              PCI_PM_CTRL
-#define PCIM_PSTAT_DMASK               PCI_PM_CTRL_STATE_MASK
-#define PCIM_PSTAT_PME                 PCI_PM_CTRL_PME_STATUS
-#define PCIM_PSTAT_D3                  0x3
-#define PCIM_PSTAT_PMEENABLE           PCI_PM_CTRL_PME_ENABLE
-#define PCIR_MSIX_CTRL                 PCI_MSIX_FLAGS
-#define PCIM_MSIXCTRL_TABLE_SIZE       PCI_MSIX_FLAGS_QSIZE
-#else
-#include <dev/pci/pcireg.h>
-#endif
-
 #define IFM_10G_CX4                    20 /* 10GBase CX4 copper */
 #define IFM_10G_TWINAX                 22 /* 10GBase Twinax copper */
 #define IFM_10G_T                      26 /* 10GBase-T - RJ45 */
 
-#ifndef RTE_EXEC_ENV_FREEBSD
-#define PCIR_EXPRESS_DEVICE_STA        PCI_EXP_TYPE_RC_EC
-#define PCIM_EXP_STA_TRANSACTION_PND   PCI_EXP_DEVSTA_TRPND
-#define PCIR_EXPRESS_LINK_STA          PCI_EXP_LNKSTA
-#define PCIM_LINK_STA_WIDTH            PCI_EXP_LNKSTA_NLW
-#define PCIM_LINK_STA_SPEED            PCI_EXP_LNKSTA_CLS
-#define PCIR_EXPRESS_DEVICE_CTL        PCI_EXP_DEVCTL
-#define PCIM_EXP_CTL_MAX_PAYLOAD       PCI_EXP_DEVCTL_PAYLOAD
-#define PCIM_EXP_CTL_MAX_READ_REQUEST  PCI_EXP_DEVCTL_READRQ
-#else
-#define PCIR_EXPRESS_DEVICE_STA	PCIER_DEVICE_STA
-#define PCIM_EXP_STA_TRANSACTION_PND   PCIEM_STA_TRANSACTION_PND
-#define PCIR_EXPRESS_LINK_STA          PCIER_LINK_STA
-#define PCIM_LINK_STA_WIDTH            PCIEM_LINK_STA_WIDTH
-#define PCIM_LINK_STA_SPEED            PCIEM_LINK_STA_SPEED
-#define PCIR_EXPRESS_DEVICE_CTL        PCIER_DEVICE_CTL
-#define PCIM_EXP_CTL_MAX_PAYLOAD       PCIEM_CTL_MAX_PAYLOAD
-#define PCIM_EXP_CTL_MAX_READ_REQUEST  PCIEM_CTL_MAX_READ_REQUEST
-#endif
-
 #ifndef ARRAY_SIZE
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#define ARRAY_SIZE(arr) RTE_DIM(arr)
 #endif
 #ifndef DIV_ROUND_UP
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
@@ -681,13 +635,13 @@ struct bnx2x_slowpath {
 }; /* struct bnx2x_slowpath */
 
 /*
- * Port specifc data structure.
+ * Port specific data structure.
  */
 struct bnx2x_port {
     /*
      * Port Management Function (for 57711E only).
      * When this field is set the driver instance is
-     * responsible for managing port specifc
+     * responsible for managing port specific
      * configurations such as handling link attentions.
      */
     uint32_t pmf;
@@ -732,7 +686,7 @@ struct bnx2x_port {
 
     /*
      * MCP scratchpad address for port specific statistics.
-     * The device is responsible for writing statistcss
+     * The device is responsible for writing statistics
      * back to the MCP for use with management firmware such
      * as UMP/NC-SI.
      */
@@ -937,8 +891,8 @@ struct bnx2x_devinfo {
  * already registered for this port (which means that the user wants storage
  * services).
  * 2. During cnic-related load, to know if offload mode is already configured
- * in the HW or needs to be configrued. Since the transition from nic-mode to
- * offload-mode in HW causes traffic coruption, nic-mode is configured only
+ * in the HW or needs to be configured. Since the transition from nic-mode to
+ * offload-mode in HW causes traffic corruption, nic-mode is configured only
  * in ports on which storage services where never requested.
  */
 #define CONFIGURE_NIC_MODE(sc) (!CHIP_IS_E1x(sc) && !CNIC_ENABLED(sc))
@@ -1000,8 +954,8 @@ struct bnx2x_sp_objs {
  * link parameters twice.
  */
 struct bnx2x_link_report_data {
-	uint16_t      line_speed;        /* Effective line speed */
-	unsigned long link_report_flags; /* BNX2X_LINK_REPORT_XXX flags */
+	uint16_t line_speed;        /* Effective line speed */
+	uint32_t link_report_flags; /* BNX2X_LINK_REPORT_XXX flags */
 };
 
 enum {
@@ -1232,7 +1186,7 @@ struct bnx2x_softc {
 	/* slow path */
 	struct bnx2x_dma      sp_dma;
 	struct bnx2x_slowpath *sp;
-	unsigned long       sp_state;
+	uint32_t	    sp_state;
 
 	/* slow path queue */
 	struct bnx2x_dma spq_dma;
@@ -1816,10 +1770,6 @@ static const uint32_t dmae_reg_go_c[] = {
 #define PCI_PM_D0    1
 #define PCI_PM_D3hot 2
 
-int  bnx2x_test_bit(int nr, volatile unsigned long * addr);
-void bnx2x_set_bit(unsigned int nr, volatile unsigned long * addr);
-void bnx2x_clear_bit(int nr, volatile unsigned long * addr);
-int  bnx2x_test_and_clear_bit(int nr, volatile unsigned long * addr);
 int  bnx2x_cmpxchg(volatile int *addr, int old, int new);
 
 int bnx2x_dma_alloc(struct bnx2x_softc *sc, size_t size,
@@ -1906,18 +1856,19 @@ bnx2x_hc_ack_sb(struct bnx2x_softc *sc, uint8_t sb_id, uint8_t storm,
 {
 	uint32_t hc_addr = (HC_REG_COMMAND_REG + SC_PORT(sc) * 32 +
 			COMMAND_REG_INT_ACK);
-	struct igu_ack_register igu_ack;
-	uint32_t *val = NULL;
+	union {
+		struct igu_ack_register igu_ack;
+		uint32_t val;
+	} val;
 
-	igu_ack.status_block_index = index;
-	igu_ack.sb_id_and_flags =
+	val.igu_ack.status_block_index = index;
+	val.igu_ack.sb_id_and_flags =
 		((sb_id << IGU_ACK_REGISTER_STATUS_BLOCK_ID_SHIFT) |
 		 (storm << IGU_ACK_REGISTER_STORM_ID_SHIFT) |
 		 (update << IGU_ACK_REGISTER_UPDATE_INDEX_SHIFT) |
 		 (op << IGU_ACK_REGISTER_INTERRUPT_MODE_SHIFT));
 
-	val = (uint32_t *)&igu_ack;
-	REG_WR(sc, hc_addr, *val);
+	REG_WR(sc, hc_addr, val.val);
 
 	/* Make sure that ACK is written */
 	mb();

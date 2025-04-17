@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
- * Copyright(c) 2018-2019 Pensando Systems, Inc. All rights reserved.
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright 2018-2022 Advanced Micro Devices, Inc.
  */
 
 #ifndef _IONIC_RX_FILTER_H_
@@ -7,7 +7,6 @@
 
 #include <rte_spinlock.h>
 
-#include "ionic_osdep.h"
 #include "ionic_if.h"
 
 #define IONIC_RXQ_INDEX_ANY		(0xFFFF)
@@ -15,6 +14,7 @@ struct ionic_rx_filter {
 	uint32_t flow_id;
 	uint32_t filter_id;
 	uint16_t rxq_index;
+	uint16_t match;
 	struct ionic_rx_filter_add_cmd cmd;
 	LIST_ENTRY(ionic_rx_filter) by_hash;
 	LIST_ENTRY(ionic_rx_filter) by_id;
@@ -34,7 +34,6 @@ struct ionic_admin_ctx;
 struct ionic_lif;
 
 void ionic_rx_filter_free(struct ionic_rx_filter *f);
-int ionic_rx_filter_del(struct ionic_lif *lif, struct ionic_rx_filter *f);
 int ionic_rx_filters_init(struct ionic_lif *lif);
 void ionic_rx_filters_deinit(struct ionic_lif *lif);
 int ionic_rx_filter_save(struct ionic_lif *lif, uint32_t flow_id,

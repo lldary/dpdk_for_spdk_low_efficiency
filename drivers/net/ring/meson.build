@@ -2,4 +2,5 @@
 # Copyright(c) 2017 Intel Corporation
 
 sources = files('rte_eth_ring.c')
-install_headers('rte_eth_ring.h')
+headers = files('rte_eth_ring.h')
+require_iova_in_mbuf = false

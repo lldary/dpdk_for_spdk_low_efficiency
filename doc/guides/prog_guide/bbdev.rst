@@ -13,7 +13,7 @@ optimized libraries to appear as virtual bbdev devices.
 The functional scope of the BBDEV library are those functions in relation to
 the 3GPP Layer 1 signal processing (channel coding, modulation, ...).
 
-The framework currently only supports Turbo Code FEC function.
+The framework currently only supports FEC function.
 
 
 Design Principles
@@ -261,16 +261,66 @@ information:
   structure, this is where capabilities reside along with other specifics like:
   maximum queue sizes and priority level.
 
-.. code-block:: c
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev.h
+   :language: c
+   :start-after: Structure rte_bbdev_driver_info 8<
+   :end-before: >8 End of structure rte_bbdev_driver_info.
 
-    struct rte_bbdev_info {
-        int socket_id;
-        const char *dev_name;
-        const struct rte_device *device;
-        uint16_t num_queues;
-        bool started;
-        struct rte_bbdev_driver_info drv;
-    };
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev.h
+   :language: c
+   :start-after: Structure rte_bbdev_info 8<
+   :end-before: >8 End of structure rte_bbdev_info.
+
+Capabilities details for LDPC Decoder
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On top of the ``RTE_BBDEV_LDPC_<*>`` capabilities
+the device also exposes the LLR numerical representation
+expected by the decoder as a fractional fixed-point representation.
+For instance, when the representation (``llr_size``, ``llr_decimals``) = (8, 2) respectively,
+this means that each input LLR in the data provided by the application must be computed
+as 8 total bits (including sign bit)
+where 2 of these are fractions bits (also referred to as S8.2 format).
+It is up to the user application during LLR generation to scale the LLR
+according to this optimal numerical representation.
+Any mis-scaled LLR would cause wireless performance degradation.
+
+The ``harq_buffer_size`` exposes the amount of dedicated DDR
+made available for the device operation.
+This is specific for accelerator non-integrated on the CPU (separate PCIe device)
+which may include separate on-card memory.
+
+Capabilities details for FFT function
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The total number of distinct time windows supported
+for the post-FFT point-wise multiplication is exposed as ``fft_windows_num``.
+The ``window_index`` provided for each cyclic shift
+in each ``rte_bbdev_op_fft`` operation is expected to be limited to that size.
+
+The information related to the width of each of these pre-configured window
+is also exposed using the ``fft_window_width`` array.
+This provides the number of non-null samples
+used for each window index when scaling back the size to a reference of 1024 FFT.
+The actual shape size is effectively scaled up or down
+based on the dynamic size of the FFT operation being used.
+
+This allows to distinguish different version of the flexible pointwise windowing
+applied to the FFT and exposes this platform configuration to the application.
+
+Other optional capabilities exposed during device discovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The device status can be used to expose additional information
+related to the state of the platform notably based on its configuration state
+or related to error management (correctable or non).
+
+The queue topology exposed to the device is provided on top of the capabilities.
+This provides the number of queues available
+for the exposed bbdev device (the physical device may have more)
+for each operation as well as the different level of priority available for arbitration.
+These are based on the arrays and parameters
+``num_queues``, ``queue_priority``, ``max_num_queues``, ``queue_size_lim``.
 
 
 Operation Processing
@@ -510,20 +560,10 @@ This structure has three elements:
 BBDEV Turbo Encode Operation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: c
-
-    struct rte_bbdev_op_turbo_enc {
-        struct rte_bbdev_op_data input;
-        struct rte_bbdev_op_data output;
-
-        uint32_t op_flags;
-        uint8_t rv_index;
-        uint8_t code_block_mode;
-        union {
-            struct rte_bbdev_op_enc_cb_params cb_params;
-            struct rte_bbdev_op_enc_tb_params tb_params;
-        };
-    };
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_turbo_enc 8<
+   :end-before: >8 End of structure rte_bbdev_op_turbo_enc.
 
 The Turbo encode structure includes the ``input`` and ``output`` mbuf
 data pointers. The provided mbuf pointer of ``input`` needs to be big
@@ -606,26 +646,10 @@ TB-mode. CB-mode is a reduced version, where only one CB exists:
 BBDEV Turbo Decode Operation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: c
-
-    struct rte_bbdev_op_turbo_dec {
-        struct rte_bbdev_op_data input;
-        struct rte_bbdev_op_data hard_output;
-        struct rte_bbdev_op_data soft_output;
-
-        uint32_t op_flags;
-        uint8_t rv_index;
-        uint8_t iter_min:4;
-        uint8_t iter_max:4;
-        uint8_t iter_count;
-        uint8_t ext_scale;
-        uint8_t num_maps;
-        uint8_t code_block_mode;
-        union {
-            struct rte_bbdev_op_dec_cb_params cb_params;
-            struct rte_bbdev_op_dec_tb_params tb_params;
-        };
-    };
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_turbo_dec 8<
+   :end-before: >8 End of structure rte_bbdev_op_turbo_dec.
 
 The Turbo decode structure includes the ``input``, ``hard_output`` and
 optionally the ``soft_output`` mbuf data pointers.
@@ -639,7 +663,7 @@ optionally the ``soft_output`` mbuf data pointers.
    "soft output","soft LLR output buffer (optional)"
    "op_flags","bitmask of all active operation capabilities"
    "rv_index","redundancy version index [0..3]"
-   "iter_max","maximum number of iterations to perofrm in decode all CBs"
+   "iter_max","maximum number of iterations to perform in decode all CBs"
    "iter_min","minimum number of iterations to perform in decoding all CBs"
    "iter_count","number of iterations to performed in decoding all CBs"
    "ext_scale","scale factor on extrinsic info (5 bits)"
@@ -751,26 +775,10 @@ given below.
 The structure passed for each LDPC encode operation is given below,
 with the operation flags forming a bitmask in the ``op_flags`` field.
 
-.. code-block:: c
-
-    struct rte_bbdev_op_ldpc_enc {
-
-        struct rte_bbdev_op_data input;
-        struct rte_bbdev_op_data output;
-
-        uint32_t op_flags;
-        uint8_t rv_index;
-        uint8_t basegraph;
-        uint16_t z_c;
-        uint16_t n_cb;
-        uint8_t q_m;
-        uint16_t n_filler;
-        uint8_t code_block_mode;
-        union {
-            struct rte_bbdev_op_enc_ldpc_cb_params cb_params;
-            struct rte_bbdev_op_enc_ldpc_tb_params tb_params;
-        };
-    };
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_ldpc_enc 8<
+   :end-before: >8 End of structure rte_bbdev_op_ldpc_enc.
 
 The LDPC encode parameters are set out in the table below.
 
@@ -891,6 +899,9 @@ given below.
 |RTE_BBDEV_LDPC_CRC_TYPE_24B_DROP                                    |
 | Set to drop the last CRC bits decoding output                      |
 +--------------------------------------------------------------------+
+|RTE_BBDEV_LDPC_CRC_TYPE_16_CHECK                                    |
+| Set for code block CRC-16 checking                                 |
++--------------------------------------------------------------------+
 |RTE_BBDEV_LDPC_DEINTERLEAVER_BYPASS                                 |
 | Set for bit-level de-interleaver bypass on input stream            |
 +--------------------------------------------------------------------+
@@ -927,9 +938,11 @@ given below.
 +--------------------------------------------------------------------+
 |RTE_BBDEV_LDPC_HARQ_6BIT_COMPRESSION                                |
 | Set if a device supports input/output HARQ compression             |
+| Data is packed as 6 bits by dropping and saturating the MSBs       |
 +--------------------------------------------------------------------+
 |RTE_BBDEV_LDPC_LLR_COMPRESSION                                      |
 | Set if a device supports input LLR compression                     |
+| Data is packed as 6 bits by dropping and saturating the MSBs       |
 +--------------------------------------------------------------------+
 |RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_IN_ENABLE                       |
 | Set if a device supports HARQ input to device's internal memory    |
@@ -940,37 +953,20 @@ given below.
 |RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_LOOPBACK                        |
 | Set if a device supports loopback access to HARQ internal memory   |
 +--------------------------------------------------------------------+
+|RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_FILLERS                         |
+| Set if a device includes LLR filler bits in HARQ circular buffer   |
++--------------------------------------------------------------------+
+|RTE_BBDEV_LDPC_HARQ_4BIT_COMPRESSION                                |
+|Set if a device supports input/output 4 bits HARQ compression       |
++--------------------------------------------------------------------+
 
 The structure passed for each LDPC decode operation is given below,
 with the operation flags forming a bitmask in the ``op_flags`` field.
 
-.. code-block:: c
-
-
-    struct rte_bbdev_op_ldpc_dec {
-
-        struct rte_bbdev_op_data input;
-        struct rte_bbdev_op_data hard_output;
-        struct rte_bbdev_op_data soft_output;
-        struct rte_bbdev_op_data harq_combined_input;
-        struct rte_bbdev_op_data harq_combined_output;
-
-        uint32_t op_flags;
-        uint8_t rv_index;
-        uint8_t basegraph;
-        uint16_t z_c;
-        uint16_t n_cb;
-        uint8_t q_m;
-        uint16_t n_filler;
-        uint8_t iter_max;
-        uint8_t iter_count;
-        uint8_t code_block_mode;
-        union {
-            struct rte_bbdev_op_dec_ldpc_cb_params cb_params;
-            struct rte_bbdev_op_dec_ldpc_tb_params tb_params;
-        };
-    };
-
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_ldpc_dec 8<
+   :end-before: >8 End of structure rte_bbdev_op_ldpc_dec.
 
 The LDPC decode parameters are set out in the table below.
 
@@ -1049,6 +1045,37 @@ capability RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_OUT_ENABLE is set
 then the HARQ is stored in memory internal to the device and not visible
 to BBDEV.
 
+.. note::
+
+    More explicitly for a typical usage of HARQ retransmission
+    in a VRAN application using a HW PMD, there will be 2 cases.
+
+    For 1st transmission, only the HARQ output is enabled:
+
+    - the harq_combined_output.offset is provided to a given address.
+      ie. typically an integer index * 32K,
+      where the index is tracked by the application based on code block index
+      for a given UE and HARQ process.
+
+    - the related operation flag would notably include
+      RTE_BBDEV_LDPC_HQ_COMBINE_OUT_ENABLE and RTE_BBDEV_LDPC_HARQ_6BIT_COMPRESSION.
+
+    - note that no explicit flush or reset of the memory is required.
+
+    For 2nd transmission, an input is also required to benefit from HARQ combination gain:
+
+    - the changes mentioned above are the same (note that rvIndex may be adjusted).
+
+    - the operation flag would additionally include the LDPC_HQ_COMBINE_IN_ENABLE flag.
+
+    - the harq_combined_input.offset must be set to the address of the related code block
+      (ie. same as the harq_combine_output index above for the same code block, HARQ process, UE).
+
+    - the harq_combined_input.length must be set to the length
+      which was provided back in the related harq_combined_output.length
+      when it has processed and dequeued (previous HARQ iteration).
+
+
 The output mbuf data structures are expected to be allocated by the
 application with enough room for the output data.
 
@@ -1082,6 +1109,194 @@ Figure :numref:`figure_turbo_tb_decode` above
 showing the Turbo decoding of CBs using BBDEV interface in TB-mode
 is also valid for LDPC decode.
 
+BBDEV FFT Operation
+~~~~~~~~~~~~~~~~~~~
+
+This operation allows to run a combination of DFT and/or IDFT and/or time-domain windowing.
+These can be used in a modular fashion (using bypass modes) or as a processing pipeline
+which can be used for FFT-based baseband signal processing.
+
+In more details it allows :
+
+* to process the data first through an IDFT of adjustable size and padding;
+* to perform the windowing as a programmable cyclic shift offset of the data
+  followed by a pointwise multiplication by a time domain window;
+* to process the related data through a DFT of adjustable size and
+  de-padding for each such cyclic shift output.
+
+A flexible number of Rx antennas are being processed in parallel with the same configuration.
+The API allows more generally for flexibility in what the PMD may support (capability flags) and
+flexibility to adjust some of the parameters of the processing.
+
+The structure passed for each FFT operation is given below,
+with the operation flags forming a bitmask in the ``op_flags`` field.
+
+  **NOTE:** The actual operation flags that may be used with a specific
+  bbdev PMD are dependent on the driver capabilities as reported via
+  ``rte_bbdev_info_get()``, and may be a subset of those below.
+
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_fft 8<
+   :end-before: >8 End of structure rte_bbdev_op_fft.
+
++--------------------------------------------------------------------+
+|Description of FFT capability flags                                 |
++====================================================================+
+|RTE_BBDEV_FFT_WINDOWING                                             |
+| Set to enable/support windowing in time domain                     |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_CS_ADJUSTMENT                                         |
+| Set to enable/support  the cyclic shift time offset adjustment     |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_DFT_BYPASS                                            |
+| Set to bypass the DFT and use directly the IDFT as an option       |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_IDFT_BYPASS                                           |
+| Set to bypass the IDFT and use directly the DFT as an option       |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_WINDOWING_BYPASS                                      |
+| Set to bypass the time domain windowing  as an option              |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_POWER_MEAS                                            |
+| Set to provide an optional power measurement of the DFT output     |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_FP16_INPUT                                            |
+| Set if the input data shall use FP16 format instead of INT16       |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_FP16_OUTPUT                                           |
+| Set if the output data shall use FP16 format instead of INT16      |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_TIMING_OFFSET_PER_CS                                  |
+| Set if device supports adjusting time offset per CS                |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_TIMING_ERROR                                          |
+| Set if device supports correcting for timing error                 |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_DEWINDOWING                                           |
+| Set if enabling the option FFT Dewindowing in Frequency domain     |
++--------------------------------------------------------------------+
+|RTE_BBDEV_FFT_FREQ_RESAMPLING                                       |
+| Set if device supports the optional frequency resampling           |
++--------------------------------------------------------------------+
+
+The FFT parameters are set out in the table below.
+
++-------------------------+--------------------------------------------------------------+
+|Parameter                |Description                                                   |
++=========================+==============================================================+
+|base_input               |input data                                                    |
++-------------------------+--------------------------------------------------------------+
+|base_output              |output data                                                   |
++-------------------------+--------------------------------------------------------------+
+|dewindowing_input        |optional frequency domain dewindowing input data              |
++-------------------------+--------------------------------------------------------------+
+|power_meas_output        |optional output data with power measurement on DFT output     |
++-------------------------+--------------------------------------------------------------+
+|op_flags                 |bitmask of all active operation capabilities                  |
++-------------------------+--------------------------------------------------------------+
+|input_sequence_size      |size of the input sequence in 32-bits points per antenna      |
++-------------------------+--------------------------------------------------------------+
+|input_leading_padding    |number of points padded at the start of input data            |
++-------------------------+--------------------------------------------------------------+
+|output_sequence_size     |size of the output sequence per antenna and cyclic shift      |
++-------------------------+--------------------------------------------------------------+
+|output_leading_depadding |number of points de-padded at the start of output data        |
++-------------------------+--------------------------------------------------------------+
+|window_index             |optional windowing profile index used for each cyclic shift   |
++-------------------------+--------------------------------------------------------------+
+|cs_bitmap                |bitmap of the cyclic shift output requested (LSB for index 0) |
++-------------------------+--------------------------------------------------------------+
+|num_antennas_log2        |number of antennas as a log2 (10 maps to 1024...)             |
++-------------------------+--------------------------------------------------------------+
+|idft_log2                |IDFT size as a log2                                           |
++-------------------------+--------------------------------------------------------------+
+|dft_log2                 |DFT size as a log2                                            |
++-------------------------+--------------------------------------------------------------+
+|cs_time_adjustment       |adjustment of time position of all the cyclic shift output    |
++-------------------------+--------------------------------------------------------------+
+|idft_shift               |shift down of signal level post iDFT                          |
++-------------------------+--------------------------------------------------------------+
+|dft_shift                |shift down of signal level post DFT                           |
++-------------------------+--------------------------------------------------------------+
+|ncs_reciprocal           |inverse of max number of CS normalized to 15b (ie. 231 for 12)|
++-------------------------+--------------------------------------------------------------+
+|power_shift              |shift down of level of power measurement when enabled         |
++-------------------------+--------------------------------------------------------------+
+|fp16_exp_adjust          |value added to FP16 exponent at conversion from INT16         |
++-------------------------+--------------------------------------------------------------+
+|freq_resample_mode       |frequency ressampling mode (0:transparent, 1-2: resample)     |
++-------------------------+--------------------------------------------------------------+
+| output_depadded_size    |output depadded size prior to frequency resampling            |
++-------------------------+--------------------------------------------------------------+
+|cs_theta_0               |timing error correction initial phase                         |
++-------------------------+--------------------------------------------------------------+
+|cs_theta_d               |timing error correction phase increment                       |
++-------------------------+--------------------------------------------------------------+
+|time_offset              |time offset per CS of time domain samples                     |
++-------------------------+--------------------------------------------------------------+
+
+The mbuf input ``base_input`` is mandatory for all bbdev PMDs and
+is the incoming data for the processing. Its size may not fit into an actual mbuf,
+but the structure is used to pass iova address.
+The mbuf output ``output`` is mandatory and is output of the FFT processing chain.
+Each point is a complex number of 32bits :
+either as 2 INT16 or as 2 FP16 based when the option supported.
+The data layout is based on contiguous concatenation of output data
+first by cyclic shift then by antenna.
+
+BBDEV MLD-TS Operation
+~~~~~~~~~~~~~~~~~~~~~~
+
+This operation allows to run the Tree Search (TS) portion of a Maximum Likelihood processing (MLD).
+
+This alternate equalization option accelerates the exploration of the best combination of
+transmitted symbols across layers minimizing the Euclidean distance between the received and
+reconstructed signal, then generates the LLRs to be used by the LDPC Decoder.
+The input is the results of the Q R decomposition: Q^Hy signal and R matrix.
+
+The structure passed for each MLD-TS operation is given below,
+with the operation flags forming a bitmask in the ``op_flags`` field.
+
+  **NOTE:** The actual operation flags that may be used with a specific
+  bbdev PMD are dependent on the driver capabilities as reported via
+  ``rte_bbdev_info_get()``, and may be a subset of those below.
+
+.. literalinclude:: ../../../lib/bbdev/rte_bbdev_op.h
+   :language: c
+   :start-after: Structure rte_bbdev_op_mldts 8<
+   :end-before: >8 End of structure rte_bbdev_op_mldts.
+
++--------------------------------------------------------------------+
+|Description of MLD-TS capability flags                              |
++====================================================================+
+|RTE_BBDEV_MLDTS_REP                                                 |
+| Set if the option to use repeated data from R channel is supported |
++--------------------------------------------------------------------+
+
+The MLD-TS parameters are set out in the table below.
+
++-------------------------+--------------------------------------------------------------+
+|Parameter                |Description                                                   |
++=========================+==============================================================+
+|qhy_input                |input data qHy                                                |
++-------------------------+--------------------------------------------------------------+
+|r_input                  |input data R triangular matrix                                |
++-------------------------+--------------------------------------------------------------+
+|output                   |output data (LLRs)                                            |
++-------------------------+--------------------------------------------------------------+
+|op_flags                 |bitmask of all active operation capabilities                  |
++-------------------------+--------------------------------------------------------------+
+|num_rbs                  |number of Resource Blocks                                     |
++-------------------------+--------------------------------------------------------------+
+|num_layers               |number of overlapping layers                                  |
++-------------------------+--------------------------------------------------------------+
+|q_m                      |array of modulation order for each layer                      |
++-------------------------+--------------------------------------------------------------+
+|r_rep                    |optional row repetition for the R matrix (subcarriers)        |
++-------------------------+--------------------------------------------------------------+
+|c_rep                    |optional column repetition for the R matrix (symbols)         |
++-------------------------+--------------------------------------------------------------+
 
 Sample code
 -----------

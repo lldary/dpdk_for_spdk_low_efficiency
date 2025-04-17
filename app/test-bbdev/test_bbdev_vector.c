@@ -5,7 +5,9 @@
 #ifdef RTE_EXEC_ENV_FREEBSD
 	#define _WITH_GETLINE
 #endif
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <rte_malloc.h>
 
@@ -13,6 +15,7 @@
 
 #define VALUE_DELIMITER ","
 #define ENTRY_DELIMITER "="
+#define FFT_WIN_SIZE 12
 
 const char *op_data_prefixes[] = {
 	"input",
@@ -149,6 +152,8 @@ op_decoder_flag_strtoul(char *token, uint32_t *op_flag_value)
 		*op_flag_value = RTE_BBDEV_TURBO_DEC_SCATTER_GATHER;
 	else if (!strcmp(token, "RTE_BBDEV_TURBO_DEC_TB_CRC_24B_KEEP"))
 		*op_flag_value = RTE_BBDEV_TURBO_DEC_TB_CRC_24B_KEEP;
+	else if (!strcmp(token, "RTE_BBDEV_TURBO_DEC_CRC_24B_DROP"))
+		*op_flag_value = RTE_BBDEV_TURBO_DEC_CRC_24B_DROP;
 	else {
 		printf("The given value is not a turbo decoder flag\n");
 		return -1;
@@ -167,6 +172,8 @@ op_ldpc_decoder_flag_strtoul(char *token, uint32_t *op_flag_value)
 		*op_flag_value = RTE_BBDEV_LDPC_CRC_TYPE_24B_CHECK;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_CRC_TYPE_24B_DROP"))
 		*op_flag_value = RTE_BBDEV_LDPC_CRC_TYPE_24B_DROP;
+	else if (!strcmp(token, "RTE_BBDEV_LDPC_CRC_TYPE_16_CHECK"))
+		*op_flag_value = RTE_BBDEV_LDPC_CRC_TYPE_16_CHECK;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_DEINTERLEAVER_BYPASS"))
 		*op_flag_value = RTE_BBDEV_LDPC_DEINTERLEAVER_BYPASS;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_HQ_COMBINE_IN_ENABLE"))
@@ -189,6 +196,8 @@ op_ldpc_decoder_flag_strtoul(char *token, uint32_t *op_flag_value)
 		*op_flag_value = RTE_BBDEV_LDPC_DEC_SCATTER_GATHER;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_HARQ_6BIT_COMPRESSION"))
 		*op_flag_value = RTE_BBDEV_LDPC_HARQ_6BIT_COMPRESSION;
+	else if (!strcmp(token, "RTE_BBDEV_LDPC_HARQ_4BIT_COMPRESSION"))
+		*op_flag_value = RTE_BBDEV_LDPC_HARQ_4BIT_COMPRESSION;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_LLR_COMPRESSION"))
 		*op_flag_value = RTE_BBDEV_LDPC_LLR_COMPRESSION;
 	else if (!strcmp(token,
@@ -202,6 +211,56 @@ op_ldpc_decoder_flag_strtoul(char *token, uint32_t *op_flag_value)
 		*op_flag_value = RTE_BBDEV_LDPC_INTERNAL_HARQ_MEMORY_LOOPBACK;
 	else {
 		printf("The given value is not a LDPC decoder flag\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+/* Convert FFT flag from string to unsigned long int. */
+static int
+op_fft_flag_strtoul(char *token, uint32_t *op_flag_value)
+{
+	if (!strcmp(token, "RTE_BBDEV_FFT_WINDOWING"))
+		*op_flag_value = RTE_BBDEV_FFT_WINDOWING;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_CS_ADJUSTMENT"))
+		*op_flag_value = RTE_BBDEV_FFT_CS_ADJUSTMENT;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_DFT_BYPASS"))
+		*op_flag_value = RTE_BBDEV_FFT_DFT_BYPASS;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_IDFT_BYPASS"))
+		*op_flag_value = RTE_BBDEV_FFT_IDFT_BYPASS;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_WINDOWING_BYPASS"))
+		*op_flag_value = RTE_BBDEV_FFT_WINDOWING_BYPASS;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_POWER_MEAS"))
+		*op_flag_value = RTE_BBDEV_FFT_POWER_MEAS;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_FP16_INPUT"))
+		*op_flag_value = RTE_BBDEV_FFT_FP16_INPUT;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_FP16_OUTPUT"))
+		*op_flag_value = RTE_BBDEV_FFT_FP16_OUTPUT;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_TIMING_OFFSET_PER_CS"))
+		*op_flag_value = RTE_BBDEV_FFT_TIMING_OFFSET_PER_CS;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_TIMING_ERROR"))
+		*op_flag_value = RTE_BBDEV_FFT_TIMING_ERROR;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_DEWINDOWING"))
+		*op_flag_value = RTE_BBDEV_FFT_DEWINDOWING;
+	else if (!strcmp(token, "RTE_BBDEV_FFT_FREQ_RESAMPLING"))
+		*op_flag_value = RTE_BBDEV_FFT_FREQ_RESAMPLING;
+	else {
+		printf("The given value is not a FFT flag\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+/* convert MLD flag from string to unsigned long int*/
+static int
+op_mld_flag_strtoul(char *token, uint32_t *op_flag_value)
+{
+	if (!strcmp(token, "RTE_BBDEV_MLDTS_REP"))
+		*op_flag_value = RTE_BBDEV_MLDTS_REP;
+	else {
+		printf("The given value is not a MLD flag\n");
 		return -1;
 	}
 
@@ -248,8 +307,10 @@ op_ldpc_encoder_flag_strtoul(char *token, uint32_t *op_flag_value)
 		*op_flag_value = RTE_BBDEV_LDPC_ENC_INTERRUPTS;
 	else if (!strcmp(token, "RTE_BBDEV_LDPC_ENC_SCATTER_GATHER"))
 		*op_flag_value = RTE_BBDEV_LDPC_ENC_SCATTER_GATHER;
+	else if (!strcmp(token, "RTE_BBDEV_LDPC_ENC_CONCATENATION"))
+		*op_flag_value = RTE_BBDEV_LDPC_ENC_CONCATENATION;
 	else {
-		printf("The given value is not a turbo encoder flag\n");
+		printf("The given value is not a LDPC encoder flag - %s\n", token);
 		return -1;
 	}
 
@@ -284,6 +345,14 @@ parse_turbo_flags(char *tokens, uint32_t *op_flags,
 			if (op_ldpc_decoder_flag_strtoul(tok, &op_flag_value)
 					== -1)
 				return -1;
+		} else if (op_type == RTE_BBDEV_OP_FFT) {
+			if (op_fft_flag_strtoul(tok, &op_flag_value)
+					== -1)
+				return -1;
+		} else if (op_type == RTE_BBDEV_OP_MLDTS) {
+			if (op_mld_flag_strtoul(tok, &op_flag_value)
+					== -1)
+				return -1;
 		} else {
 			return -1;
 		}
@@ -311,6 +380,10 @@ op_turbo_type_strtol(char *token, enum rte_bbdev_op_type *op_type)
 		*op_type = RTE_BBDEV_OP_LDPC_ENC;
 	else if (!strcmp(token, "RTE_BBDEV_OP_LDPC_DEC"))
 		*op_type = RTE_BBDEV_OP_LDPC_DEC;
+	else if (!strcmp(token, "RTE_BBDEV_OP_FFT"))
+		*op_type = RTE_BBDEV_OP_FFT;
+	else if (!strcmp(token, "RTE_BBDEV_OP_MLDTS"))
+		*op_type = RTE_BBDEV_OP_MLDTS;
 	else if (!strcmp(token, "RTE_BBDEV_OP_NONE"))
 		*op_type = RTE_BBDEV_OP_NONE;
 	else {
@@ -489,10 +562,6 @@ parse_decoder_params(const char *key_token, char *token,
 	} else if (!strcmp(key_token, "rv_index")) {
 		vector->mask |= TEST_BBDEV_VF_RV_INDEX;
 		turbo_dec->rv_index = (uint8_t) strtoul(token, &err, 0);
-		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
-	} else if (!strcmp(key_token, "iter_max")) {
-		vector->mask |= TEST_BBDEV_VF_ITER_MAX;
-		turbo_dec->iter_max = (uint8_t) strtoul(token, &err, 0);
 		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
 	} else if (!strcmp(key_token, "iter_min")) {
 		vector->mask |= TEST_BBDEV_VF_ITER_MIN;
@@ -820,10 +889,6 @@ parse_ldpc_decoder_params(const char *key_token, char *token,
 		vector->mask |= TEST_BBDEV_VF_EXPECTED_ITER_COUNT;
 		ldpc_dec->iter_count = (uint8_t) strtoul(token, &err, 0);
 		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
-	} else if (!strcmp(key_token, "iter_max")) {
-		vector->mask |= TEST_BBDEV_VF_ITER_MAX;
-		ldpc_dec->iter_max = (uint8_t) strtoul(token, &err, 0);
-		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
 	} else if (!strcmp(key_token, "code_block_mode")) {
 		vector->mask |= TEST_BBDEV_VF_CODE_BLOCK_MODE;
 		ldpc_dec->code_block_mode = (uint8_t) strtoul(token, &err, 0);
@@ -840,6 +905,226 @@ parse_ldpc_decoder_params(const char *key_token, char *token,
 			vector->expected_status = status;
 	} else {
 		printf("Not valid ldpc dec key: '%s'\n", key_token);
+		return -1;
+	}
+
+	if (ret != 0) {
+		printf("Failed with convert '%s\t%s'\n", key_token, token);
+		return -1;
+	}
+
+	return 0;
+}
+
+/* Parses FFT parameters and assigns to global variable. */
+static int
+parse_fft_params(const char *key_token, char *token,
+		struct test_bbdev_vector *vector)
+{
+	int ret = 0, status = 0, i, shift;
+	uint32_t op_flags = 0;
+	char *tok, *err = NULL;
+
+	struct rte_bbdev_op_fft *fft = &vector->fft;
+
+	if (starts_with(key_token, op_data_prefixes[DATA_INPUT])) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_INPUT,
+				op_data_prefixes[DATA_INPUT]);
+	} else if (starts_with(key_token, "dewin_input")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_HARQ_INPUT,
+				"dewin_input");
+	} else if (starts_with(key_token, "output")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_HARD_OUTPUT,
+				"output");
+	} else if (starts_with(key_token, "power_output")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_SOFT_OUTPUT,
+				"power_output");
+	} else if (!strcmp(key_token, "in_sequence_size")) {
+		fft->input_sequence_size = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "in_leading_padding")) {
+		fft->input_leading_padding = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "out_sequence_size")) {
+		fft->output_sequence_size = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "out_leading_depadding")) {
+		fft->output_leading_depadding = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "window_index")) {
+		tok = strtok(token, VALUE_DELIMITER);
+		if (tok == NULL)
+			return -1;
+		for (i = 0; i < FFT_WIN_SIZE; i++) {
+			shift = (i % 2) ? 4 : 0;
+			fft->window_index[i / 2] |= (uint32_t) strtoul(tok, &err, 0)
+					<< shift;
+			if (i < (FFT_WIN_SIZE - 1)) {
+				tok = strtok(NULL, VALUE_DELIMITER);
+				if (tok == NULL)
+					return -1;
+			}
+		}
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "cs_bitmap")) {
+		fft->cs_bitmap = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "num_antennas_log2")) {
+		fft->num_antennas_log2 = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "ifft_log2")) {
+		fft->idft_log2 = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "fft_log2")) {
+		fft->dft_log2 = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "cs_time_adjustment")) {
+		fft->cs_time_adjustment = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "ifft_shift")) {
+		fft->idft_shift = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "fft_shift")) {
+		fft->dft_shift = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "ncs_reciprocal")) {
+		fft->ncs_reciprocal = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "power_shift")) {
+		fft->power_shift = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "fp16_exponent_adjust")) {
+		fft->fp16_exp_adjust = (uint32_t) strtoul(token, &err, 0);
+		printf("%d\n", fft->fp16_exp_adjust);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "freq_resample_mode")) {
+		fft->freq_resample_mode = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "out_depadded_size")) {
+		fft->output_depadded_size = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "cs_theta_0")) {
+		tok = strtok(token, VALUE_DELIMITER);
+		if (tok == NULL)
+			return -1;
+		for (i = 0; i < FFT_WIN_SIZE; i++) {
+			fft->cs_theta_0[i] = (uint32_t) strtoul(tok, &err, 0);
+			if (i < (FFT_WIN_SIZE - 1)) {
+				tok = strtok(NULL, VALUE_DELIMITER);
+				if (tok == NULL)
+					return -1;
+			}
+		}
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "cs_theta_d")) {
+		tok = strtok(token, VALUE_DELIMITER);
+		if (tok == NULL)
+			return -1;
+		for (i = 0; i < FFT_WIN_SIZE; i++) {
+			fft->cs_theta_d[i] = (uint32_t) strtoul(tok, &err, 0);
+			if (i < (FFT_WIN_SIZE - 1)) {
+				tok = strtok(NULL, VALUE_DELIMITER);
+				if (tok == NULL)
+					return -1;
+			}
+		}
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "time_offset")) {
+		tok = strtok(token, VALUE_DELIMITER);
+		if (tok == NULL)
+			return -1;
+		for (i = 0; i < FFT_WIN_SIZE; i++) {
+			fft->time_offset[i] = (uint32_t) strtoul(tok, &err, 0);
+			if (i < (FFT_WIN_SIZE - 1)) {
+				tok = strtok(NULL, VALUE_DELIMITER);
+				if (tok == NULL)
+					return -1;
+			}
+		}
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "op_flags")) {
+		vector->mask |= TEST_BBDEV_VF_OP_FLAGS;
+		ret = parse_turbo_flags(token, &op_flags, vector->op_type);
+		if (!ret)
+			fft->op_flags = op_flags;
+	} else if (!strcmp(key_token, "expected_status")) {
+		vector->mask |= TEST_BBDEV_VF_EXPECTED_STATUS;
+		ret = parse_expected_status(token, &status, vector->op_type);
+		if (!ret)
+			vector->expected_status = status;
+	} else {
+		printf("Not valid fft key: '%s'\n", key_token);
+		return -1;
+	}
+
+	if (ret != 0) {
+		printf("Failed with convert '%s\t%s'\n", key_token, token);
+		return -1;
+	}
+
+	return 0;
+}
+
+/* parses MLD parameters and assigns to global variable */
+static int
+parse_mld_params(const char *key_token, char *token,
+		struct test_bbdev_vector *vector)
+{
+	int ret = 0, status = 0;
+	uint32_t op_flags = 0;
+	char *err = NULL;
+
+	struct rte_bbdev_op_mldts *mld = &vector->mldts;
+
+	if (starts_with(key_token, "qhy_input")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_INPUT, "qhy_input");
+	} else if (starts_with(key_token, "r_input")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_HARQ_INPUT, "r_input");
+	} else if (starts_with(key_token, "output")) {
+		ret = parse_data_entry(key_token, token, vector,
+				DATA_HARD_OUTPUT, "output");
+	} else if (!strcmp(key_token, "layers")) {
+		mld->num_layers = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "layer1")) {
+		mld->q_m[0] = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "layer2")) {
+		mld->q_m[1] = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "layer3")) {
+		mld->q_m[2] = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "layer4")) {
+		mld->q_m[3] = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "crep")) {
+		mld->c_rep = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "rrep")) {
+		mld->r_rep = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "rbs")) {
+		mld->num_rbs = (uint32_t) strtoul(token, &err, 0);
+		ret = ((err == NULL) || (*err != '\0')) ? -1 : 0;
+	} else if (!strcmp(key_token, "op_flags")) {
+		vector->mask |= TEST_BBDEV_VF_OP_FLAGS;
+		ret = parse_turbo_flags(token, &op_flags, vector->op_type);
+		if (!ret)
+			mld->op_flags = op_flags;
+	} else if (!strcmp(key_token, "expected_status")) {
+		vector->mask |= TEST_BBDEV_VF_EXPECTED_STATUS;
+		ret = parse_expected_status(token, &status, vector->op_type);
+		if (!ret)
+			vector->expected_status = status;
+	} else {
+		printf("Not valid mld key: '%s'\n", key_token);
 		return -1;
 	}
 
@@ -901,6 +1186,12 @@ parse_entry(char *entry, struct test_bbdev_vector *vector)
 			return -1;
 	} else if (vector->op_type == RTE_BBDEV_OP_LDPC_DEC) {
 		if (parse_ldpc_decoder_params(key_token, token, vector) == -1)
+			return -1;
+	} else if (vector->op_type == RTE_BBDEV_OP_FFT) {
+		if (parse_fft_params(key_token, token, vector) == -1)
+			return -1;
+	} else if (vector->op_type == RTE_BBDEV_OP_MLDTS) {
+		if (parse_mld_params(key_token, token, vector) == -1)
 			return -1;
 	}
 
@@ -970,6 +1261,40 @@ check_ldpc_decoder_segments(struct test_bbdev_vector *vector)
 		if (vector->entries[DATA_HARQ_OUTPUT].segments[i].addr == NULL)
 			return -1;
 
+	return 0;
+}
+
+static int
+check_fft_segments(struct test_bbdev_vector *vector)
+{
+	unsigned char i;
+
+	for (i = 0; i < vector->entries[DATA_INPUT].nb_segments; i++)
+		if (vector->entries[DATA_INPUT].segments[i].addr == NULL)
+			return -1;
+
+	for (i = 0; i < vector->entries[DATA_HARD_OUTPUT].nb_segments; i++)
+		if (vector->entries[DATA_HARD_OUTPUT].segments[i].addr == NULL)
+			return -1;
+	return 0;
+}
+
+static int
+check_mld_segments(struct test_bbdev_vector *vector)
+{
+	unsigned char i;
+
+	for (i = 0; i < vector->entries[DATA_INPUT].nb_segments; i++)
+		if (vector->entries[DATA_INPUT].segments[i].addr == NULL)
+			return -1;
+
+	for (i = 0; i < vector->entries[DATA_HARQ_INPUT].nb_segments; i++)
+		if (vector->entries[DATA_HARQ_INPUT].segments[i].addr == NULL)
+			return -1;
+
+	for (i = 0; i < vector->entries[DATA_HARD_OUTPUT].nb_segments; i++)
+		if (vector->entries[DATA_HARD_OUTPUT].segments[i].addr == NULL)
+			return -1;
 	return 0;
 }
 
@@ -1052,9 +1377,9 @@ check_decoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_CODE_BLOCK_MODE)) {
 		printf(
 			"WARNING: code_block_mode was not specified in vector file and will be set to 1 (0 - TB Mode, 1 - CB mode)\n");
-		turbo_dec->code_block_mode = 1;
+		turbo_dec->code_block_mode = RTE_BBDEV_CODE_BLOCK;
 	}
-	if (turbo_dec->code_block_mode == 0) {
+	if (turbo_dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		if (!(mask & TEST_BBDEV_VF_EA))
 			printf(
 				"WARNING: ea was not specified in vector file and will be set to 0\n");
@@ -1095,9 +1420,6 @@ check_decoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_ITER_MIN))
 		printf(
 			"WARNING: iter_min was not specified in vector file and will be set to 0\n");
-	if (!(mask & TEST_BBDEV_VF_ITER_MAX))
-		printf(
-			"WARNING: iter_max was not specified in vector file and will be set to 0\n");
 	if (!(mask & TEST_BBDEV_VF_EXPECTED_ITER_COUNT))
 		printf(
 			"WARNING: expected_iter_count was not specified in vector file and iter_count will not be validated\n");
@@ -1142,9 +1464,9 @@ check_ldpc_decoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_CODE_BLOCK_MODE)) {
 		printf(
 			"WARNING: code_block_mode was not specified in vector file and will be set to 1 (0 - TB Mode, 1 - CB mode)\n");
-		ldpc_dec->code_block_mode = 1;
+		ldpc_dec->code_block_mode = RTE_BBDEV_CODE_BLOCK;
 	}
-	if (ldpc_dec->code_block_mode == 0) {
+	if (ldpc_dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		if (!(mask & TEST_BBDEV_VF_EA))
 			printf(
 				"WARNING: ea was not specified in vector file and will be set to 0\n");
@@ -1170,12 +1492,49 @@ check_ldpc_decoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_RV_INDEX))
 		printf(
 			"INFO: rv_index was not specified in vector file and will be set to 0\n");
-	if (!(mask & TEST_BBDEV_VF_ITER_MAX))
-		printf(
-			"WARNING: iter_max was not specified in vector file and will be set to 0\n");
 	if (!(mask & TEST_BBDEV_VF_EXPECTED_ITER_COUNT))
 		printf(
 			"WARNING: expected_iter_count was not specified in vector file and iter_count will not be validated\n");
+	if (!(mask & TEST_BBDEV_VF_OP_FLAGS)) {
+		printf(
+			"WARNING: op_flags was not specified in vector file and capabilities will not be validated\n");
+	}
+	if (!(mask & TEST_BBDEV_VF_EXPECTED_STATUS))
+		printf(
+			"WARNING: expected_status was not specified in vector file and will be set to 0\n");
+	return 0;
+}
+
+/* Checks fft parameters. */
+static int
+check_fft(struct test_bbdev_vector *vector)
+{
+	const int mask = vector->mask;
+
+	if (check_fft_segments(vector) < 0)
+		return -1;
+
+	/* Check which params were set. */
+	if (!(mask & TEST_BBDEV_VF_OP_FLAGS)) {
+		printf(
+			"WARNING: op_flags was not specified in vector file and capabilities will not be validated\n");
+	}
+	if (!(mask & TEST_BBDEV_VF_EXPECTED_STATUS))
+		printf(
+			"WARNING: expected_status was not specified in vector file and will be set to 0\n");
+	return 0;
+}
+
+/* checks mld parameters */
+static int
+check_mld(struct test_bbdev_vector *vector)
+{
+	const int mask = vector->mask;
+
+	if (check_mld_segments(vector) < 0)
+		return -1;
+
+	/* Check which params were set */
 	if (!(mask & TEST_BBDEV_VF_OP_FLAGS)) {
 		printf(
 			"WARNING: op_flags was not specified in vector file and capabilities will not be validated\n");
@@ -1210,9 +1569,9 @@ check_encoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_CODE_BLOCK_MODE)) {
 		printf(
 			"WARNING: code_block_mode was not specified in vector file and will be set to 1\n");
-		vector->turbo_enc.code_block_mode = 1;
+		vector->turbo_enc.code_block_mode = RTE_BBDEV_CODE_BLOCK;
 	}
-	if (vector->turbo_enc.code_block_mode == 0) {
+	if (vector->turbo_enc.code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		if (!(mask & TEST_BBDEV_VF_EA) && (vector->turbo_enc.op_flags &
 				RTE_BBDEV_TURBO_RATE_MATCH))
 			printf(
@@ -1298,9 +1657,9 @@ check_ldpc_encoder(struct test_bbdev_vector *vector)
 	if (!(mask & TEST_BBDEV_VF_CODE_BLOCK_MODE)) {
 		printf(
 			"WARNING: code_block_mode was not specified in vector file and will be set to 1\n");
-		vector->turbo_enc.code_block_mode = 1;
+		vector->turbo_enc.code_block_mode = RTE_BBDEV_CODE_BLOCK;
 	}
-	if (vector->turbo_enc.code_block_mode == 0) {
+	if (vector->turbo_enc.code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 	} else {
 		if (!(mask & TEST_BBDEV_VF_E) && (vector->turbo_enc.op_flags &
 				RTE_BBDEV_TURBO_RATE_MATCH))
@@ -1343,6 +1702,12 @@ bbdev_check_vector(struct test_bbdev_vector *vector)
 			return -1;
 	} else if (vector->op_type == RTE_BBDEV_OP_LDPC_DEC) {
 		if (check_ldpc_decoder(vector) == -1)
+			return -1;
+	} else if (vector->op_type == RTE_BBDEV_OP_FFT) {
+		if (check_fft(vector) == -1)
+			return -1;
+	} else if (vector->op_type == RTE_BBDEV_OP_MLDTS) {
+		if (check_mld(vector) == -1)
 			return -1;
 	} else if (vector->op_type != RTE_BBDEV_OP_NONE) {
 		printf("Vector was not filled\n");

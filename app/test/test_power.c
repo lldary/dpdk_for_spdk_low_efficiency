@@ -11,7 +11,7 @@
 
 #include "test.h"
 
-#ifndef RTE_LIBRTE_POWER
+#ifndef RTE_LIB_POWER
 
 static int
 test_power(void)
@@ -133,7 +133,9 @@ test_power(void)
 	/* Perform tests for valid environments.*/
 	const enum power_management_env envs[] = {PM_ENV_ACPI_CPUFREQ,
 			PM_ENV_KVM_VM,
-			PM_ENV_PSTATE_CPUFREQ};
+			PM_ENV_PSTATE_CPUFREQ,
+			PM_ENV_AMD_PSTATE_CPUFREQ,
+			PM_ENV_CPPC_CPUFREQ};
 
 	unsigned int i;
 	for (i = 0; i < RTE_DIM(envs); ++i) {
@@ -141,7 +143,7 @@ test_power(void)
 		/* Test setting a valid environment */
 		ret = rte_power_set_env(envs[i]);
 		if (ret != 0) {
-			printf("Unexpectedly unsucceeded on setting a valid environment\n");
+			printf("Unexpectedly unsuccessful on setting a valid environment\n");
 			return -1;
 		}
 
@@ -171,4 +173,4 @@ fail_all:
 }
 #endif
 
-REGISTER_TEST_COMMAND(power_autotest, test_power);
+REGISTER_FAST_TEST(power_autotest, true, true, test_power);

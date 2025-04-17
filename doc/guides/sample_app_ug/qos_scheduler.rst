@@ -41,9 +41,9 @@ The application is located in the ``qos_sched`` sub-directory.
 
 .. note::
 
-    To get statistics on the sample app using the command line interface as described in the next section,
-    DPDK must be compiled defining *CONFIG_RTE_SCHED_COLLECT_STATS*,
-    which can be done by changing the configuration file for the specific target to be compiled.
+    Number of grinders is currently set to 8.
+    This can be modified by specifying RTE_SCHED_PORT_N_GRINDERS=N
+    in CFLAGS, where N is number of grinders.
 
 Running the Application
 -----------------------
@@ -57,7 +57,7 @@ The application has a number of command line options:
 
 .. code-block:: console
 
-    ./qos_sched [EAL options] -- <APP PARAMS>
+    ./<build_dir>/examples/dpdk-qos_sched [EAL options] -- <APP PARAMS>
 
 Mandatory application parameters include:
 
@@ -71,7 +71,7 @@ Optional application parameters include:
     In this mode, the application shows a command line that can be used for obtaining statistics while
     scheduling is taking place (see interactive mode below for more information).
 
-*   --mst n: Master core index (the default value is 1).
+*   --mnc n: Main core index (the default value is 1).
 
 *   --rsz "A, B, C": Ring sizes:
 
@@ -91,7 +91,7 @@ Optional application parameters include:
 *   B = I/O RX lcore write burst size to the output software rings,
     worker lcore read burst size from input software rings,QoS enqueue size (the default value is 64)
 
-*   C = QoS dequeue size (the default value is 32)
+*   C = QoS dequeue size (the default value is 63)
 
 *   D = Worker lcore write burst size to the NIC TX (the default value is 64)
 
@@ -123,143 +123,8 @@ needed for the QoS scheduler configuration.
 
 The profile file has the following format:
 
-::
-
-    ; port configuration [port]
-
-    frame overhead = 24
-    number of subports per port = 1
-
-    ; Subport configuration
-
-    [subport 0]
-    number of pipes per subport = 4096
-    queue sizes = 64 64 64 64 64 64 64 64 64 64 64 64 64
-    tb rate = 1250000000; Bytes per second
-    tb size = 1000000; Bytes
-    tc 0 rate = 1250000000;     Bytes per second
-    tc 1 rate = 1250000000;     Bytes per second
-    tc 2 rate = 1250000000;     Bytes per second
-    tc 3 rate = 1250000000;     Bytes per second
-    tc 4 rate = 1250000000;     Bytes per second
-    tc 5 rate = 1250000000;     Bytes per second
-    tc 6 rate = 1250000000;     Bytes per second
-    tc 7 rate = 1250000000;     Bytes per second
-    tc 8 rate = 1250000000;     Bytes per second
-    tc 9 rate = 1250000000;     Bytes per second
-    tc 10 rate = 1250000000;     Bytes per second
-    tc 11 rate = 1250000000;     Bytes per second
-    tc 12 rate = 1250000000;     Bytes per second
-
-    tc period = 10;             Milliseconds
-    tc oversubscription period = 10;     Milliseconds
-
-    pipe 0-4095 = 0;        These pipes are configured with pipe profile 0
-
-    ; Pipe configuration
-
-    [pipe profile 0]
-    tb rate = 305175; Bytes per second
-    tb size = 1000000; Bytes
-
-    tc 0 rate = 305175; Bytes per second
-    tc 1 rate = 305175; Bytes per second
-    tc 2 rate = 305175; Bytes per second
-    tc 3 rate = 305175; Bytes per second
-    tc 4 rate = 305175; Bytes per second
-    tc 5 rate = 305175; Bytes per second
-    tc 6 rate = 305175; Bytes per second
-    tc 7 rate = 305175; Bytes per second
-    tc 8 rate = 305175; Bytes per second
-    tc 9 rate = 305175; Bytes per second
-    tc 10 rate = 305175; Bytes per second
-    tc 11 rate = 305175; Bytes per second
-    tc 12 rate = 305175; Bytes per second
-    tc period = 40; Milliseconds
-
-    tc 0 oversubscription weight = 1
-    tc 1 oversubscription weight = 1
-    tc 2 oversubscription weight = 1
-    tc 3 oversubscription weight = 1
-    tc 4 oversubscription weight = 1
-    tc 5 oversubscription weight = 1
-    tc 6 oversubscription weight = 1
-    tc 7 oversubscription weight = 1
-    tc 8 oversubscription weight = 1
-    tc 9 oversubscription weight = 1
-    tc 10 oversubscription weight = 1
-    tc 11 oversubscription weight = 1
-    tc 12 oversubscription weight = 1
-
-    tc 12 wrr weights = 1 1 1 1
-
-    ; RED params per traffic class and color (Green / Yellow / Red)
-
-    [red]
-    tc 0 wred min = 48 40 32
-    tc 0 wred max = 64 64 64
-    tc 0 wred inv prob = 10 10 10
-    tc 0 wred weight = 9 9 9
-
-    tc 1 wred min = 48 40 32
-    tc 1 wred max = 64 64 64
-    tc 1 wred inv prob = 10 10 10
-    tc 1 wred weight = 9 9 9
-
-    tc 2 wred min = 48 40 32
-    tc 2 wred max = 64 64 64
-    tc 2 wred inv prob = 10 10 10
-    tc 2 wred weight = 9 9 9
-
-    tc 3 wred min = 48 40 32
-    tc 3 wred max = 64 64 64
-    tc 3 wred inv prob = 10 10 10
-    tc 3 wred weight = 9 9 9
-
-    tc 4 wred min = 48 40 32
-    tc 4 wred max = 64 64 64
-    tc 4 wred inv prob = 10 10 10
-    tc 4 wred weight = 9 9 9
-
-    tc 5 wred min = 48 40 32
-    tc 5 wred max = 64 64 64
-    tc 5 wred inv prob = 10 10 10
-    tc 5 wred weight = 9 9 9
-
-    tc 6 wred min = 48 40 32
-    tc 6 wred max = 64 64 64
-    tc 6 wred inv prob = 10 10 10
-    tc 6 wred weight = 9 9 9
-
-    tc 7 wred min = 48 40 32
-    tc 7 wred max = 64 64 64
-    tc 7 wred inv prob = 10 10 10
-    tc 7 wred weight = 9 9 9
-
-    tc 8 wred min = 48 40 32
-    tc 8 wred max = 64 64 64
-    tc 8 wred inv prob = 10 10 10
-    tc 8 wred weight = 9 9 9
-
-    tc 9 wred min = 48 40 32
-    tc 9 wred max = 64 64 64
-    tc 9 wred inv prob = 10 10 10
-    tc 9 wred weight = 9 9 9
-
-    tc 10 wred min = 48 40 32
-    tc 10 wred max = 64 64 64
-    tc 10 wred inv prob = 10 10 10
-    tc 10 wred weight = 9 9 9
-
-    tc 11 wred min = 48 40 32
-    tc 11 wred max = 64 64 64
-    tc 11 wred inv prob = 10 10 10
-    tc 11 wred weight = 9 9 9
-
-    tc 12 wred min = 48 40 32
-    tc 12 wred max = 64 64 64
-    tc 12 wred inv prob = 10 10 10
-    tc 12 wred weight = 9 9 9
+.. literalinclude:: ../../../examples/qos_sched/profile.cfg
+    :start-after: Data Plane Development Kit (DPDK) Programmer's Guide
 
 Interactive mode
 ~~~~~~~~~~~~~~~~
@@ -315,7 +180,7 @@ The following is an example command with a single packet flow configuration:
 
 .. code-block:: console
 
-    ./qos_sched -l 1,5,7 -n 4 -- --pfc "3,2,5,7" --cfg ./profile.cfg
+    ./<build_dir>/examples/dpdk-qos_sched -l 1,5,7 -n 4 -- --pfc "3,2,5,7" --cfg ./profile.cfg
 
 This example uses a single packet flow configuration which creates one RX thread on lcore 5 reading
 from port 3 and a worker thread on lcore 7 writing to port 2.
@@ -324,12 +189,12 @@ Another example with 2 packet flow configurations using different ports but shar
 
 .. code-block:: console
 
-   ./qos_sched -l 1,2,6,7 -n 4 -- --pfc "3,2,2,6,7" --pfc "1,0,2,6,7" --cfg ./profile.cfg
+   ./<build_dir>/examples/dpdk-qos_sched -l 1,2,6,7 -n 4 -- --pfc "3,2,2,6,7" --pfc "1,0,2,6,7" --cfg ./profile.cfg
 
 Note that independent cores for the packet flow configurations for each of the RX, WT and TX thread are also supported,
 providing flexibility to balance the work.
 
-The EAL coremask/corelist is constrained to contain the default mastercore 1 and the RX, WT and TX cores only.
+The EAL coremask/corelist is constrained to contain the default main core 1 and the RX, WT and TX cores only.
 
 Explanation
 -----------

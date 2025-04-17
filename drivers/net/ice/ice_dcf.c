@@ -14,16 +14,16 @@
 #include <rte_common.h>
 
 #include <rte_pci.h>
-#include <rte_atomic.h>
 #include <rte_eal.h>
 #include <rte_ether.h>
-#include <rte_ethdev_driver.h>
-#include <rte_ethdev_pci.h>
+#include <ethdev_driver.h>
+#include <ethdev_pci.h>
 #include <rte_malloc.h>
 #include <rte_memzone.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 
 #include "ice_dcf.h"
+#include "ice_rxtx.h"
 
 #define ICE_DCF_AQ_LEN     32
 #define ICE_DCF_AQ_BUF_SZ  4096
@@ -31,9 +31,135 @@
 #define ICE_DCF_ARQ_MAX_RETRIES 200
 #define ICE_DCF_ARQ_CHECK_TIME  2   /* msecs */
 
+#define ICE_DCF_CHECK_INTERVAL  100   /* 100ms */
+
 #define ICE_DCF_VF_RES_BUF_SZ	\
 	(sizeof(struct virtchnl_vf_resource) +	\
 		IAVF_MAX_VF_VSI * sizeof(struct virtchnl_vsi_resource))
+
+#define FIELD_SELECTOR(proto_hdr_field) \
+		(1UL << ((proto_hdr_field) & PROTO_HDR_FIELD_MASK))
+#define BUFF_NOUSED			0
+
+#define proto_hdr_eth { \
+	VIRTCHNL_PROTO_HDR_ETH, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_ETH_SRC) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_ETH_DST), {BUFF_NOUSED} }
+
+#define proto_hdr_svlan { \
+	VIRTCHNL_PROTO_HDR_S_VLAN, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_S_VLAN_ID), {BUFF_NOUSED} }
+
+#define proto_hdr_cvlan { \
+	VIRTCHNL_PROTO_HDR_C_VLAN, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_C_VLAN_ID), {BUFF_NOUSED} }
+
+#define proto_hdr_ipv4 { \
+	VIRTCHNL_PROTO_HDR_IPV4, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV4_SRC) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV4_DST), {BUFF_NOUSED} }
+
+#define proto_hdr_ipv4_with_prot { \
+	VIRTCHNL_PROTO_HDR_IPV4, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV4_SRC) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV4_DST) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV4_PROT), {BUFF_NOUSED} }
+
+#define proto_hdr_ipv6 { \
+	VIRTCHNL_PROTO_HDR_IPV6, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_SRC) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_DST), {BUFF_NOUSED} }
+
+#define proto_hdr_ipv6_frag { \
+	VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG_PKID), {BUFF_NOUSED} }
+
+#define proto_hdr_ipv6_with_prot { \
+	VIRTCHNL_PROTO_HDR_IPV6, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_SRC) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_DST) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_IPV6_PROT), {BUFF_NOUSED} }
+
+#define proto_hdr_udp { \
+	VIRTCHNL_PROTO_HDR_UDP, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_UDP_SRC_PORT) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_UDP_DST_PORT), {BUFF_NOUSED} }
+
+#define proto_hdr_tcp { \
+	VIRTCHNL_PROTO_HDR_TCP, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_TCP_SRC_PORT) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_TCP_DST_PORT), {BUFF_NOUSED} }
+
+#define proto_hdr_sctp { \
+	VIRTCHNL_PROTO_HDR_SCTP, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_SCTP_SRC_PORT) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_SCTP_DST_PORT), {BUFF_NOUSED} }
+
+#define proto_hdr_esp { \
+	VIRTCHNL_PROTO_HDR_ESP, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_ESP_SPI), {BUFF_NOUSED} }
+
+#define proto_hdr_ah { \
+	VIRTCHNL_PROTO_HDR_AH, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_AH_SPI), {BUFF_NOUSED} }
+
+#define proto_hdr_l2tpv3 { \
+	VIRTCHNL_PROTO_HDR_L2TPV3, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_L2TPV3_SESS_ID), {BUFF_NOUSED} }
+
+#define proto_hdr_pfcp { \
+	VIRTCHNL_PROTO_HDR_PFCP, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_PFCP_SEID), {BUFF_NOUSED} }
+
+#define proto_hdr_gtpc { \
+	VIRTCHNL_PROTO_HDR_GTPC, 0, {BUFF_NOUSED} }
+
+#define proto_hdr_ecpri { \
+	VIRTCHNL_PROTO_HDR_ECPRI, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_ECPRI_PC_RTC_ID), {BUFF_NOUSED} }
+
+#define proto_hdr_l2tpv2 { \
+	VIRTCHNL_PROTO_HDR_L2TPV2, \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_L2TPV2_SESS_ID) | \
+	FIELD_SELECTOR(VIRTCHNL_PROTO_HDR_L2TPV2_LEN_SESS_ID), {BUFF_NOUSED} }
+
+#define proto_hdr_ppp { \
+	VIRTCHNL_PROTO_HDR_PPP, 0, {BUFF_NOUSED} }
+
+#define TUNNEL_LEVEL_OUTER		0
+#define TUNNEL_LEVEL_INNER		1
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv4_tmplt = {
+	TUNNEL_LEVEL_INNER, 1, {{proto_hdr_ipv4}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv4_udp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv4_with_prot, proto_hdr_udp}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv4_tcp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv4_with_prot, proto_hdr_tcp}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv4_sctp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv4, proto_hdr_sctp}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv6_tmplt = {
+	TUNNEL_LEVEL_INNER, 1, {{proto_hdr_ipv6}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv6_udp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv6_with_prot, proto_hdr_udp}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv6_tcp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv6_with_prot, proto_hdr_tcp}}
+};
+
+struct virtchnl_proto_hdrs ice_dcf_inner_ipv6_sctp_tmplt = {
+	TUNNEL_LEVEL_INNER, 2, {{proto_hdr_ipv6, proto_hdr_sctp}}
+};
 
 static __rte_always_inline int
 ice_dcf_send_cmd_req_no_irq(struct ice_dcf_hw *hw, enum virtchnl_ops op,
@@ -165,7 +291,7 @@ ice_dcf_handle_virtchnl_msg(struct ice_dcf_hw *hw)
 	info.buf_len = ICE_DCF_AQ_BUF_SZ;
 	info.msg_buf = hw->arq_buf;
 
-	while (pending) {
+	while (pending && !hw->resetting) {
 		ret = iavf_clean_arq_element(&hw->avf, &info, &pending);
 		if (ret != IAVF_SUCCESS)
 			break;
@@ -233,7 +359,9 @@ ice_dcf_get_vf_resource(struct ice_dcf_hw *hw)
 
 	caps = VIRTCHNL_VF_OFFLOAD_WB_ON_ITR | VIRTCHNL_VF_OFFLOAD_RX_POLLING |
 	       VIRTCHNL_VF_CAP_ADV_LINK_SPEED | VIRTCHNL_VF_CAP_DCF |
-	       VF_BASE_MODE_OFFLOADS;
+	       VIRTCHNL_VF_OFFLOAD_VLAN_V2 |
+	       VF_BASE_MODE_OFFLOADS | VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC |
+	       VIRTCHNL_VF_OFFLOAD_QOS | VIRTCHNL_VF_OFFLOAD_ADV_RSS_PF;
 
 	err = ice_dcf_send_cmd_req_no_irq(hw, VIRTCHNL_OP_GET_VF_RESOURCES,
 					  (uint8_t *)&caps, sizeof(caps));
@@ -317,6 +445,7 @@ ice_dcf_get_vf_vsi_map(struct ice_dcf_hw *hw)
 		}
 
 		hw->num_vfs = vsi_map->num_vfs;
+		hw->pf_vsi_id = vsi_map->pf_vsi;
 	}
 
 	if (!memcmp(hw->vf_vsi_map, vsi_map->vf_vsi, len)) {
@@ -332,6 +461,9 @@ static int
 ice_dcf_mode_disable(struct ice_dcf_hw *hw)
 {
 	int err;
+
+	if (hw->resetting)
+		return 0;
 
 	err = ice_dcf_send_cmd_req_no_irq(hw, VIRTCHNL_OP_DCF_DISABLE,
 					  NULL, 0);
@@ -502,9 +634,7 @@ ice_dcf_send_aq_cmd(void *dcf_hw, struct ice_aq_desc *desc,
 	}
 
 	do {
-		if ((!desc_cmd.pending && !buff_cmd.pending) ||
-		    (!desc_cmd.pending && desc_cmd.v_ret != IAVF_SUCCESS) ||
-		    (!buff_cmd.pending && buff_cmd.v_ret != IAVF_SUCCESS))
+		if (!desc_cmd.pending && !buff_cmd.pending)
 			break;
 
 		rte_delay_ms(ICE_DCF_ARQ_CHECK_TIME);
@@ -529,17 +659,28 @@ int
 ice_dcf_handle_vsi_update_event(struct ice_dcf_hw *hw)
 {
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(hw->eth_dev);
-	int err = 0;
+	int i = 0;
+	int err = -1;
 
 	rte_spinlock_lock(&hw->vc_cmd_send_lock);
 
-	rte_intr_disable(&pci_dev->intr_handle);
+	rte_intr_disable(pci_dev->intr_handle);
 	ice_dcf_disable_irq0(hw);
 
-	if (ice_dcf_get_vf_resource(hw) || ice_dcf_get_vf_vsi_map(hw) < 0)
-		err = -1;
+	for (;;) {
+		if (ice_dcf_get_vf_resource(hw) == 0 &&
+		    ice_dcf_get_vf_vsi_map(hw) >= 0) {
+			err = 0;
+			break;
+		}
 
-	rte_intr_enable(&pci_dev->intr_handle);
+		if (++i >= ICE_DCF_ARQ_MAX_RETRIES)
+			break;
+
+		rte_delay_ms(ICE_DCF_ARQ_CHECK_TIME);
+	}
+
+	rte_intr_enable(pci_dev->intr_handle);
 	ice_dcf_enable_irq0(hw);
 
 	rte_spinlock_unlock(&hw->vc_cmd_send_lock);
@@ -547,11 +688,60 @@ ice_dcf_handle_vsi_update_event(struct ice_dcf_hw *hw)
 	return err;
 }
 
+static int
+ice_dcf_get_supported_rxdid(struct ice_dcf_hw *hw)
+{
+	int err;
+
+	err = ice_dcf_send_cmd_req_no_irq(hw,
+					  VIRTCHNL_OP_GET_SUPPORTED_RXDIDS,
+					  NULL, 0);
+	if (err) {
+		PMD_INIT_LOG(ERR, "Failed to send OP_GET_SUPPORTED_RXDIDS");
+		return -1;
+	}
+
+	err = ice_dcf_recv_cmd_rsp_no_irq(hw, VIRTCHNL_OP_GET_SUPPORTED_RXDIDS,
+					  (uint8_t *)&hw->supported_rxdid,
+					  sizeof(uint64_t), NULL);
+	if (err) {
+		PMD_INIT_LOG(ERR, "Failed to get response of OP_GET_SUPPORTED_RXDIDS");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int
+dcf_get_vlan_offload_caps_v2(struct ice_dcf_hw *hw)
+{
+	struct virtchnl_vlan_caps vlan_v2_caps;
+	struct dcf_virtchnl_cmd args;
+	int ret;
+
+	memset(&args, 0, sizeof(args));
+	args.v_op = VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS;
+	args.rsp_msgbuf = (uint8_t *)&vlan_v2_caps;
+	args.rsp_buflen = sizeof(vlan_v2_caps);
+
+	ret = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (ret) {
+		PMD_DRV_LOG(ERR,
+			    "Failed to execute command of VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS");
+		return ret;
+	}
+
+	rte_memcpy(&hw->vlan_v2_caps, &vlan_v2_caps, sizeof(vlan_v2_caps));
+	return 0;
+}
+
 int
 ice_dcf_init_hw(struct rte_eth_dev *eth_dev, struct ice_dcf_hw *hw)
 {
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
-	int ret;
+	int ret, size;
+
+	hw->resetting = false;
 
 	hw->avf.hw_addr = pci_dev->mem_resource[0].addr;
 	hw->avf.back = hw;
@@ -573,6 +763,8 @@ ice_dcf_init_hw(struct rte_eth_dev *eth_dev, struct ice_dcf_hw *hw)
 	rte_spinlock_init(&hw->vc_cmd_send_lock);
 	rte_spinlock_init(&hw->vc_cmd_queue_lock);
 	TAILQ_INIT(&hw->vc_cmd_queue);
+
+	__atomic_store_n(&hw->vsi_update_thread_num, 0, __ATOMIC_RELAXED);
 
 	hw->arq_buf = rte_zmalloc("arq_buf", ICE_DCF_AQ_BUF_SZ, 0);
 	if (hw->arq_buf == NULL) {
@@ -620,14 +812,54 @@ ice_dcf_init_hw(struct rte_eth_dev *eth_dev, struct ice_dcf_hw *hw)
 		goto err_alloc;
 	}
 
+	/* Allocate memory for RSS info */
+	if (hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_RSS_PF) {
+		hw->rss_key = rte_zmalloc(NULL,
+					  hw->vf_res->rss_key_size, 0);
+		if (!hw->rss_key) {
+			PMD_INIT_LOG(ERR, "unable to allocate rss_key memory");
+			goto err_alloc;
+		}
+		hw->rss_lut = rte_zmalloc("rss_lut",
+					  hw->vf_res->rss_lut_size, 0);
+		if (!hw->rss_lut) {
+			PMD_INIT_LOG(ERR, "unable to allocate rss_lut memory");
+			goto err_rss;
+		}
+	}
+
+	if (hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC) {
+		if (ice_dcf_get_supported_rxdid(hw) != 0) {
+			PMD_INIT_LOG(ERR, "failed to do get supported rxdid");
+			goto err_rss;
+		}
+	}
+
+	if (hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_QOS) {
+		ice_dcf_tm_conf_init(eth_dev);
+		size = sizeof(struct virtchnl_dcf_bw_cfg_list *) * hw->num_vfs;
+		hw->qos_bw_cfg = rte_zmalloc("qos_bw_cfg", size, 0);
+		if (!hw->qos_bw_cfg) {
+			PMD_INIT_LOG(ERR, "no memory for qos_bw_cfg");
+			goto err_rss;
+		}
+	}
+
 	hw->eth_dev = eth_dev;
-	rte_intr_callback_register(&pci_dev->intr_handle,
+	rte_intr_callback_register(pci_dev->intr_handle,
 				   ice_dcf_dev_interrupt_handler, hw);
-	rte_intr_enable(&pci_dev->intr_handle);
+	rte_intr_enable(pci_dev->intr_handle);
 	ice_dcf_enable_irq0(hw);
+
+	if ((hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_VLAN_V2) &&
+	    dcf_get_vlan_offload_caps_v2(hw))
+		goto err_rss;
 
 	return 0;
 
+err_rss:
+	rte_free(hw->rss_key);
+	rte_free(hw->rss_lut);
 err_alloc:
 	rte_free(hw->vf_res);
 err_api:
@@ -642,17 +874,558 @@ void
 ice_dcf_uninit_hw(struct rte_eth_dev *eth_dev, struct ice_dcf_hw *hw)
 {
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
-	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
+	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
+
+	if (hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_QOS)
+		if (hw->tm_conf.committed) {
+			ice_dcf_clear_bw(hw);
+			ice_dcf_tm_conf_uninit(eth_dev);
+		}
 
 	ice_dcf_disable_irq0(hw);
 	rte_intr_disable(intr_handle);
 	rte_intr_callback_unregister(intr_handle,
 				     ice_dcf_dev_interrupt_handler, hw);
 
+	/* Wait for all `ice-thread` threads to exit. */
+	while (__atomic_load_n(&hw->vsi_update_thread_num,
+		__ATOMIC_ACQUIRE) != 0)
+		rte_delay_ms(ICE_DCF_CHECK_INTERVAL);
+
 	ice_dcf_mode_disable(hw);
 	iavf_shutdown_adminq(&hw->avf);
 
 	rte_free(hw->arq_buf);
+	hw->arq_buf = NULL;
+
 	rte_free(hw->vf_vsi_map);
+	hw->vf_vsi_map = NULL;
+
 	rte_free(hw->vf_res);
+	hw->vf_res = NULL;
+
+	rte_free(hw->rss_lut);
+	hw->rss_lut = NULL;
+
+	rte_free(hw->rss_key);
+	hw->rss_key = NULL;
+
+	rte_free(hw->qos_bw_cfg);
+	hw->qos_bw_cfg = NULL;
+
+	rte_free(hw->ets_config);
+	hw->ets_config = NULL;
+}
+
+int
+ice_dcf_configure_rss_key(struct ice_dcf_hw *hw)
+{
+	struct virtchnl_rss_key *rss_key;
+	struct dcf_virtchnl_cmd args;
+	int len, err;
+
+	len = sizeof(*rss_key) + hw->vf_res->rss_key_size - 1;
+	rss_key = rte_zmalloc("rss_key", len, 0);
+	if (!rss_key)
+		return -ENOMEM;
+
+	rss_key->vsi_id = hw->vsi_res->vsi_id;
+	rss_key->key_len = hw->vf_res->rss_key_size;
+	rte_memcpy(rss_key->key, hw->rss_key, hw->vf_res->rss_key_size);
+
+	args.v_op = VIRTCHNL_OP_CONFIG_RSS_KEY;
+	args.req_msglen = len;
+	args.req_msg = (uint8_t *)rss_key;
+	args.rsp_msglen = 0;
+	args.rsp_buflen = 0;
+	args.rsp_msgbuf = NULL;
+	args.pending = 0;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_INIT_LOG(ERR, "Failed to execute OP_CONFIG_RSS_KEY");
+
+	rte_free(rss_key);
+	return err;
+}
+
+int
+ice_dcf_configure_rss_lut(struct ice_dcf_hw *hw)
+{
+	struct virtchnl_rss_lut *rss_lut;
+	struct dcf_virtchnl_cmd args;
+	int len, err;
+
+	len = sizeof(*rss_lut) + hw->vf_res->rss_lut_size - 1;
+	rss_lut = rte_zmalloc("rss_lut", len, 0);
+	if (!rss_lut)
+		return -ENOMEM;
+
+	rss_lut->vsi_id = hw->vsi_res->vsi_id;
+	rss_lut->lut_entries = hw->vf_res->rss_lut_size;
+	rte_memcpy(rss_lut->lut, hw->rss_lut, hw->vf_res->rss_lut_size);
+
+	args.v_op = VIRTCHNL_OP_CONFIG_RSS_LUT;
+	args.req_msglen = len;
+	args.req_msg = (uint8_t *)rss_lut;
+	args.rsp_msglen = 0;
+	args.rsp_buflen = 0;
+	args.rsp_msgbuf = NULL;
+	args.pending = 0;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_INIT_LOG(ERR, "Failed to execute OP_CONFIG_RSS_LUT");
+
+	rte_free(rss_lut);
+	return err;
+}
+
+int
+ice_dcf_add_del_rss_cfg(struct ice_dcf_hw *hw,
+		     struct virtchnl_rss_cfg *rss_cfg, bool add)
+{
+	struct dcf_virtchnl_cmd args;
+	int err;
+
+	memset(&args, 0, sizeof(args));
+
+	args.v_op = add ? VIRTCHNL_OP_ADD_RSS_CFG :
+		VIRTCHNL_OP_DEL_RSS_CFG;
+	args.req_msglen = sizeof(*rss_cfg);
+	args.req_msg = (uint8_t *)rss_cfg;
+	args.rsp_msglen = 0;
+	args.rsp_buflen = 0;
+	args.rsp_msgbuf = NULL;
+	args.pending = 0;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR,
+			    "Failed to execute command of %s",
+			    add ? "OP_ADD_RSS_CFG" :
+			    "OP_DEL_RSS_INPUT_CFG");
+
+	return err;
+}
+
+int
+ice_dcf_set_hena(struct ice_dcf_hw *hw, uint64_t hena)
+{
+	struct virtchnl_rss_hena vrh;
+	struct dcf_virtchnl_cmd args;
+	int err;
+
+	memset(&args, 0, sizeof(args));
+
+	vrh.hena = hena;
+	args.v_op = VIRTCHNL_OP_SET_RSS_HENA;
+	args.req_msglen = sizeof(vrh);
+	args.req_msg = (uint8_t *)&vrh;
+	args.rsp_msglen = 0;
+	args.rsp_buflen = 0;
+	args.rsp_msgbuf = NULL;
+	args.pending = 0;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_INIT_LOG(ERR, "Failed to execute OP_SET_RSS_HENA");
+
+	return err;
+}
+
+int
+ice_dcf_rss_hash_set(struct ice_dcf_hw *hw, uint64_t rss_hf, bool add)
+{
+	struct rte_eth_dev *dev = hw->eth_dev;
+	struct rte_eth_rss_conf *rss_conf;
+	struct virtchnl_rss_cfg rss_cfg;
+
+	rss_conf = &dev->data->dev_conf.rx_adv_conf.rss_conf;
+#define ICE_DCF_RSS_HF_ALL ( \
+	RTE_ETH_RSS_IPV4 | \
+	RTE_ETH_RSS_IPV6 | \
+	RTE_ETH_RSS_NONFRAG_IPV4_UDP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_UDP | \
+	RTE_ETH_RSS_NONFRAG_IPV4_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV4_SCTP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_SCTP)
+
+	rss_cfg.rss_algorithm = VIRTCHNL_RSS_ALG_TOEPLITZ_ASYMMETRIC;
+	if (rss_hf & RTE_ETH_RSS_IPV4) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv4_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv4_udp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv4_tcp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_SCTP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv4_sctp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_IPV6) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv6_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_UDP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv6_udp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_TCP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv6_tcp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_SCTP) {
+		rss_cfg.proto_hdrs = ice_dcf_inner_ipv6_sctp_tmplt;
+		ice_dcf_add_del_rss_cfg(hw, &rss_cfg, add);
+	}
+
+	rss_conf->rss_hf = rss_hf & ICE_DCF_RSS_HF_ALL;
+	return 0;
+}
+
+int
+ice_dcf_init_rss(struct ice_dcf_hw *hw)
+{
+	struct rte_eth_dev *dev = hw->eth_dev;
+	struct rte_eth_rss_conf *rss_conf;
+	uint8_t j, nb_q;
+	size_t i;
+	int ret;
+
+	rss_conf = &dev->data->dev_conf.rx_adv_conf.rss_conf;
+	nb_q = dev->data->nb_rx_queues;
+
+	if (!(hw->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_RSS_PF)) {
+		PMD_DRV_LOG(DEBUG, "RSS is not supported");
+		return -ENOTSUP;
+	}
+	if (dev->data->dev_conf.rxmode.mq_mode != RTE_ETH_MQ_RX_RSS) {
+		PMD_DRV_LOG(WARNING, "RSS is enabled by PF by default");
+		/* set all lut items to default queue */
+		memset(hw->rss_lut, 0, hw->vf_res->rss_lut_size);
+		return ice_dcf_configure_rss_lut(hw);
+	}
+
+	/* In IAVF, RSS enablement is set by PF driver. It is not supported
+	 * to set based on rss_conf->rss_hf.
+	 */
+
+	/* configure RSS key */
+	if (!rss_conf->rss_key)
+		/* Calculate the default hash key */
+		for (i = 0; i < hw->vf_res->rss_key_size; i++)
+			hw->rss_key[i] = (uint8_t)rte_rand();
+	else
+		rte_memcpy(hw->rss_key, rss_conf->rss_key,
+			   RTE_MIN(rss_conf->rss_key_len,
+				   hw->vf_res->rss_key_size));
+
+	/* init RSS LUT table */
+	for (i = 0, j = 0; i < hw->vf_res->rss_lut_size; i++, j++) {
+		if (j >= nb_q)
+			j = 0;
+		hw->rss_lut[i] = j;
+	}
+	/* send virtchnl ops to configure RSS */
+	ret = ice_dcf_configure_rss_lut(hw);
+	if (ret)
+		return ret;
+	ret = ice_dcf_configure_rss_key(hw);
+	if (ret)
+		return ret;
+
+	/* Clear existing RSS. */
+	ret = ice_dcf_set_hena(hw, 0);
+
+	/* It is a workaround, temporarily allow error to be returned
+	 * due to possible lack of PF handling for hena = 0.
+	 */
+	if (ret)
+		PMD_DRV_LOG(WARNING, "fail to clean existing RSS,"
+				"lack PF support");
+
+	/* Set RSS hash configuration based on rss_conf->rss_hf. */
+	ret = ice_dcf_rss_hash_set(hw, rss_conf->rss_hf, true);
+	if (ret) {
+		PMD_DRV_LOG(ERR, "fail to set default RSS");
+		return ret;
+	}
+
+	return 0;
+}
+
+#define IAVF_RXDID_LEGACY_0 0
+#define IAVF_RXDID_LEGACY_1 1
+#define IAVF_RXDID_COMMS_OVS_1 22
+
+int
+ice_dcf_configure_queues(struct ice_dcf_hw *hw)
+{
+	struct ice_rx_queue **rxq =
+		(struct ice_rx_queue **)hw->eth_dev->data->rx_queues;
+	struct ice_tx_queue **txq =
+		(struct ice_tx_queue **)hw->eth_dev->data->tx_queues;
+	struct virtchnl_vsi_queue_config_info *vc_config;
+	struct virtchnl_queue_pair_info *vc_qp;
+	struct dcf_virtchnl_cmd args;
+	uint16_t i, size;
+	int err;
+
+	size = sizeof(*vc_config) +
+	       sizeof(vc_config->qpair[0]) * hw->num_queue_pairs;
+	vc_config = rte_zmalloc("cfg_queue", size, 0);
+	if (!vc_config)
+		return -ENOMEM;
+
+	vc_config->vsi_id = hw->vsi_res->vsi_id;
+	vc_config->num_queue_pairs = hw->num_queue_pairs;
+
+	for (i = 0, vc_qp = vc_config->qpair;
+	     i < hw->num_queue_pairs;
+	     i++, vc_qp++) {
+		vc_qp->txq.vsi_id = hw->vsi_res->vsi_id;
+		vc_qp->txq.queue_id = i;
+		if (i < hw->eth_dev->data->nb_tx_queues) {
+			vc_qp->txq.ring_len = txq[i]->nb_tx_desc;
+			vc_qp->txq.dma_ring_addr = txq[i]->tx_ring_dma;
+		}
+		vc_qp->rxq.vsi_id = hw->vsi_res->vsi_id;
+		vc_qp->rxq.queue_id = i;
+
+		if (i >= hw->eth_dev->data->nb_rx_queues)
+			continue;
+
+		vc_qp->rxq.max_pkt_size = rxq[i]->max_pkt_len;
+		vc_qp->rxq.ring_len = rxq[i]->nb_rx_desc;
+		vc_qp->rxq.dma_ring_addr = rxq[i]->rx_ring_dma;
+		vc_qp->rxq.databuffer_size = rxq[i]->rx_buf_len;
+
+#ifndef RTE_LIBRTE_ICE_16BYTE_RX_DESC
+		if (hw->vf_res->vf_cap_flags &
+		    VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC &&
+		    hw->supported_rxdid &
+		    BIT(IAVF_RXDID_COMMS_OVS_1)) {
+			vc_qp->rxq.rxdid = IAVF_RXDID_COMMS_OVS_1;
+			PMD_DRV_LOG(NOTICE, "request RXDID == %d in "
+				    "Queue[%d]", vc_qp->rxq.rxdid, i);
+		} else {
+			PMD_DRV_LOG(ERR, "RXDID 16 is not supported");
+			return -EINVAL;
+		}
+#else
+		if (hw->vf_res->vf_cap_flags &
+			VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC &&
+			hw->supported_rxdid &
+			BIT(IAVF_RXDID_LEGACY_0)) {
+			vc_qp->rxq.rxdid = IAVF_RXDID_LEGACY_0;
+			PMD_DRV_LOG(NOTICE, "request RXDID == %d in "
+					"Queue[%d]", vc_qp->rxq.rxdid, i);
+		} else {
+			PMD_DRV_LOG(ERR, "RXDID == 0 is not supported");
+			return -EINVAL;
+		}
+#endif
+		ice_select_rxd_to_pkt_fields_handler(rxq[i], vc_qp->rxq.rxdid);
+	}
+
+	memset(&args, 0, sizeof(args));
+	args.v_op = VIRTCHNL_OP_CONFIG_VSI_QUEUES;
+	args.req_msg = (uint8_t *)vc_config;
+	args.req_msglen = size;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR, "Failed to execute command of"
+			    " VIRTCHNL_OP_CONFIG_VSI_QUEUES");
+
+	rte_free(vc_config);
+	return err;
+}
+
+int
+ice_dcf_config_irq_map(struct ice_dcf_hw *hw)
+{
+	struct virtchnl_irq_map_info *map_info;
+	struct virtchnl_vector_map *vecmap;
+	struct dcf_virtchnl_cmd args;
+	int len, i, err;
+
+	len = sizeof(struct virtchnl_irq_map_info) +
+	      sizeof(struct virtchnl_vector_map) * hw->nb_msix;
+
+	map_info = rte_zmalloc("map_info", len, 0);
+	if (!map_info)
+		return -ENOMEM;
+
+	map_info->num_vectors = hw->nb_msix;
+	for (i = 0; i < hw->nb_msix; i++) {
+		vecmap = &map_info->vecmap[i];
+		vecmap->vsi_id = hw->vsi_res->vsi_id;
+		vecmap->rxitr_idx = 0;
+		vecmap->vector_id = hw->msix_base + i;
+		vecmap->txq_map = 0;
+		vecmap->rxq_map = hw->rxq_map[hw->msix_base + i];
+	}
+
+	memset(&args, 0, sizeof(args));
+	args.v_op = VIRTCHNL_OP_CONFIG_IRQ_MAP;
+	args.req_msg = (u8 *)map_info;
+	args.req_msglen = len;
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR, "fail to execute command OP_CONFIG_IRQ_MAP");
+
+	rte_free(map_info);
+	return err;
+}
+
+int
+ice_dcf_switch_queue(struct ice_dcf_hw *hw, uint16_t qid, bool rx, bool on)
+{
+	struct virtchnl_queue_select queue_select;
+	struct dcf_virtchnl_cmd args;
+	int err;
+
+	memset(&queue_select, 0, sizeof(queue_select));
+	queue_select.vsi_id = hw->vsi_res->vsi_id;
+	if (rx)
+		queue_select.rx_queues |= 1 << qid;
+	else
+		queue_select.tx_queues |= 1 << qid;
+
+	memset(&args, 0, sizeof(args));
+	if (on)
+		args.v_op = VIRTCHNL_OP_ENABLE_QUEUES;
+	else
+		args.v_op = VIRTCHNL_OP_DISABLE_QUEUES;
+
+	args.req_msg = (u8 *)&queue_select;
+	args.req_msglen = sizeof(queue_select);
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR, "Failed to execute command of %s",
+			    on ? "OP_ENABLE_QUEUES" : "OP_DISABLE_QUEUES");
+
+	return err;
+}
+
+int
+ice_dcf_disable_queues(struct ice_dcf_hw *hw)
+{
+	struct virtchnl_queue_select queue_select;
+	struct dcf_virtchnl_cmd args;
+	int err;
+
+	if (hw->resetting)
+		return 0;
+
+	memset(&queue_select, 0, sizeof(queue_select));
+	queue_select.vsi_id = hw->vsi_res->vsi_id;
+
+	queue_select.rx_queues = BIT(hw->eth_dev->data->nb_rx_queues) - 1;
+	queue_select.tx_queues = BIT(hw->eth_dev->data->nb_tx_queues) - 1;
+
+	memset(&args, 0, sizeof(args));
+	args.v_op = VIRTCHNL_OP_DISABLE_QUEUES;
+	args.req_msg = (u8 *)&queue_select;
+	args.req_msglen = sizeof(queue_select);
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR,
+			    "Failed to execute command of OP_DISABLE_QUEUES");
+
+	return err;
+}
+
+int
+ice_dcf_query_stats(struct ice_dcf_hw *hw,
+				   struct virtchnl_eth_stats *pstats)
+{
+	struct virtchnl_queue_select q_stats;
+	struct dcf_virtchnl_cmd args;
+	int err;
+
+	memset(&q_stats, 0, sizeof(q_stats));
+	q_stats.vsi_id = hw->vsi_res->vsi_id;
+
+	args.v_op = VIRTCHNL_OP_GET_STATS;
+	args.req_msg = (uint8_t *)&q_stats;
+	args.req_msglen = sizeof(q_stats);
+	args.rsp_msglen = sizeof(*pstats);
+	args.rsp_msgbuf = (uint8_t *)pstats;
+	args.rsp_buflen = sizeof(*pstats);
+
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err) {
+		PMD_DRV_LOG(ERR, "fail to execute command OP_GET_STATS");
+		return err;
+	}
+
+	return 0;
+}
+
+int
+ice_dcf_add_del_all_mac_addr(struct ice_dcf_hw *hw,
+			     struct rte_ether_addr *addr,
+			     bool add, uint8_t type)
+{
+	struct virtchnl_ether_addr_list *list;
+	struct dcf_virtchnl_cmd args;
+	int len, err = 0;
+
+	if (hw->resetting) {
+		if (!add)
+			return 0;
+
+		PMD_DRV_LOG(ERR, "fail to add all MACs for VF resetting");
+		return -EIO;
+	}
+
+	len = sizeof(struct virtchnl_ether_addr_list);
+	len += sizeof(struct virtchnl_ether_addr);
+
+	list = rte_zmalloc(NULL, len, 0);
+	if (!list) {
+		PMD_DRV_LOG(ERR, "fail to allocate memory");
+		return -ENOMEM;
+	}
+
+	rte_memcpy(list->list[0].addr, addr->addr_bytes,
+			sizeof(addr->addr_bytes));
+
+	PMD_DRV_LOG(DEBUG, "add/rm mac:" RTE_ETHER_ADDR_PRT_FMT,
+			    RTE_ETHER_ADDR_BYTES(addr));
+	list->list[0].type = type;
+	list->vsi_id = hw->vsi_res->vsi_id;
+	list->num_elements = 1;
+
+	memset(&args, 0, sizeof(args));
+	args.v_op = add ? VIRTCHNL_OP_ADD_ETH_ADDR :
+			VIRTCHNL_OP_DEL_ETH_ADDR;
+	args.req_msg = (uint8_t *)list;
+	args.req_msglen  = len;
+	err = ice_dcf_execute_virtchnl_cmd(hw, &args);
+	if (err)
+		PMD_DRV_LOG(ERR, "fail to execute command %s",
+			    add ? "OP_ADD_ETHER_ADDRESS" :
+			    "OP_DEL_ETHER_ADDRESS");
+	rte_free(list);
+	return err;
 }

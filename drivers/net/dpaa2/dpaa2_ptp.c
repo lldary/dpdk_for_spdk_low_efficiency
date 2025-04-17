@@ -10,13 +10,13 @@
 #include <unistd.h>
 #include <stdarg.h>
 
-#include <rte_ethdev.h>
+#include <ethdev_driver.h>
 #include <rte_log.h>
 #include <rte_eth_ctrl.h>
 #include <rte_malloc.h>
 #include <rte_time.h>
 
-#include <rte_fslmc.h>
+#include <bus_fslmc_driver.h>
 #include <fsl_dprtc.h>
 #include <fsl_dpkg.h>
 
@@ -111,10 +111,12 @@ int dpaa2_timesync_read_tx_timestamp(struct rte_eth_dev *dev,
 {
 	struct dpaa2_dev_priv *priv = dev->data->dev_private;
 
-	if (priv->next_tx_conf_queue)
-		dpaa2_dev_tx_conf(priv->next_tx_conf_queue);
-	else
+	if (priv->next_tx_conf_queue) {
+		while (!priv->tx_timestamp)
+			dpaa2_dev_tx_conf(priv->next_tx_conf_queue);
+	} else {
 		return -1;
+	}
 	*timestamp = rte_ns_to_timespec(priv->tx_timestamp);
 
 	return 0;
@@ -129,6 +131,7 @@ int dpaa2_timesync_read_rx_timestamp(struct rte_eth_dev *dev,
 	return 0;
 }
 
+#if defined(RTE_LIBRTE_IEEE1588)
 static int
 dpaa2_create_dprtc_device(int vdev_fd __rte_unused,
 			   struct vfio_device_info *obj_info __rte_unused,
@@ -167,8 +170,7 @@ dpaa2_create_dprtc_device(int vdev_fd __rte_unused,
 	return 0;
 
 init_err:
-	if (dprtc_dev)
-		rte_free(dprtc_dev);
+	rte_free(dprtc_dev);
 
 	return -1;
 }
@@ -179,3 +181,4 @@ static struct rte_dpaa2_object rte_dpaa2_dprtc_obj = {
 };
 
 RTE_PMD_REGISTER_DPAA2_OBJECT(dprtc, rte_dpaa2_dprtc_obj);
+#endif

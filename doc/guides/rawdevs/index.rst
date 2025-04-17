@@ -11,10 +11,8 @@ application through rawdev API.
     :maxdepth: 2
     :numbered:
 
+    cnxk_bphy
+    cnxk_gpio
     dpaa2_cmdif
-    dpaa2_qdma
     ifpga
-    ioat
     ntb
-    octeontx2_dma
-    octeontx2_ep

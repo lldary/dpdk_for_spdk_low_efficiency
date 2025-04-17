@@ -28,12 +28,16 @@ Implementation
 The library supports two types of stacks: standard (lock-based) and lock-free.
 Both types use the same set of interfaces, but their implementations differ.
 
+.. _Stack_Library_Std_Stack:
+
 Lock-based Stack
 ----------------
 
 The lock-based stack consists of a contiguous array of pointers, a current
 index, and a spinlock. Accesses to the stack are made multi-thread safe by the
 spinlock.
+
+.. _Stack_Library_LF_Stack:
 
 Lock-free Stack
 ------------------
@@ -71,10 +75,12 @@ compare-and-swap instruction to atomically update both the stack top pointer
 and a modification counter. The ABA problem can occur without a modification
 counter if, for example:
 
-1. Thread A reads head pointer X and stores the pointed-to list element.
-2. Other threads modify the list such that the head pointer is once again X,
+#. Thread A reads head pointer X and stores the pointed-to list element.
+
+#. Other threads modify the list such that the head pointer is once again X,
    but its pointed-to data is different than what thread A read.
-3. Thread A changes the head pointer with a compare-and-swap and succeeds.
+
+#. Thread A changes the head pointer with a compare-and-swap and succeeds.
 
 In this case thread A would not detect that the list had changed, and would
 both pop stale data and incorrect change the head pointer. By adding a

@@ -15,6 +15,7 @@ TAILQ_HEAD(ifpga_feature_list, ifpga_feature);
 enum ifpga_feature_state {
 	IFPGA_FEATURE_UNUSED = 0,
 	IFPGA_FEATURE_ATTACHED,
+	IFPGA_FEATURE_INITED
 };
 
 enum feature_type {
@@ -91,6 +92,7 @@ struct ifpga_fme_hw {
 	struct opae_board_info board_info;
 	int nums_eth_dev;
 	unsigned int nums_acc_region;
+	void *sec_mgr;
 };
 
 enum ifpga_port_state {
@@ -133,6 +135,7 @@ struct ifpga_hw {
 
 	struct ifpga_fme_hw fme;
 	struct ifpga_port_hw port[MAX_FPGA_PORT_NUM];
+	int num_afus;
 };
 
 static inline bool is_ifpga_hw_pf(struct ifpga_hw *hw)

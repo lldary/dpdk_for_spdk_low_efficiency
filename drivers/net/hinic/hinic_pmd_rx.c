@@ -4,7 +4,7 @@
 
 #include <rte_ether.h>
 #include <rte_mbuf.h>
-#ifdef __ARM64_NEON__
+#ifdef RTE_ARCH_ARM64
 #include <arm_neon.h>
 #endif
 
@@ -504,14 +504,14 @@ static void hinic_fill_rss_type(struct nic_rss_type *rss_type,
 {
 	u64 rss_hf = rss_conf->rss_hf;
 
-	rss_type->ipv4 = (rss_hf & (ETH_RSS_IPV4 | ETH_RSS_FRAG_IPV4)) ? 1 : 0;
-	rss_type->tcp_ipv4 = (rss_hf & ETH_RSS_NONFRAG_IPV4_TCP) ? 1 : 0;
-	rss_type->ipv6 = (rss_hf & (ETH_RSS_IPV6 | ETH_RSS_FRAG_IPV6)) ? 1 : 0;
-	rss_type->ipv6_ext = (rss_hf & ETH_RSS_IPV6_EX) ? 1 : 0;
-	rss_type->tcp_ipv6 = (rss_hf & ETH_RSS_NONFRAG_IPV6_TCP) ? 1 : 0;
-	rss_type->tcp_ipv6_ext = (rss_hf & ETH_RSS_IPV6_TCP_EX) ? 1 : 0;
-	rss_type->udp_ipv4 = (rss_hf & ETH_RSS_NONFRAG_IPV4_UDP) ? 1 : 0;
-	rss_type->udp_ipv6 = (rss_hf & ETH_RSS_NONFRAG_IPV6_UDP) ? 1 : 0;
+	rss_type->ipv4 = (rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_FRAG_IPV4)) ? 1 : 0;
+	rss_type->tcp_ipv4 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP) ? 1 : 0;
+	rss_type->ipv6 = (rss_hf & (RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_FRAG_IPV6)) ? 1 : 0;
+	rss_type->ipv6_ext = (rss_hf & RTE_ETH_RSS_IPV6_EX) ? 1 : 0;
+	rss_type->tcp_ipv6 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_TCP) ? 1 : 0;
+	rss_type->tcp_ipv6_ext = (rss_hf & RTE_ETH_RSS_IPV6_TCP_EX) ? 1 : 0;
+	rss_type->udp_ipv4 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP) ? 1 : 0;
+	rss_type->udp_ipv6 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_UDP) ? 1 : 0;
 }
 
 static void hinic_fillout_indir_tbl(struct hinic_nic_dev *nic_dev, u32 *indir)
@@ -588,8 +588,8 @@ static int hinic_setup_num_qps(struct hinic_nic_dev *nic_dev)
 {
 	int err, i;
 
-	if (!(nic_dev->flags & ETH_MQ_RX_RSS_FLAG)) {
-		nic_dev->flags &= ~ETH_MQ_RX_RSS_FLAG;
+	if (!(nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG)) {
+		nic_dev->flags &= ~RTE_ETH_MQ_RX_RSS_FLAG;
 		nic_dev->num_rss = 0;
 		if (nic_dev->num_rq > 1) {
 			/* get rss template id */
@@ -599,7 +599,7 @@ static int hinic_setup_num_qps(struct hinic_nic_dev *nic_dev)
 				PMD_DRV_LOG(WARNING, "Alloc rss template failed");
 				return err;
 			}
-			nic_dev->flags |= ETH_MQ_RX_RSS_FLAG;
+			nic_dev->flags |= RTE_ETH_MQ_RX_RSS_FLAG;
 			for (i = 0; i < nic_dev->num_rq; i++)
 				hinic_add_rq_to_rx_queue_list(nic_dev, i);
 		}
@@ -610,12 +610,12 @@ static int hinic_setup_num_qps(struct hinic_nic_dev *nic_dev)
 
 static void hinic_destroy_num_qps(struct hinic_nic_dev *nic_dev)
 {
-	if (nic_dev->flags & ETH_MQ_RX_RSS_FLAG) {
+	if (nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG) {
 		if (hinic_rss_template_free(nic_dev->hwdev,
 					    nic_dev->rss_tmpl_idx))
 			PMD_DRV_LOG(WARNING, "Free rss template failed");
 
-		nic_dev->flags &= ~ETH_MQ_RX_RSS_FLAG;
+		nic_dev->flags &= ~RTE_ETH_MQ_RX_RSS_FLAG;
 	}
 }
 
@@ -641,7 +641,7 @@ int hinic_config_mq_mode(struct rte_eth_dev *dev, bool on)
 	int ret = 0;
 
 	switch (dev_conf->rxmode.mq_mode) {
-	case ETH_MQ_RX_RSS:
+	case RTE_ETH_MQ_RX_RSS:
 		ret = hinic_config_mq_rx_rss(nic_dev, on);
 		break;
 	default:
@@ -662,7 +662,7 @@ int hinic_rx_configure(struct rte_eth_dev *dev)
 	int lro_wqe_num;
 	int buf_size;
 
-	if (nic_dev->flags & ETH_MQ_RX_RSS_FLAG) {
+	if (nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG) {
 		if (rss_conf.rss_hf == 0) {
 			rss_conf.rss_hf = HINIC_RSS_OFFLOAD_ALL;
 		} else if ((rss_conf.rss_hf & HINIC_RSS_OFFLOAD_ALL) == 0) {
@@ -678,7 +678,7 @@ int hinic_rx_configure(struct rte_eth_dev *dev)
 	}
 
 	/* Enable both L3/L4 rx checksum offload */
-	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_CHECKSUM)
+	if (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_CHECKSUM)
 		nic_dev->rx_csum_en = HINIC_RX_CSUM_OFFLOAD_EN;
 
 	err = hinic_set_rx_csum_offload(nic_dev->hwdev,
@@ -687,7 +687,7 @@ int hinic_rx_configure(struct rte_eth_dev *dev)
 		goto rx_csum_ofl_err;
 
 	/* config lro */
-	lro_en = dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_TCP_LRO ?
+	lro_en = dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_TCP_LRO ?
 			true : false;
 	max_lro_size = dev->data->dev_conf.rxmode.max_lro_pkt_size;
 	buf_size = nic_dev->hwdev->nic_io->rq_buf_size;
@@ -726,7 +726,7 @@ void hinic_rx_remove_configure(struct rte_eth_dev *dev)
 {
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 
-	if (nic_dev->flags & ETH_MQ_RX_RSS_FLAG) {
+	if (nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG) {
 		hinic_rss_deinit(nic_dev);
 		hinic_destroy_num_qps(nic_dev);
 	}
@@ -762,7 +762,7 @@ void hinic_free_all_rx_mbufs(struct hinic_rxq *rxq)
 static inline void hinic_rq_cqe_be_to_cpu32(void *dst_le32,
 					    volatile void *src_be32)
 {
-#if defined(__X86_64_SSE__)
+#if defined(RTE_ARCH_X86_64)
 	volatile __m128i *wqe_be = (volatile __m128i *)src_be32;
 	__m128i *wqe_le = (__m128i *)dst_le32;
 	__m128i shuf_mask =  _mm_set_epi8(12, 13, 14, 15, 8, 9, 10,
@@ -770,7 +770,7 @@ static inline void hinic_rq_cqe_be_to_cpu32(void *dst_le32,
 
 	/* l2nic just use first 128 bits */
 	wqe_le[0] = _mm_shuffle_epi8(wqe_be[0], shuf_mask);
-#elif defined(__ARM64_NEON__)
+#elif defined(RTE_ARCH_ARM64)
 	volatile uint8x16_t *wqe_be = (volatile uint8x16_t *)src_be32;
 	uint8x16_t *wqe_le = (uint8x16_t *)dst_le32;
 	const uint8x16_t shuf_mask = {3, 2, 1, 0, 7, 6, 5, 4, 11, 10,
@@ -802,7 +802,7 @@ static inline uint64_t hinic_rx_rss_hash(uint32_t offload_type,
 	rss_type = HINIC_GET_RSS_TYPES(offload_type);
 	if (likely(rss_type != 0)) {
 		*rss_hash = cqe_hass_val;
-		return PKT_RX_RSS_HASH;
+		return RTE_MBUF_F_RX_RSS_HASH;
 	}
 
 	return 0;
@@ -815,33 +815,33 @@ static inline uint64_t hinic_rx_csum(uint32_t status, struct hinic_rxq *rxq)
 	struct hinic_nic_dev *nic_dev = rxq->nic_dev;
 
 	if (unlikely(!(nic_dev->rx_csum_en & HINIC_RX_CSUM_OFFLOAD_EN)))
-		return PKT_RX_IP_CKSUM_UNKNOWN;
+		return RTE_MBUF_F_RX_IP_CKSUM_UNKNOWN;
 
 	/* most case checksum is ok */
 	checksum_err = HINIC_GET_RX_CSUM_ERR(status);
 	if (likely(checksum_err == 0))
-		return (PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_GOOD);
+		return (RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD);
 
 	/* If BYPASS bit set, all other status indications should be ignored */
 	if (unlikely(HINIC_CSUM_ERR_BYPASSED(checksum_err)))
-		return PKT_RX_IP_CKSUM_UNKNOWN;
+		return RTE_MBUF_F_RX_IP_CKSUM_UNKNOWN;
 
 	flags = 0;
 
 	/* IP checksum error */
 	if (HINIC_CSUM_ERR_IP(checksum_err))
-		flags |= PKT_RX_IP_CKSUM_BAD;
+		flags |= RTE_MBUF_F_RX_IP_CKSUM_BAD;
 	else
-		flags |= PKT_RX_IP_CKSUM_GOOD;
+		flags |= RTE_MBUF_F_RX_IP_CKSUM_GOOD;
 
 	/* L4 checksum error */
 	if (HINIC_CSUM_ERR_L4(checksum_err))
-		flags |= PKT_RX_L4_CKSUM_BAD;
+		flags |= RTE_MBUF_F_RX_L4_CKSUM_BAD;
 	else
-		flags |= PKT_RX_L4_CKSUM_GOOD;
+		flags |= RTE_MBUF_F_RX_L4_CKSUM_GOOD;
 
 	if (unlikely(HINIC_CSUM_ERR_OTHER(checksum_err)))
-		flags = PKT_RX_L4_CKSUM_NONE;
+		flags = RTE_MBUF_F_RX_L4_CKSUM_NONE;
 
 	rxq->rxq_stats.errors++;
 
@@ -861,7 +861,7 @@ static inline uint64_t hinic_rx_vlan(uint32_t offload_type, uint32_t vlan_len,
 
 	*vlan_tci = vlan_tag;
 
-	return PKT_RX_VLAN | PKT_RX_VLAN_STRIPPED;
+	return RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED;
 }
 
 static inline u32 hinic_rx_alloc_mbuf_bulk(struct hinic_rxq *rxq,
@@ -1061,7 +1061,7 @@ u16 hinic_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, u16 nb_pkts)
 		/* lro offload */
 		lro_num = HINIC_GET_RX_NUM_LRO(cqe.status);
 		if (unlikely(lro_num != 0)) {
-			rxm->ol_flags |= PKT_RX_LRO;
+			rxm->ol_flags |= RTE_MBUF_F_RX_LRO;
 			rxm->tso_segsz = pkt_len / lro_num;
 		}
 

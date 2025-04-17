@@ -6,7 +6,7 @@ section=all
 symbol=all
 quiet=
 
-while getopts 'S:s:q' name; do
+while getopts 'S:s:qV:' name; do
 	case $name in
 	S)
 		[ $section = 'all' ] || {
@@ -25,8 +25,11 @@ while getopts 'S:s:q' name; do
 	q)
 		quiet='y'
 	;;
+	V)
+		version=$OPTARG
+	;;
 	?)
-		echo 'usage: $0 [-S section] [-s symbol] [-q]'
+		echo 'usage: $0 [-S section] [-s symbol] [-V [version|unset]] [-q]'
 		exit 1
 	;;
 	esac
@@ -38,29 +41,41 @@ for file in $@; do
 	cat "$file" |awk '
 	BEGIN {
 		current_section = "";
-		if ("'$section'" == "all" && "'$symbol'" == "all") {
+		current_version = "";
+		if ("'$section'" == "all" && "'$symbol'" == "all" && "'$version'" == "") {
 			ret = 0;
 		} else {
 			ret = 1;
 		}
 	}
-	/^.*{/ {
+	/^.*\{/ {
 		if ("'$section'" == "all" || $1 == "'$section'") {
 			current_section = $1;
 		}
 	}
-	/.*}/ { current_section = ""; }
+	/.*}/ { current_section = ""; current_version = ""; }
+	/^\t# added in / {
+		current_version=$4;
+	}
 	/^[^}].*[^:*];/ {
-		if (current_section != "") {
-			gsub(";","");
-			if ("'$symbol'" == "all" || $1 == "'$symbol'") {
-				ret = 0;
-				if ("'$quiet'" == "") {
-					print "'$file' "current_section" "$1;
-				}
-				if ("'$symbol'" != "all") {
-					exit 0;
-				}
+		if (current_section == "") {
+			next;
+		}
+		if ("'$version'" != "") {
+			if ("'$version'" == "unset" && current_version != "") {
+				next;
+			} else if ("'$version'" != "unset" && "'$version'" != current_version) {
+				next;
+			}
+		}
+		gsub(";","");
+		if ("'$symbol'" == "all" || $1 == "'$symbol'") {
+			ret = 0;
+			if ("'$quiet'" == "") {
+				print "'$file' "current_section" "$1;
+			}
+			if ("'$symbol'" != "all") {
+				exit 0;
 			}
 		}
 	}

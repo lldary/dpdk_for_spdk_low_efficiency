@@ -21,7 +21,6 @@
 #include <rte_eal.h>
 #include <rte_per_lcore.h>
 #include <rte_launch.h>
-#include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_prefetch.h>
 #include <rte_lcore.h>
@@ -69,17 +68,16 @@ struct app_params app = {
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
-		.split_hdr_size = 0,
-		.offloads = DEV_RX_OFFLOAD_CHECKSUM,
+		.offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
 			.rss_key = NULL,
-			.rss_hf = ETH_RSS_IP,
+			.rss_hf = RTE_ETH_RSS_IP,
 		},
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
 	},
 };
 
@@ -155,7 +153,7 @@ static void
 app_ports_check_link(void)
 {
 	uint32_t all_ports_up, i;
-
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 	all_ports_up = 1;
 
 	for (i = 0; i < app.n_ports; i++) {
@@ -173,13 +171,12 @@ app_ports_check_link(void)
 			all_ports_up = 0;
 			continue;
 		}
-
-		RTE_LOG(INFO, USER1, "Port %u (%u Gbps) %s\n",
+		rte_eth_link_to_str(link_status_text, sizeof(link_status_text),
+				    &link);
+		RTE_LOG(INFO, USER1, "Port %u %s\n",
 			port,
-			link.link_speed / 1000,
-			link.link_status ? "UP" : "DOWN");
-
-		if (link.link_status == ETH_LINK_DOWN)
+			link_status_text);
+		if (link.link_status == RTE_ETH_LINK_DOWN)
 			all_ports_up = 0;
 	}
 
@@ -191,21 +188,40 @@ static void
 app_init_ports(void)
 {
 	uint32_t i;
+	struct rte_eth_dev_info dev_info;
 
 	/* Init NIC ports, then start the ports */
 	for (i = 0; i < app.n_ports; i++) {
 		uint16_t port;
 		int ret;
+		struct rte_eth_conf local_port_conf = port_conf;
 
 		port = app.ports[i];
 		RTE_LOG(INFO, USER1, "Initializing NIC port %u ...\n", port);
 
+		ret = rte_eth_dev_info_get(port, &dev_info);
+		if (ret != 0)
+			rte_panic("Error during getting device (port %u) info: %s\n",
+					port, rte_strerror(-ret));
+
 		/* Init port */
+		local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
+			dev_info.flow_type_rss_offloads;
+		if (local_port_conf.rx_adv_conf.rss_conf.rss_hf !=
+				port_conf.rx_adv_conf.rss_conf.rss_hf) {
+			printf("Warning:"
+				"Port %u modified RSS hash function based on hardware support,"
+				"requested:%#"PRIx64" configured:%#"PRIx64"\n",
+				port,
+				port_conf.rx_adv_conf.rss_conf.rss_hf,
+				local_port_conf.rx_adv_conf.rss_conf.rss_hf);
+		}
+
 		ret = rte_eth_dev_configure(
 			port,
 			1,
 			1,
-			&port_conf);
+			&local_port_conf);
 		if (ret < 0)
 			rte_panic("Cannot init NIC port %u (%d)\n", port, ret);
 

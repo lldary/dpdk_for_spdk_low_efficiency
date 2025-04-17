@@ -3,12 +3,15 @@
  */
 
 #include <getopt.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <rte_cryptodev.h>
 #include <rte_malloc.h>
+#include <rte_ether.h>
 
 #include "cperf_options.h"
+#include "cperf_test_vectors.h"
 
 #define AES_BLOCK_SIZE 16
 #define DES_BLOCK_SIZE 8
@@ -23,7 +26,7 @@ usage(char *progname)
 {
 	printf("%s [EAL options] --\n"
 		" --silent: disable options dump\n"
-		" --ptest throughput / latency / verify / pmd-cycleount :"
+		" --ptest throughput / latency / verify / pmd-cyclecount :"
 		" set test type\n"
 		" --pool_sz N: set the number of crypto ops/mbufs allocated\n"
 		" --total-ops N: set the number of total operations performed\n"
@@ -33,8 +36,8 @@ usage(char *progname)
 		" --segment-sz N: set the size of the segment to use\n"
 		" --desc-nb N: set number of descriptors for each crypto device\n"
 		" --devtype TYPE: set crypto device type to use\n"
-		" --optype cipher-only / auth-only / cipher-then-auth /\n"
-		"           auth-then-cipher / aead : set operation type\n"
+		" --optype cipher-only / auth-only / cipher-then-auth / auth-then-cipher /\n"
+		"        aead / pdcp / docsis / ipsec / modex / tls-record : set operation type\n"
 		" --sessionless: enable session-less crypto operations\n"
 		" --out-of-place: enable out-of-place crypto operations\n"
 		" --test-file NAME: set the test vector file path\n"
@@ -56,6 +59,16 @@ usage(char *progname)
 		" --pmd-cyclecount-delay-ms N: set delay between enqueue\n"
 		"           and dequeue in pmd-cyclecount benchmarking mode\n"
 		" --csv-friendly: enable test result output CSV friendly\n"
+		" --modex-len N: modex length, supported lengths are "
+		"60, 128, 255, 448. Default: 128\n"
+#ifdef RTE_LIB_SECURITY
+		" --pdcp-sn-sz N: set PDCP SN size N <5/7/12/15/18>\n"
+		" --pdcp-domain DOMAIN: set PDCP domain <control/user>\n"
+		" --pdcp-ses-hfn-en: enable session based fixed HFN\n"
+		" --enable-sdap: enable sdap\n"
+		" --docsis-hdr-sz: set DOCSIS header size\n"
+		" --tls-version VER: set TLS VERSION <TLS1.2/TLS1.3/DTLS1.2>\n"
+#endif
 		" -h: prints this help\n",
 		progname);
 }
@@ -307,6 +320,16 @@ parse_pool_sz(struct cperf_options *opts, const char *arg)
 }
 
 static int
+parse_modex_len(struct cperf_options *opts, const char *arg)
+{
+	int ret =  parse_uint16_t(&opts->modex_len, arg);
+
+	if (ret)
+		RTE_LOG(ERR, USER1, "failed to parse modex len");
+	return ret;
+}
+
+static int
 parse_burst_sz(struct cperf_options *opts, const char *arg)
 {
 	int ret;
@@ -446,7 +469,23 @@ parse_op_type(struct cperf_options *opts, const char *arg)
 		{
 			cperf_op_type_strs[CPERF_PDCP],
 			CPERF_PDCP
-		}
+		},
+		{
+			cperf_op_type_strs[CPERF_DOCSIS],
+			CPERF_DOCSIS
+		},
+		{
+			cperf_op_type_strs[CPERF_IPSEC],
+			CPERF_IPSEC
+		},
+		{
+			cperf_op_type_strs[CPERF_ASYM_MODEX],
+			CPERF_ASYM_MODEX
+		},
+		{
+			cperf_op_type_strs[CPERF_TLS],
+			CPERF_TLS
+		},
 	};
 
 	int id = get_str_key_id_mapping(optype_namemap,
@@ -482,9 +521,14 @@ parse_test_file(struct cperf_options *opts,
 		const char *arg)
 {
 	opts->test_file = strdup(arg);
+	if (opts->test_file == NULL) {
+		RTE_LOG(ERR, USER1, "Dup vector file failed!\n");
+		return -1;
+	}
 	if (access(opts->test_file, F_OK) != -1)
 		return 0;
 	RTE_LOG(ERR, USER1, "Test vector file doesn't exist\n");
+	free(opts->test_file);
 
 	return -1;
 }
@@ -495,6 +539,12 @@ parse_test_name(struct cperf_options *opts,
 {
 	char *test_name = (char *) rte_zmalloc(NULL,
 		sizeof(char) * (strlen(arg) + 3), 0);
+	if (test_name == NULL) {
+		RTE_LOG(ERR, USER1, "Failed to rte zmalloc with size: %zu\n",
+			strlen(arg) + 3);
+		return -1;
+	}
+
 	snprintf(test_name, strlen(arg) + 3, "[%s]", arg);
 	opts->test_name = test_name;
 
@@ -506,6 +556,15 @@ parse_silent(struct cperf_options *opts,
 		const char *arg __rte_unused)
 {
 	opts->silent = 1;
+
+	return 0;
+}
+
+static int
+parse_enable_sdap(struct cperf_options *opts,
+		const char *arg __rte_unused)
+{
+	opts->pdcp_sdap = 1;
 
 	return 0;
 }
@@ -620,7 +679,7 @@ parse_digest_sz(struct cperf_options *opts, const char *arg)
 	return parse_uint16_t(&opts->digest_sz, arg);
 }
 
-#ifdef RTE_LIBRTE_SECURITY
+#ifdef RTE_LIB_SECURITY
 static int
 parse_pdcp_sn_sz(struct cperf_options *opts, const char *arg)
 {
@@ -645,7 +704,8 @@ parse_pdcp_sn_sz(struct cperf_options *opts, const char *arg)
 
 const char *cperf_pdcp_domain_strs[] = {
 	[RTE_SECURITY_PDCP_MODE_CONTROL] = "control",
-	[RTE_SECURITY_PDCP_MODE_DATA] = "data"
+	[RTE_SECURITY_PDCP_MODE_DATA] = "data",
+	[RTE_SECURITY_PDCP_MODE_SHORT_MAC] = "short_mac"
 };
 
 static int
@@ -660,6 +720,11 @@ parse_pdcp_domain(struct cperf_options *opts, const char *arg)
 			cperf_pdcp_domain_strs
 			[RTE_SECURITY_PDCP_MODE_DATA],
 			RTE_SECURITY_PDCP_MODE_DATA
+		},
+		{
+			cperf_pdcp_domain_strs
+			[RTE_SECURITY_PDCP_MODE_SHORT_MAC],
+			RTE_SECURITY_PDCP_MODE_SHORT_MAC
 		}
 	};
 
@@ -674,6 +739,58 @@ parse_pdcp_domain(struct cperf_options *opts, const char *arg)
 	opts->pdcp_domain = (enum rte_security_pdcp_domain)id;
 
 	return 0;
+}
+
+const char *cperf_tls_version_strs[] = {
+	[RTE_SECURITY_VERSION_TLS_1_2] = "TLS1.2",
+	[RTE_SECURITY_VERSION_TLS_1_3] = "TLS1.3",
+	[RTE_SECURITY_VERSION_DTLS_1_2] = "DTLS1.2"
+};
+
+static int
+parse_tls_version(struct cperf_options *opts, const char *arg)
+{
+	struct name_id_map tls_version_namemap[] = {
+		{
+			cperf_tls_version_strs
+			[RTE_SECURITY_VERSION_TLS_1_2],
+			RTE_SECURITY_VERSION_TLS_1_2
+		},
+		{
+			cperf_tls_version_strs
+			[RTE_SECURITY_VERSION_TLS_1_3],
+			RTE_SECURITY_VERSION_TLS_1_3
+		},
+		{
+			cperf_tls_version_strs
+			[RTE_SECURITY_VERSION_DTLS_1_2],
+			RTE_SECURITY_VERSION_DTLS_1_2
+		},
+	};
+
+	int id = get_str_key_id_mapping(tls_version_namemap,
+			RTE_DIM(tls_version_namemap), arg);
+	if (id < 0) {
+		RTE_LOG(ERR, USER1, "invalid TLS version specified\n");
+		return -1;
+	}
+
+	opts->tls_version = (enum rte_security_tls_version)id;
+
+	return 0;
+}
+
+static int
+parse_pdcp_ses_hfn_en(struct cperf_options *opts, const char *arg __rte_unused)
+{
+	opts->pdcp_ses_hfn_en = 1;
+	return 0;
+}
+
+static int
+parse_docsis_hdr_sz(struct cperf_options *opts, const char *arg)
+{
+	return parse_uint16_t(&opts->docsis_hdr_sz, arg);
 }
 #endif
 
@@ -778,6 +895,7 @@ struct long_opt_parser {
 static struct option lgopts[] = {
 
 	{ CPERF_PTEST_TYPE, required_argument, 0, 0 },
+	{ CPERF_MODEX_LEN, required_argument, 0, 0 },
 
 	{ CPERF_POOL_SIZE, required_argument, 0, 0 },
 	{ CPERF_TOTAL_OPS, required_argument, 0, 0 },
@@ -817,9 +935,13 @@ static struct option lgopts[] = {
 
 	{ CPERF_DIGEST_SZ, required_argument, 0, 0 },
 
-#ifdef RTE_LIBRTE_SECURITY
+#ifdef RTE_LIB_SECURITY
 	{ CPERF_PDCP_SN_SZ, required_argument, 0, 0 },
 	{ CPERF_PDCP_DOMAIN, required_argument, 0, 0 },
+	{ CPERF_PDCP_SES_HFN_EN, no_argument, 0, 0 },
+	{ CPERF_ENABLE_SDAP, no_argument, 0, 0 },
+	{ CPERF_DOCSIS_HDR_SZ, required_argument, 0, 0 },
+	{ CPERF_TLS_VERSION, required_argument, 0, 0 },
 #endif
 	{ CPERF_CSV, no_argument, 0, 0},
 
@@ -887,10 +1009,14 @@ cperf_options_default(struct cperf_options *opts)
 	opts->digest_sz = 12;
 
 	opts->pmdcc_delay = 0;
-#ifdef RTE_LIBRTE_SECURITY
+#ifdef RTE_LIB_SECURITY
 	opts->pdcp_sn_sz = 12;
 	opts->pdcp_domain = RTE_SECURITY_PDCP_MODE_CONTROL;
+	opts->pdcp_ses_hfn_en = 0;
+	opts->pdcp_sdap = 0;
+	opts->docsis_hdr_sz = 17;
 #endif
+	opts->modex_data = (struct cperf_modex_test_data *)&modex_perf_data[0];
 }
 
 static int
@@ -898,6 +1024,7 @@ cperf_opts_parse_long(int opt_idx, struct cperf_options *opts)
 {
 	struct long_opt_parser parsermap[] = {
 		{ CPERF_PTEST_TYPE,	parse_cperf_test_type },
+		{ CPERF_MODEX_LEN,	parse_modex_len },
 		{ CPERF_SILENT,		parse_silent },
 		{ CPERF_POOL_SIZE,	parse_pool_sz },
 		{ CPERF_TOTAL_OPS,	parse_total_ops },
@@ -926,9 +1053,13 @@ cperf_opts_parse_long(int opt_idx, struct cperf_options *opts)
 		{ CPERF_AEAD_IV_SZ,	parse_aead_iv_sz },
 		{ CPERF_AEAD_AAD_SZ,	parse_aead_aad_sz },
 		{ CPERF_DIGEST_SZ,	parse_digest_sz },
-#ifdef RTE_LIBRTE_SECURITY
+#ifdef RTE_LIB_SECURITY
 		{ CPERF_PDCP_SN_SZ,	parse_pdcp_sn_sz },
 		{ CPERF_PDCP_DOMAIN,	parse_pdcp_domain },
+		{ CPERF_PDCP_SES_HFN_EN,	parse_pdcp_ses_hfn_en },
+		{ CPERF_ENABLE_SDAP,	parse_enable_sdap },
+		{ CPERF_DOCSIS_HDR_SZ,	parse_docsis_hdr_sz },
+		{ CPERF_TLS_VERSION,	parse_tls_version },
 #endif
 		{ CPERF_CSV,		parse_csv_friendly},
 		{ CPERF_PMDCC_DELAY_MS,	parse_pmd_cyclecount_delay_ms},
@@ -953,7 +1084,7 @@ cperf_options_parse(struct cperf_options *options, int argc, char **argv)
 		switch (opt) {
 		case 'h':
 			usage(argv[0]);
-			rte_exit(EXIT_SUCCESS, "Displayed help\n");
+			exit(EXIT_SUCCESS);
 			break;
 		/* long options */
 		case 0:
@@ -984,6 +1115,10 @@ check_cipher_buffer_length(struct cperf_options *options)
 		else
 			buffer_size = options->buffer_size_list[0];
 
+		if ((options->auth_op == RTE_CRYPTO_AUTH_OP_GENERATE) &&
+				(options->op_type == CPERF_AUTH_THEN_CIPHER))
+			buffer_size += options->digest_sz;
+
 		while (buffer_size <= options->max_buffer_size) {
 			if ((buffer_size % AES_BLOCK_SIZE) != 0) {
 				RTE_LOG(ERR, USER1, "Some of the buffer sizes are "
@@ -1010,6 +1145,10 @@ check_cipher_buffer_length(struct cperf_options *options)
 		else
 			buffer_size = options->buffer_size_list[0];
 
+		if ((options->auth_op == RTE_CRYPTO_AUTH_OP_GENERATE) &&
+				(options->op_type == CPERF_AUTH_THEN_CIPHER))
+			buffer_size += options->digest_sz;
+
 		while (buffer_size <= options->max_buffer_size) {
 			if ((buffer_size % DES_BLOCK_SIZE) != 0) {
 				RTE_LOG(ERR, USER1, "Some of the buffer sizes are "
@@ -1031,10 +1170,60 @@ check_cipher_buffer_length(struct cperf_options *options)
 	return 0;
 }
 
+#ifdef RTE_LIB_SECURITY
+static int
+check_docsis_buffer_length(struct cperf_options *options)
+{
+	uint32_t buffer_size, buffer_size_idx = 0;
+
+	if (options->inc_buffer_size != 0)
+		buffer_size = options->min_buffer_size;
+	else
+		buffer_size = options->buffer_size_list[0];
+
+	while (buffer_size <= options->max_buffer_size) {
+		if (buffer_size < (uint32_t)(options->docsis_hdr_sz +
+				RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN)) {
+			RTE_LOG(ERR, USER1, "Some of the buffer sizes are not "
+				"valid for DOCSIS\n");
+			return -EINVAL;
+		}
+
+		if (options->inc_buffer_size != 0)
+			buffer_size += options->inc_buffer_size;
+		else {
+			if (++buffer_size_idx == options->buffer_size_count)
+				break;
+			buffer_size =
+				options->buffer_size_list[buffer_size_idx];
+		}
+	}
+
+	return 0;
+}
+#endif
+
+static bool
+is_valid_chained_op(struct cperf_options *options)
+{
+	if (options->cipher_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT &&
+			options->auth_op == RTE_CRYPTO_AUTH_OP_GENERATE)
+		return true;
+
+	if (options->cipher_op == RTE_CRYPTO_CIPHER_OP_DECRYPT &&
+			options->auth_op == RTE_CRYPTO_AUTH_OP_VERIFY)
+		return true;
+
+	return false;
+}
+
 int
 cperf_options_check(struct cperf_options *options)
 {
-	if (options->op_type == CPERF_CIPHER_ONLY)
+	int i;
+
+	if (options->op_type == CPERF_CIPHER_ONLY ||
+			options->op_type == CPERF_DOCSIS)
 		options->digest_sz = 0;
 
 	if (options->out_of_place &&
@@ -1048,9 +1237,17 @@ cperf_options_check(struct cperf_options *options)
 	 * If segment size is not set, assume only one segment,
 	 * big enough to contain the largest buffer and the digest
 	 */
-	if (options->segment_sz == 0)
+	if (options->segment_sz == 0) {
 		options->segment_sz = options->max_buffer_size +
 				options->digest_sz;
+		/* In IPsec and TLS operation, packet length will be increased
+		 * by some bytes depend upon the algorithm, so increasing
+		 * the segment size by headroom to cover most of
+		 * the scenarios.
+		 */
+		if (options->op_type == CPERF_IPSEC || options->op_type == CPERF_TLS)
+			options->segment_sz += RTE_PKTMBUF_HEADROOM;
+	}
 
 	if (options->segment_sz < options->digest_sz) {
 		RTE_LOG(ERR, USER1,
@@ -1126,20 +1323,20 @@ cperf_options_check(struct cperf_options *options)
 		return -EINVAL;
 	}
 
+	if (options->op_type == CPERF_CIPHER_THEN_AUTH ||
+			options->op_type == CPERF_AUTH_THEN_CIPHER) {
+		if (!is_valid_chained_op(options)) {
+			RTE_LOG(ERR, USER1, "Invalid chained operation.\n");
+			return -EINVAL;
+		}
+	}
+
 	if (options->op_type == CPERF_CIPHER_THEN_AUTH) {
 		if (options->cipher_op != RTE_CRYPTO_CIPHER_OP_ENCRYPT &&
 				options->auth_op !=
 				RTE_CRYPTO_AUTH_OP_GENERATE) {
 			RTE_LOG(ERR, USER1, "Option cipher then auth must use"
 					" options: encrypt and generate.\n");
-			return -EINVAL;
-		}
-	} else if (options->op_type == CPERF_AUTH_THEN_CIPHER) {
-		if (options->cipher_op != RTE_CRYPTO_CIPHER_OP_DECRYPT &&
-				options->auth_op !=
-				RTE_CRYPTO_AUTH_OP_VERIFY) {
-			RTE_LOG(ERR, USER1, "Option auth then cipher must use"
-					" options: decrypt and verify.\n");
 			return -EINVAL;
 		}
 	}
@@ -1150,6 +1347,52 @@ cperf_options_check(struct cperf_options *options)
 		if (check_cipher_buffer_length(options) < 0)
 			return -EINVAL;
 	}
+
+	if (options->modex_len) {
+		if (options->op_type != CPERF_ASYM_MODEX) {
+			RTE_LOG(ERR, USER1, "Option modex len should be used only with "
+					" optype: modex.\n");
+			return -EINVAL;
+		}
+
+		for (i = 0; i < (int)RTE_DIM(modex_perf_data); i++) {
+			if (modex_perf_data[i].modulus.len ==
+			    options->modex_len) {
+				options->modex_data =
+					(struct cperf_modex_test_data
+						 *)&modex_perf_data[i];
+				break;
+			}
+		}
+		if (i == (int)RTE_DIM(modex_perf_data)) {
+			RTE_LOG(ERR, USER1,
+				"Option modex len: %d is not supported\n",
+				options->modex_len);
+			return -EINVAL;
+		}
+	}
+
+#ifdef RTE_LIB_SECURITY
+	if (options->op_type == CPERF_DOCSIS) {
+		if (check_docsis_buffer_length(options) < 0)
+			return -EINVAL;
+	}
+
+	if (options->op_type == CPERF_IPSEC || options->op_type == CPERF_TLS) {
+		if (options->aead_algo) {
+			if (options->aead_op == RTE_CRYPTO_AEAD_OP_ENCRYPT)
+				options->is_outbound = 1;
+			else
+				options->is_outbound = 0;
+		} else {
+			if (options->cipher_op == RTE_CRYPTO_CIPHER_OP_ENCRYPT &&
+			    options->auth_op == RTE_CRYPTO_AUTH_OP_GENERATE)
+				options->is_outbound = 1;
+			else
+				options->is_outbound = 0;
+		}
+	}
+#endif
 
 	return 0;
 }
@@ -1162,6 +1405,8 @@ cperf_options_dump(struct cperf_options *opts)
 	printf("# Crypto Performance Application Options:\n");
 	printf("#\n");
 	printf("# cperf test: %s\n", cperf_test_type_strs[opts->test]);
+	printf("#\n");
+	printf("# cperf operation type: %s\n", cperf_op_type_strs[opts->op_type]);
 	printf("#\n");
 	printf("# size of crypto op / mbuf pool: %u\n", opts->pool_sz);
 	printf("# total number of ops: %u\n", opts->total_ops);
@@ -1204,7 +1449,7 @@ cperf_options_dump(struct cperf_options *opts)
 			opts->op_type == CPERF_CIPHER_THEN_AUTH ||
 			opts->op_type == CPERF_AUTH_THEN_CIPHER) {
 		printf("# auth algorithm: %s\n",
-			rte_crypto_auth_algorithm_strings[opts->auth_algo]);
+			rte_cryptodev_get_auth_algo_string(opts->auth_algo));
 		printf("# auth operation: %s\n",
 			rte_crypto_auth_operation_strings[opts->auth_op]);
 		printf("# auth key size: %u\n", opts->auth_key_sz);
@@ -1217,7 +1462,7 @@ cperf_options_dump(struct cperf_options *opts)
 			opts->op_type == CPERF_CIPHER_THEN_AUTH ||
 			opts->op_type == CPERF_AUTH_THEN_CIPHER) {
 		printf("# cipher algorithm: %s\n",
-			rte_crypto_cipher_algorithm_strings[opts->cipher_algo]);
+			rte_cryptodev_get_cipher_algo_string(opts->cipher_algo));
 		printf("# cipher operation: %s\n",
 			rte_crypto_cipher_operation_strings[opts->cipher_op]);
 		printf("# cipher key size: %u\n", opts->cipher_key_sz);
@@ -1227,7 +1472,7 @@ cperf_options_dump(struct cperf_options *opts)
 
 	if (opts->op_type == CPERF_AEAD) {
 		printf("# aead algorithm: %s\n",
-			rte_crypto_aead_algorithm_strings[opts->aead_algo]);
+			rte_cryptodev_get_aead_algo_string(opts->aead_algo));
 		printf("# aead operation: %s\n",
 			rte_crypto_aead_operation_strings[opts->aead_op]);
 		printf("# aead key size: %u\n", opts->aead_key_sz);
@@ -1236,4 +1481,11 @@ cperf_options_dump(struct cperf_options *opts)
 		printf("# aead aad size: %u\n", opts->aead_aad_sz);
 		printf("#\n");
 	}
+
+#ifdef RTE_LIB_SECURITY
+	if (opts->op_type == CPERF_DOCSIS) {
+		printf("# docsis header size: %u\n", opts->docsis_hdr_sz);
+		printf("#\n");
+	}
+#endif
 }

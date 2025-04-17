@@ -2,8 +2,8 @@
  * Copyright(c) 2017 Huawei Technologies Co., Ltd
  */
 
-#include<rte_ethdev_driver.h>
-#include <rte_bus_pci.h>
+#include<ethdev_driver.h>
+#include <bus_pci_driver.h>
 #include <rte_hash.h>
 #include <rte_jhash.h>
 
@@ -390,6 +390,8 @@ void hinic_osdep_deinit(struct hinic_hwdev *hwdev)
 int hinic_set_ci_table(void *hwdev, u16 q_id, struct hinic_sq_attr *attr)
 {
 	struct hinic_cons_idx_attr cons_idx_attr;
+	u16 out_size = sizeof(cons_idx_attr);
+	int err;
 
 	memset(&cons_idx_attr, 0, sizeof(cons_idx_attr));
 	cons_idx_attr.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
@@ -406,10 +408,17 @@ int hinic_set_ci_table(void *hwdev, u16 q_id, struct hinic_sq_attr *attr)
 	cons_idx_attr.sq_id = q_id;
 	cons_idx_attr.ci_addr = attr->ci_dma_base;
 
-	return hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
+	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
 				      HINIC_MGMT_CMD_L2NIC_SQ_CI_ATTR_SET,
 				      &cons_idx_attr, sizeof(cons_idx_attr),
-				      NULL, NULL, 0);
+				      &cons_idx_attr, &out_size, 0);
+	if (err || !out_size || cons_idx_attr.mgmt_msg_head.status) {
+		PMD_DRV_LOG(ERR, "Set ci attribute table failed, err: %d, status: 0x%x, out_size: 0x%x",
+			err, cons_idx_attr.mgmt_msg_head.status, out_size);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 /**
@@ -422,7 +431,9 @@ int hinic_set_ci_table(void *hwdev, u16 q_id, struct hinic_sq_attr *attr)
  */
 int hinic_set_pagesize(void *hwdev, u8 page_size)
 {
-	struct hinic_page_size cmd;
+	struct hinic_page_size page_size_info;
+	u16 out_size = sizeof(page_size_info);
+	int err;
 
 	if (page_size > HINIC_PAGE_SIZE_MAX) {
 		PMD_DRV_LOG(ERR, "Invalid page_size %u, bigger than %u",
@@ -430,16 +441,23 @@ int hinic_set_pagesize(void *hwdev, u8 page_size)
 		return -EINVAL;
 	}
 
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
-	cmd.func_idx = hinic_global_func_id(hwdev);
-	cmd.ppf_idx = hinic_ppf_idx(hwdev);
-	cmd.page_size = page_size;
+	memset(&page_size_info, 0, sizeof(page_size_info));
+	page_size_info.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
+	page_size_info.func_idx = hinic_global_func_id(hwdev);
+	page_size_info.ppf_idx = hinic_ppf_idx(hwdev);
+	page_size_info.page_size = page_size;
 
-	return hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
-					HINIC_MGMT_CMD_PAGESIZE_SET,
-					&cmd, sizeof(cmd),
-					NULL, NULL, 0);
+	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
+				     HINIC_MGMT_CMD_PAGESIZE_SET,
+				     &page_size_info, sizeof(page_size_info),
+				     &page_size_info, &out_size, 0);
+	if (err || !out_size || page_size_info.mgmt_msg_head.status) {
+		PMD_DRV_LOG(ERR, "Set wq page size failed, err: %d, status: 0x%x, out_size: 0x%0x",
+			err, page_size_info.mgmt_msg_head.status, out_size);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 static int wait_for_flr_finish(struct hinic_hwif *hwif)
@@ -457,7 +475,7 @@ static int wait_for_flr_finish(struct hinic_hwif *hwif)
 		rte_delay_ms(10);
 	} while (time_before(jiffies, end));
 
-	return -EFAULT;
+	return -ETIMEDOUT;
 }
 
 #define HINIC_WAIT_CMDQ_IDLE_TIMEOUT		1000
@@ -546,7 +564,9 @@ static int hinic_pf_rx_tx_flush(struct hinic_hwdev *hwdev)
 	struct hinic_hwif *hwif = hwdev->hwif;
 	struct hinic_clear_doorbell clear_db;
 	struct hinic_clear_resource clr_res;
+	u16 out_size;
 	int err;
+	int ret = 0;
 
 	rte_delay_ms(100);
 
@@ -557,15 +577,19 @@ static int hinic_pf_rx_tx_flush(struct hinic_hwdev *hwdev)
 	}
 
 	hinic_disable_doorbell(hwif);
+	out_size = sizeof(clear_db);
 	memset(&clear_db, 0, sizeof(clear_db));
 	clear_db.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
 	clear_db.func_idx = HINIC_HWIF_GLOBAL_IDX(hwif);
 	clear_db.ppf_idx  = HINIC_HWIF_PPF_IDX(hwif);
 	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
 				     HINIC_MGMT_CMD_FLUSH_DOORBELL, &clear_db,
-				     sizeof(clear_db), NULL, NULL, 0);
-	if (err)
-		PMD_DRV_LOG(WARNING, "Flush doorbell failed");
+				     sizeof(clear_db), &clear_db, &out_size, 0);
+	if (err || !out_size || clear_db.mgmt_msg_head.status) {
+		PMD_DRV_LOG(WARNING, "Flush doorbell failed, err: %d, status: 0x%x, out_size: 0x%x",
+			 err, clear_db.mgmt_msg_head.status, out_size);
+		ret = err ? err : (-EIO);
+	}
 
 	hinic_set_pf_status(hwif, HINIC_PF_STATUS_FLR_START_FLAG);
 	memset(&clr_res, 0, sizeof(clr_res));
@@ -575,21 +599,28 @@ static int hinic_pf_rx_tx_flush(struct hinic_hwdev *hwdev)
 
 	err = hinic_msg_to_mgmt_no_ack(hwdev, HINIC_MOD_COMM,
 				       HINIC_MGMT_CMD_START_FLR, &clr_res,
-				       sizeof(clr_res), NULL, NULL);
-	if (err)
-		PMD_DRV_LOG(WARNING, "Notice flush message failed");
+				       sizeof(clr_res));
+	if (err) {
+		PMD_DRV_LOG(WARNING, "Notice flush msg failed, err: %d", err);
+		ret = err;
+	}
 
 	err = wait_for_flr_finish(hwif);
-	if (err)
-		PMD_DRV_LOG(WARNING, "Wait firmware FLR timeout");
+	if (err) {
+		PMD_DRV_LOG(WARNING, "Wait firmware FLR timeout, err: %d", err);
+		ret = err;
+	}
 
 	hinic_enable_doorbell(hwif);
 
 	err = hinic_reinit_cmdq_ctxts(hwdev);
-	if (err)
-		PMD_DRV_LOG(WARNING, "Reinit cmdq failed when pf flush");
+	if (err) {
+		PMD_DRV_LOG(WARNING,
+			    "Reinit cmdq failed when pf flush, err: %d", err);
+		ret = err;
+	}
 
-	return 0;
+	return ret;
 }
 
 int hinic_func_rx_tx_flush(struct hinic_hwdev *hwdev)
@@ -623,9 +654,9 @@ static int hinic_get_interrupt_cfg(struct hinic_hwdev *hwdev,
 				     &msix_cfg, sizeof(msix_cfg),
 				     &msix_cfg, &out_size, 0);
 	if (err || !out_size || msix_cfg.mgmt_msg_head.status) {
-		PMD_DRV_LOG(ERR, "Get interrupt config failed, ret: %d",
-			msix_cfg.mgmt_msg_head.status);
-		return -EINVAL;
+		PMD_DRV_LOG(ERR, "Get interrupt config failed, err: %d, status: 0x%x, out size: 0x%x",
+			err, msix_cfg.mgmt_msg_head.status, out_size);
+		return -EIO;
 	}
 
 	interrupt_info->lli_credit_limit = msix_cfg.lli_credit_cnt;
@@ -650,17 +681,15 @@ int hinic_set_interrupt_cfg(struct hinic_hwdev *hwdev,
 	u16 out_size = sizeof(msix_cfg);
 	int err;
 
+	temp_info.msix_index = interrupt_info.msix_index;
+	err = hinic_get_interrupt_cfg(hwdev, &temp_info);
+	if (err)
+		return -EIO;
+
 	memset(&msix_cfg, 0, sizeof(msix_cfg));
 	msix_cfg.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
 	msix_cfg.func_id = hinic_global_func_id(hwdev);
 	msix_cfg.msix_index = (u16)interrupt_info.msix_index;
-
-	temp_info.msix_index = interrupt_info.msix_index;
-
-	err = hinic_get_interrupt_cfg(hwdev, &temp_info);
-	if (err)
-		return -EINVAL;
-
 	msix_cfg.lli_credit_cnt = temp_info.lli_credit_limit;
 	msix_cfg.lli_tmier_cnt = temp_info.lli_timer_cfg;
 	msix_cfg.pending_cnt = temp_info.pending_limt;
@@ -683,9 +712,9 @@ int hinic_set_interrupt_cfg(struct hinic_hwdev *hwdev,
 				     &msix_cfg, sizeof(msix_cfg),
 				     &msix_cfg, &out_size, 0);
 	if (err || !out_size || msix_cfg.mgmt_msg_head.status) {
-		PMD_DRV_LOG(ERR, "Set interrupt config failed, ret: %d",
-			msix_cfg.mgmt_msg_head.status);
-		return -EINVAL;
+		PMD_DRV_LOG(ERR, "Set interrupt config failed, err: %d, status: 0x%x, out size: 0x%x",
+			err, msix_cfg.mgmt_msg_head.status, out_size);
+		return -EIO;
 	}
 
 	return 0;
@@ -770,6 +799,8 @@ static int set_vf_dma_attr_entry(struct hinic_hwdev *hwdev, u8 entry_idx,
 				enum hinic_pcie_tph tph_en)
 {
 	struct hinic_vf_dma_attr_table attr;
+	u16 out_size = sizeof(attr);
+	int err;
 
 	memset(&attr, 0, sizeof(attr));
 	attr.func_idx = hinic_global_func_id(hwdev);
@@ -782,13 +813,20 @@ static int set_vf_dma_attr_entry(struct hinic_hwdev *hwdev, u8 entry_idx,
 	attr.no_snooping = no_snooping;
 	attr.tph_en = tph_en;
 
-	return hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
-					HINIC_MGMT_CMD_DMA_ATTR_SET,
-					&attr, sizeof(attr), NULL, NULL, 0);
+	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
+				     HINIC_MGMT_CMD_DMA_ATTR_SET,
+				     &attr, sizeof(attr), &attr, &out_size, 0);
+	if (err || !out_size || attr.mgmt_msg_head.status) {
+		PMD_DRV_LOG(ERR, "Set dma attribute failed, err: %d, status: 0x%x, out_size: 0x%x",
+			err, attr.mgmt_msg_head.status, out_size);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 /**
- * dma_attr_table_init - initialize the the default dma attributes
+ * dma_attr_table_init - initialize the default dma attributes
  * @hwdev: the pointer to the private hardware device object
  */
 static int dma_attr_table_init(struct hinic_hwdev *hwdev)
@@ -926,17 +964,26 @@ static void fault_report_show(struct hinic_hwdev *hwdev,
 static int resources_state_set(struct hinic_hwdev *hwdev,
 			       enum hinic_res_state state)
 {
-	struct hinic_hwif *hwif = hwdev->hwif;
 	struct hinic_cmd_set_res_state res_state;
+	u16 out_size = sizeof(res_state);
+	int err;
 
 	memset(&res_state, 0, sizeof(res_state));
 	res_state.mgmt_msg_head.resp_aeq_num = HINIC_AEQ1;
-	res_state.func_idx = HINIC_HWIF_GLOBAL_IDX(hwif);
+	res_state.func_idx = HINIC_HWIF_GLOBAL_IDX(hwdev->hwif);
 	res_state.state = state;
 
-	return hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
+	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
 				 HINIC_MGMT_CMD_RES_STATE_SET,
-				 &res_state, sizeof(res_state), NULL, NULL, 0);
+				 &res_state, sizeof(res_state),
+				 &res_state, &out_size, 0);
+	if (err || !out_size || res_state.mgmt_msg_head.status) {
+		PMD_DRV_LOG(ERR, "Set resources state failed, err: %d, status: 0x%x, out_size: 0x%x",
+			err, res_state.mgmt_msg_head.status, out_size);
+		return -EIO;
+	}
+
+	return 0;
 }
 
 /**
@@ -1002,7 +1049,7 @@ int hinic_get_board_info(void *hwdev, struct hinic_board_info *info)
 	if (err || board_info.mgmt_msg_head.status || !out_size) {
 		PMD_DRV_LOG(ERR, "Failed to get board info, err: %d, status: 0x%x, out size: 0x%x",
 			err, board_info.mgmt_msg_head.status, out_size);
-		return -EFAULT;
+		return -EIO;
 	}
 
 	memcpy(info, &board_info.info, sizeof(*info));
@@ -1020,6 +1067,7 @@ int hinic_l2nic_reset(struct hinic_hwdev *hwdev)
 {
 	struct hinic_hwif *hwif = hwdev->hwif;
 	struct hinic_l2nic_reset l2nic_reset;
+	u16 out_size = sizeof(l2nic_reset);
 	int err = 0;
 
 	err = hinic_set_vport_enable(hwdev, false);
@@ -1036,10 +1084,11 @@ int hinic_l2nic_reset(struct hinic_hwdev *hwdev)
 	err = hinic_msg_to_mgmt_sync(hwdev, HINIC_MOD_COMM,
 				     HINIC_MGMT_CMD_L2NIC_RESET,
 				     &l2nic_reset, sizeof(l2nic_reset),
-				     NULL, NULL, 0);
-	if (err || l2nic_reset.mgmt_msg_head.status) {
-		PMD_DRV_LOG(ERR, "Reset L2NIC resources failed");
-		return -EFAULT;
+				     &l2nic_reset, &out_size, 0);
+	if (err || !out_size || l2nic_reset.mgmt_msg_head.status) {
+		PMD_DRV_LOG(ERR, "Reset L2NIC resources failed, err: %d, status: 0x%x, out_size: 0x%x",
+			err, l2nic_reset.mgmt_msg_head.status, out_size);
+		return -EIO;
 	}
 
 	return 0;
@@ -1271,28 +1320,28 @@ hinic_cable_status_event(u8 cmd, void *buf_in, __rte_unused u16 in_size,
 static int hinic_link_event_process(struct hinic_hwdev *hwdev,
 				    struct rte_eth_dev *eth_dev, u8 status)
 {
-	uint32_t port_speed[LINK_SPEED_MAX] = {ETH_SPEED_NUM_10M,
-					ETH_SPEED_NUM_100M, ETH_SPEED_NUM_1G,
-					ETH_SPEED_NUM_10G, ETH_SPEED_NUM_25G,
-					ETH_SPEED_NUM_40G, ETH_SPEED_NUM_100G};
+	uint32_t port_speed[LINK_SPEED_MAX] = {RTE_ETH_SPEED_NUM_10M,
+					RTE_ETH_SPEED_NUM_100M, RTE_ETH_SPEED_NUM_1G,
+					RTE_ETH_SPEED_NUM_10G, RTE_ETH_SPEED_NUM_25G,
+					RTE_ETH_SPEED_NUM_40G, RTE_ETH_SPEED_NUM_100G};
 	struct nic_port_info port_info;
 	struct rte_eth_link link;
 	int rc = HINIC_OK;
 
 	if (!status) {
-		link.link_status = ETH_LINK_DOWN;
+		link.link_status = RTE_ETH_LINK_DOWN;
 		link.link_speed = 0;
-		link.link_duplex = ETH_LINK_HALF_DUPLEX;
-		link.link_autoneg = ETH_LINK_FIXED;
+		link.link_duplex = RTE_ETH_LINK_HALF_DUPLEX;
+		link.link_autoneg = RTE_ETH_LINK_FIXED;
 	} else {
-		link.link_status = ETH_LINK_UP;
+		link.link_status = RTE_ETH_LINK_UP;
 
 		memset(&port_info, 0, sizeof(port_info));
 		rc = hinic_get_port_info(hwdev, &port_info);
 		if (rc) {
-			link.link_speed = ETH_SPEED_NUM_NONE;
-			link.link_duplex = ETH_LINK_FULL_DUPLEX;
-			link.link_autoneg = ETH_LINK_FIXED;
+			link.link_speed = RTE_ETH_SPEED_NUM_NONE;
+			link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
+			link.link_autoneg = RTE_ETH_LINK_FIXED;
 		} else {
 			link.link_speed = port_speed[port_info.speed %
 						LINK_SPEED_MAX];
@@ -1313,9 +1362,9 @@ static void hinic_lsc_process(struct hinic_hwdev *hwdev,
 	ret = hinic_link_event_process(hwdev, rte_dev, status);
 	/* check if link has changed, notify callback */
 	if (ret == 0)
-		_rte_eth_dev_callback_process(rte_dev,
-					      RTE_ETH_EVENT_INTR_LSC,
-					      NULL);
+		rte_eth_dev_callback_process(rte_dev,
+					     RTE_ETH_EVENT_INTR_LSC,
+					     NULL);
 }
 
 void hinic_l2nic_async_event_handle(struct hinic_hwdev *hwdev,

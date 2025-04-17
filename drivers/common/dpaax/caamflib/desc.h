@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
  *
  * Copyright 2008-2016 Freescale Semiconductor Inc.
- * Copyright 2016, 2019 NXP
+ * Copyright 2016, 2019, 2023 NXP
  *
  */
 
@@ -26,7 +26,7 @@ extern enum rta_sec_era rta_sec_era;
 #define CAAM_CMD_SZ sizeof(uint32_t)
 #define CAAM_PTR_SZ sizeof(dma_addr_t)
 #define CAAM_DESC_BYTES_MAX (CAAM_CMD_SZ * MAX_CAAM_DESCSIZE)
-#define DESC_JOB_IO_LEN (CAAM_CMD_SZ * 5 + CAAM_PTR_SZ * 3)
+#define DESC_JOB_IO_LEN (CAAM_CMD_SZ * 7 + CAAM_PTR_SZ * 3)
 
 /* Block size of any entity covered/uncovered with a KEK/TKEK */
 #define KEK_BLOCKSIZE		16
@@ -662,6 +662,9 @@ extern enum rta_sec_era rta_sec_era;
 #define OP_PCL_IPSEC_HMAC_SHA2_256_128		 0x000c
 #define OP_PCL_IPSEC_HMAC_SHA2_384_192		 0x000d
 #define OP_PCL_IPSEC_HMAC_SHA2_512_256		 0x000e
+#define OP_PCL_IPSEC_HMAC_SHA2_224_96		 0x00f2
+#define OP_PCL_IPSEC_HMAC_SHA2_224_112		 0x00f4
+#define OP_PCL_IPSEC_HMAC_SHA2_224_224		 0x00f8
 
 /* For SRTP - OP_PCLID_SRTP */
 #define OP_PCL_SRTP_CIPHER_MASK			 0xff00

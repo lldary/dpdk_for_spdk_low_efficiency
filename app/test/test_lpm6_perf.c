@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -64,8 +65,6 @@ test_lpm6_perf(void)
 	config.max_rules = 1000000;
 	config.number_tbl8s = NUMBER_TBL8S;
 	config.flags = 0;
-
-	rte_srand(rte_rdtsc());
 
 	printf("No. routes = %u\n", (unsigned) NUM_ROUTE_ENTRIES);
 
@@ -160,4 +159,4 @@ test_lpm6_perf(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(lpm6_perf_autotest, test_lpm6_perf);
+REGISTER_PERF_TEST(lpm6_perf_autotest, test_lpm6_perf);

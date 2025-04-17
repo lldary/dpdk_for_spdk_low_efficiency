@@ -9,13 +9,13 @@
 #include <assert.h>
 
 #include <rte_mbuf.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
 #include <rte_string_fns.h>
 #include <rte_cycles.h>
 #include <rte_kvargs.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_version.h>
 
 #include "ark_pktdir.h"
@@ -32,7 +32,6 @@
 #define ARK_CMAC_BASE     0x80000
 #define ARK_PKTDIR_BASE   0xa0000
 #define ARK_PKTCHKR_BASE  0x90000
-#define ARK_RCPACING_BASE 0xb0000
 #define ARK_EXTERNAL_BASE 0x100000
 #define ARK_MPU_QOFFSET   0x00100
 #define ARK_MAX_PORTS     RTE_MAX_ETHPORTS
@@ -57,6 +56,23 @@
 		void     *v;	   \
 	} name
 
+
+/* Extension hooks for extraction and placement of user meta data
+ * during RX an TX operations. These functions are the bridge
+ * between the mbuf struct and the tuser fields on the AXIS
+ * interfaces in the FPGA
+ */
+/* RX hook populates mbuf fields from user defined *meta up to 20 bytes */
+typedef void (*rx_user_meta_hook_fn)(struct rte_mbuf *mbuf,
+				     const uint32_t *meta,
+				     void *ext_user_data);
+/* TX hook populate *meta, with up to 20 bytes.  meta_cnt
+ * returns the number of uint32_t words populated, 0 to 5
+ */
+typedef void (*tx_user_meta_hook_fn)(const struct rte_mbuf *mbuf,
+				     uint32_t *meta, uint8_t *meta_cnt,
+				     void *ext_user_data);
+
 struct ark_user_ext {
 	void *(*dev_init)(struct rte_eth_dev *, void *abar, int port_id);
 	void (*dev_uninit)(struct rte_eth_dev *, void *);
@@ -79,6 +95,9 @@ struct ark_user_ext {
 	void (*mac_addr_set)(struct rte_eth_dev *, struct rte_ether_addr *,
 			void *);
 	int (*set_mtu)(struct rte_eth_dev *, uint16_t, void *);
+	/* user meta, hook functions  */
+	rx_user_meta_hook_fn rx_user_meta_hook;
+	tx_user_meta_hook_fn tx_user_meta_hook;
 };
 
 struct ark_adapter {
@@ -87,11 +106,16 @@ struct ark_adapter {
 
 	/* Pointers to packet generator and checker */
 	int start_pg;
+	uint16_t pg_running;
 	ark_pkt_gen_t pg;
 	ark_pkt_chkr_t pc;
 	ark_pkt_dir_t pd;
 
+	/* For single function, multiple ports */
 	int num_ports;
+	uint16_t qbase;
+
+	bool isvf;
 
 	/* Packet generator/checker args */
 	char pkt_gen_args[ARK_MAX_ARG_LEN];
@@ -125,8 +149,6 @@ struct ark_adapter {
 	int started;
 	uint16_t rx_queues;
 	uint16_t tx_queues;
-
-	struct ark_rqpace_t *rqpacing;
 };
 
 typedef uint32_t *ark_t;

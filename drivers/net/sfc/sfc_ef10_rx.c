@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2019-2021 Xilinx, Inc.
  * Copyright(c) 2016-2019 Solarflare Communications Inc.
  *
  * This software was jointly developed between OKTET Labs (under contract
@@ -21,6 +21,7 @@
 #include "efx_regs.h"
 #include "efx_regs_ef10.h"
 
+#include "sfc_debug.h"
 #include "sfc_tweak.h"
 #include "sfc_dp_rx.h"
 #include "sfc_kvargs.h"
@@ -31,6 +32,9 @@
 
 #define sfc_ef10_rx_err(dpq, ...) \
 	SFC_DP_LOG(SFC_KVARG_DATAPATH_EF10, ERR, dpq, __VA_ARGS__)
+
+#define sfc_ef10_rx_info(dpq, ...) \
+	SFC_DP_LOG(SFC_KVARG_DATAPATH_EF10, INFO, dpq, __VA_ARGS__)
 
 /**
  * Maximum number of descriptors/buffers in the Rx ring.
@@ -144,7 +148,7 @@ sfc_ef10_rx_qrefill(struct sfc_ef10_rxq *rxq)
 			struct sfc_ef10_rx_sw_desc *rxd;
 			rte_iova_t phys_addr;
 
-			MBUF_RAW_ALLOC_CHECK(m);
+			__rte_mbuf_raw_sanity_check(m);
 
 			SFC_ASSERT((id & ~ptr_mask) == 0);
 			rxd = &rxq->sw_ring[id];
@@ -167,7 +171,7 @@ sfc_ef10_rx_qrefill(struct sfc_ef10_rxq *rxq)
 
 	SFC_ASSERT(rxq->added != added);
 	rxq->added = added;
-	sfc_ef10_rx_qpush(rxq->doorbell, added, ptr_mask);
+	sfc_ef10_rx_qpush(rxq->doorbell, added, ptr_mask, &rxq->dp.dpq.dbells);
 }
 
 static void
@@ -219,6 +223,18 @@ sfc_ef10_rx_pending(struct sfc_ef10_rxq *rxq, struct rte_mbuf **rx_pkts,
 	return rx_pkts;
 }
 
+/*
+ * Below Rx pseudo-header (aka Rx prefix) accessors rely on the
+ * following fields layout.
+ */
+static const efx_rx_prefix_layout_t sfc_ef10_rx_prefix_layout = {
+	.erpl_fields	= {
+		[EFX_RX_PREFIX_FIELD_RSS_HASH]	=
+		    { 0, sizeof(uint32_t) * CHAR_BIT, B_FALSE },
+		[EFX_RX_PREFIX_FIELD_LENGTH]	=
+		    { 8 * CHAR_BIT, sizeof(uint16_t) * CHAR_BIT, B_FALSE },
+	}
+};
 static uint16_t
 sfc_ef10_rx_pseudo_hdr_get_len(const uint8_t *pseudo_hdr)
 {
@@ -281,7 +297,7 @@ sfc_ef10_rx_process_event(struct sfc_ef10_rxq *rxq, efx_qword_t rx_ev,
 		rxd = &rxq->sw_ring[pending++ & ptr_mask];
 		m = rxd->mbuf;
 
-		MBUF_RAW_ALLOC_CHECK(m);
+		__rte_mbuf_raw_sanity_check(m);
 
 		m->data_off = RTE_PKTMBUF_HEADROOM;
 		rte_pktmbuf_data_len(m) = seg_len;
@@ -313,7 +329,7 @@ sfc_ef10_rx_process_event(struct sfc_ef10_rxq *rxq, efx_qword_t rx_ev,
 	/* Mask RSS hash offload flag if RSS is not enabled */
 	sfc_ef10_rx_ev_to_offloads(rx_ev, m,
 				   (rxq->flags & SFC_EF10_RXQ_RSS_HASH) ?
-				   ~0ull : ~PKT_RX_RSS_HASH);
+				   ~0ull : ~RTE_MBUF_F_RX_RSS_HASH);
 
 	/* data_off already moved past pseudo header */
 	pseudo_hdr = (uint8_t *)m->buf_addr + RTE_PKTMBUF_HEADROOM;
@@ -321,7 +337,7 @@ sfc_ef10_rx_process_event(struct sfc_ef10_rxq *rxq, efx_qword_t rx_ev,
 	/*
 	 * Always get RSS hash from pseudo header to avoid
 	 * condition/branching. If it is valid or not depends on
-	 * PKT_RX_RSS_HASH in m->ol_flags.
+	 * RTE_MBUF_F_RX_RSS_HASH in m->ol_flags.
 	 */
 	m->hash.rss = sfc_ef10_rx_pseudo_hdr_get_hash(pseudo_hdr);
 
@@ -375,7 +391,7 @@ sfc_ef10_rx_process_event(struct sfc_ef10_rxq *rxq, efx_qword_t rx_ev,
 		/*
 		 * Always get RSS hash from pseudo header to avoid
 		 * condition/branching. If it is valid or not depends on
-		 * PKT_RX_RSS_HASH in m->ol_flags.
+		 * RTE_MBUF_F_RX_RSS_HASH in m->ol_flags.
 		 */
 		m->hash.rss = sfc_ef10_rx_pseudo_hdr_get_hash(pseudo_hdr);
 
@@ -455,7 +471,7 @@ done:
 }
 
 const uint32_t *
-sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps)
+sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps, size_t *no_of_elements)
 {
 	static const uint32_t ef10_native_ptypes[] = {
 		RTE_PTYPE_L2_ETHER,
@@ -467,7 +483,6 @@ sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps)
 		RTE_PTYPE_L4_FRAG,
 		RTE_PTYPE_L4_TCP,
 		RTE_PTYPE_L4_UDP,
-		RTE_PTYPE_UNKNOWN
 	};
 	static const uint32_t ef10_overlay_ptypes[] = {
 		RTE_PTYPE_L2_ETHER,
@@ -489,7 +504,6 @@ sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps)
 		RTE_PTYPE_INNER_L4_FRAG,
 		RTE_PTYPE_INNER_L4_TCP,
 		RTE_PTYPE_INNER_L4_UDP,
-		RTE_PTYPE_UNKNOWN
 	};
 
 	/*
@@ -501,6 +515,7 @@ sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps)
 	case (1u << EFX_TUNNEL_PROTOCOL_VXLAN |
 	      1u << EFX_TUNNEL_PROTOCOL_GENEVE |
 	      1u << EFX_TUNNEL_PROTOCOL_NVGRE):
+		*no_of_elements = RTE_DIM(ef10_overlay_ptypes);
 		return ef10_overlay_ptypes;
 	default:
 		SFC_GENERIC_LOG(ERR,
@@ -508,6 +523,7 @@ sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps)
 			tunnel_encaps);
 		/* FALLTHROUGH */
 	case 0:
+		*no_of_elements = RTE_DIM(ef10_native_ptypes);
 		return ef10_native_ptypes;
 	}
 }
@@ -635,6 +651,10 @@ sfc_ef10_rx_qcreate(uint16_t port_id, uint16_t queue_id,
 	if (info->rxq_entries != info->evq_entries)
 		goto fail_rxq_args;
 
+	rc = ENOTSUP;
+	if (info->nic_dma_info->nb_regions > 0)
+		goto fail_nic_dma;
+
 	rc = ENOMEM;
 	rxq = rte_zmalloc_socket("sfc-ef10-rxq", sizeof(*rxq),
 				 RTE_CACHE_LINE_SIZE, socket_id);
@@ -671,6 +691,8 @@ sfc_ef10_rx_qcreate(uint16_t port_id, uint16_t queue_id,
 		      ER_DZ_EVQ_RPTR_REG_OFST +
 		      (info->evq_hw_index << info->vi_window_shift);
 
+	sfc_ef10_rx_info(&rxq->dp.dpq, "RxQ doorbell is %p", rxq->doorbell);
+
 	*dp_rxqp = &rxq->dp;
 	return 0;
 
@@ -678,6 +700,7 @@ fail_desc_alloc:
 	rte_free(rxq);
 
 fail_rxq_alloc:
+fail_nic_dma:
 fail_rxq_args:
 	return rc;
 }
@@ -694,13 +717,18 @@ sfc_ef10_rx_qdestroy(struct sfc_dp_rxq *dp_rxq)
 
 static sfc_dp_rx_qstart_t sfc_ef10_rx_qstart;
 static int
-sfc_ef10_rx_qstart(struct sfc_dp_rxq *dp_rxq, unsigned int evq_read_ptr)
+sfc_ef10_rx_qstart(struct sfc_dp_rxq *dp_rxq, unsigned int evq_read_ptr,
+		   const efx_rx_prefix_layout_t *pinfo)
 {
 	struct sfc_ef10_rxq *rxq = sfc_ef10_rxq_by_dp_rxq(dp_rxq);
 
 	SFC_ASSERT(rxq->completed == 0);
 	SFC_ASSERT(rxq->pending == 0);
 	SFC_ASSERT(rxq->added == 0);
+
+	if (pinfo->erpl_length != rxq->prefix_size ||
+	    efx_rx_prefix_layout_check(pinfo, &sfc_ef10_rx_prefix_layout) != 0)
+		return ENOTSUP;
 
 	sfc_ef10_rx_qrefill(rxq);
 
@@ -795,10 +823,11 @@ struct sfc_dp_rx sfc_ef10_rx = {
 	},
 	.features		= SFC_DP_RX_FEAT_MULTI_PROCESS |
 				  SFC_DP_RX_FEAT_INTR,
-	.dev_offload_capa	= DEV_RX_OFFLOAD_CHECKSUM |
-				  DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM |
-				  DEV_RX_OFFLOAD_RSS_HASH,
-	.queue_offload_capa	= DEV_RX_OFFLOAD_SCATTER,
+	.dev_offload_capa	= RTE_ETH_RX_OFFLOAD_CHECKSUM |
+				  RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM |
+				  RTE_ETH_RX_OFFLOAD_RSS_HASH |
+				  RTE_ETH_RX_OFFLOAD_KEEP_CRC,
+	.queue_offload_capa	= RTE_ETH_RX_OFFLOAD_SCATTER,
 	.get_dev_info		= sfc_ef10_rx_get_dev_info,
 	.qsize_up_rings		= sfc_ef10_rx_qsize_up_rings,
 	.qcreate		= sfc_ef10_rx_qcreate,

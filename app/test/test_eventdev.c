@@ -2,16 +2,27 @@
  * Copyright(c) 2016 Cavium, Inc
  */
 
+#include "test.h"
+
 #include <rte_common.h>
 #include <rte_hexdump.h>
 #include <rte_mbuf.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_eventdev_common(void)
+{
+	printf("eventdev_common not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
+
 #include <rte_eventdev.h>
 #include <rte_dev.h>
 #include <rte_bus_vdev.h>
-
-#include "test.h"
 
 #define TEST_DEV_ID   0
 
@@ -22,9 +33,15 @@ testsuite_setup(void)
 	uint8_t count;
 	count = rte_event_dev_count();
 	if (!count) {
+		int ret;
+
 		printf("Failed to find a valid event device,"
-			" testing with event_skeleton device\n");
-		return rte_vdev_init("event_skeleton", NULL);
+			" trying with event_skeleton device\n");
+		ret = rte_vdev_init("event_skeleton", NULL);
+		if (ret != 0) {
+			printf("No event device, skipping\n");
+			return TEST_SKIPPED;
+		}
 	}
 	return TEST_SUCCESS;
 }
@@ -302,7 +319,7 @@ test_eventdev_queue_setup(void)
 			    RTE_EVENT_DEV_ATTR_QUEUE_COUNT, &queue_count),
 			    "Queue count get failed");
 
-	for (i = 0; i < (int)queue_count; i++) {
+	for (i = 1; i < (int)queue_count; i++) {
 		ret = rte_event_queue_setup(TEST_DEV_ID, i, NULL);
 		TEST_ASSERT_SUCCESS(ret, "Failed to setup queue%d", i);
 	}
@@ -369,6 +386,201 @@ test_eventdev_queue_attr_priority(void)
 			TEST_ASSERT_EQUAL(priority,
 			 RTE_EVENT_DEV_PRIORITY_NORMAL,
 			 "Wrong priority value for queue%d", i);
+	}
+
+	return TEST_SUCCESS;
+}
+
+static int
+test_eventdev_queue_attr_priority_runtime(void)
+{
+	uint32_t queue_count, queue_req, prio, deq_cnt;
+	struct rte_event_queue_conf qconf;
+	struct rte_event_port_conf pconf;
+	struct rte_event_dev_info info;
+	struct rte_event event = {
+		.op = RTE_EVENT_OP_NEW,
+		.event_type = RTE_EVENT_TYPE_CPU,
+		.sched_type = RTE_SCHED_TYPE_ATOMIC,
+		.u64 = 0xbadbadba,
+	};
+	int i, ret;
+
+	ret = rte_event_dev_info_get(TEST_DEV_ID, &info);
+	TEST_ASSERT_SUCCESS(ret, "Failed to get event dev info");
+
+	if (!(info.event_dev_cap & RTE_EVENT_DEV_CAP_RUNTIME_QUEUE_ATTR))
+		return TEST_SKIPPED;
+
+	TEST_ASSERT_SUCCESS(rte_event_dev_attr_get(
+				    TEST_DEV_ID, RTE_EVENT_DEV_ATTR_QUEUE_COUNT,
+				    &queue_count),
+			    "Queue count get failed");
+
+	/* Need at least 2 queues to test LOW and HIGH priority. */
+	TEST_ASSERT(queue_count > 1, "Not enough event queues, needed 2");
+	queue_req = 2;
+
+	for (i = 0; i < (int)queue_count; i++) {
+		ret = rte_event_queue_default_conf_get(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to get queue%d def conf", i);
+		ret = rte_event_queue_setup(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to setup queue%d", i);
+	}
+
+	ret = rte_event_queue_attr_set(TEST_DEV_ID, 0,
+				       RTE_EVENT_QUEUE_ATTR_PRIORITY,
+				       RTE_EVENT_DEV_PRIORITY_LOWEST);
+	if (ret == -ENOTSUP)
+		return TEST_SKIPPED;
+	TEST_ASSERT_SUCCESS(ret, "Queue0 priority set failed");
+
+	ret = rte_event_queue_attr_set(TEST_DEV_ID, 1,
+				       RTE_EVENT_QUEUE_ATTR_PRIORITY,
+				       RTE_EVENT_DEV_PRIORITY_HIGHEST);
+	if (ret == -ENOTSUP)
+		return TEST_SKIPPED;
+	TEST_ASSERT_SUCCESS(ret, "Queue1 priority set failed");
+
+	/* Setup event port 0 */
+	ret = rte_event_port_default_conf_get(TEST_DEV_ID, 0, &pconf);
+	TEST_ASSERT_SUCCESS(ret, "Failed to get port0 info");
+	ret = rte_event_port_setup(TEST_DEV_ID, 0, &pconf);
+	TEST_ASSERT_SUCCESS(ret, "Failed to setup port0");
+	ret = rte_event_port_link(TEST_DEV_ID, 0, NULL, NULL, 0);
+	TEST_ASSERT(ret == (int)queue_count, "Failed to link port, device %d",
+		    TEST_DEV_ID);
+
+	ret = rte_event_dev_start(TEST_DEV_ID);
+	TEST_ASSERT_SUCCESS(ret, "Failed to start device%d", TEST_DEV_ID);
+
+	for (i = 0; i < (int)queue_req; i++) {
+		event.queue_id = i;
+		while (rte_event_enqueue_burst(TEST_DEV_ID, 0, &event, 1) != 1)
+			rte_pause();
+	}
+
+	prio = RTE_EVENT_DEV_PRIORITY_HIGHEST;
+	deq_cnt = 0;
+	while (deq_cnt < queue_req) {
+		uint32_t queue_prio;
+
+		if (rte_event_dequeue_burst(TEST_DEV_ID, 0, &event, 1, 0) == 0)
+			continue;
+
+		ret = rte_event_queue_attr_get(TEST_DEV_ID, event.queue_id,
+					       RTE_EVENT_QUEUE_ATTR_PRIORITY,
+					       &queue_prio);
+		if (ret == -ENOTSUP)
+			return TEST_SKIPPED;
+
+		TEST_ASSERT_SUCCESS(ret, "Queue priority get failed");
+		TEST_ASSERT(queue_prio >= prio,
+			    "Received event from a lower priority queue first");
+		prio = queue_prio;
+		deq_cnt++;
+	}
+
+	return TEST_SUCCESS;
+}
+
+static int
+test_eventdev_queue_attr_weight_runtime(void)
+{
+	struct rte_event_queue_conf qconf;
+	struct rte_event_dev_info info;
+	uint32_t queue_count;
+	int i, ret;
+
+	ret = rte_event_dev_info_get(TEST_DEV_ID, &info);
+	TEST_ASSERT_SUCCESS(ret, "Failed to get event dev info");
+
+	if (!(info.event_dev_cap & RTE_EVENT_DEV_CAP_RUNTIME_QUEUE_ATTR))
+		return TEST_SKIPPED;
+
+	TEST_ASSERT_SUCCESS(rte_event_dev_attr_get(
+				    TEST_DEV_ID, RTE_EVENT_DEV_ATTR_QUEUE_COUNT,
+				    &queue_count),
+			    "Queue count get failed");
+
+	for (i = 0; i < (int)queue_count; i++) {
+		ret = rte_event_queue_default_conf_get(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to get queue%d def conf", i);
+		ret = rte_event_queue_setup(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to setup queue%d", i);
+	}
+
+	for (i = 0; i < (int)queue_count; i++) {
+		uint32_t get_val;
+		uint64_t set_val;
+
+		set_val = i % RTE_EVENT_QUEUE_WEIGHT_HIGHEST;
+		ret = rte_event_queue_attr_set(
+			TEST_DEV_ID, i, RTE_EVENT_QUEUE_ATTR_WEIGHT, set_val);
+		if (ret == -ENOTSUP)
+			return TEST_SKIPPED;
+
+		TEST_ASSERT_SUCCESS(ret, "Queue weight set failed");
+
+		ret = rte_event_queue_attr_get(
+			TEST_DEV_ID, i, RTE_EVENT_QUEUE_ATTR_WEIGHT, &get_val);
+		if (ret == -ENOTSUP)
+			return TEST_SKIPPED;
+
+		TEST_ASSERT_SUCCESS(ret, "Queue weight get failed");
+		TEST_ASSERT_EQUAL(get_val, set_val,
+				  "Wrong weight value for queue%d", i);
+	}
+
+	return TEST_SUCCESS;
+}
+
+static int
+test_eventdev_queue_attr_affinity_runtime(void)
+{
+	struct rte_event_queue_conf qconf;
+	struct rte_event_dev_info info;
+	uint32_t queue_count;
+	int i, ret;
+
+	ret = rte_event_dev_info_get(TEST_DEV_ID, &info);
+	TEST_ASSERT_SUCCESS(ret, "Failed to get event dev info");
+
+	if (!(info.event_dev_cap & RTE_EVENT_DEV_CAP_RUNTIME_QUEUE_ATTR))
+		return TEST_SKIPPED;
+
+	TEST_ASSERT_SUCCESS(rte_event_dev_attr_get(
+				    TEST_DEV_ID, RTE_EVENT_DEV_ATTR_QUEUE_COUNT,
+				    &queue_count),
+			    "Queue count get failed");
+
+	for (i = 0; i < (int)queue_count; i++) {
+		ret = rte_event_queue_default_conf_get(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to get queue%d def conf", i);
+		ret = rte_event_queue_setup(TEST_DEV_ID, i, &qconf);
+		TEST_ASSERT_SUCCESS(ret, "Failed to setup queue%d", i);
+	}
+
+	for (i = 0; i < (int)queue_count; i++) {
+		uint32_t get_val;
+		uint64_t set_val;
+
+		set_val = i % RTE_EVENT_QUEUE_AFFINITY_HIGHEST;
+		ret = rte_event_queue_attr_set(
+			TEST_DEV_ID, i, RTE_EVENT_QUEUE_ATTR_AFFINITY, set_val);
+		if (ret == -ENOTSUP)
+			return TEST_SKIPPED;
+
+		TEST_ASSERT_SUCCESS(ret, "Queue affinity set failed");
+
+		ret = rte_event_queue_attr_get(
+			TEST_DEV_ID, i, RTE_EVENT_QUEUE_ATTR_AFFINITY, &get_val);
+		if (ret == -ENOTSUP)
+			return TEST_SKIPPED;
+
+		TEST_ASSERT_SUCCESS(ret, "Queue affinity get failed");
+		TEST_ASSERT_EQUAL(get_val, set_val,
+				  "Wrong affinity value for queue%d", i);
 	}
 
 	return TEST_SUCCESS;
@@ -559,10 +771,10 @@ test_eventdev_port_setup(void)
 	if (!(info.event_dev_cap &
 	      RTE_EVENT_DEV_CAP_IMPLICIT_RELEASE_DISABLE)) {
 		pconf.enqueue_depth = info.max_event_port_enqueue_depth;
-		pconf.disable_implicit_release = 1;
+		pconf.event_port_cfg = RTE_EVENT_PORT_CFG_DISABLE_IMPL_REL;
 		ret = rte_event_port_setup(TEST_DEV_ID, 0, &pconf);
 		TEST_ASSERT(ret == -EINVAL, "Expected -EINVAL, %d", ret);
-		pconf.disable_implicit_release = 0;
+		pconf.event_port_cfg = 0;
 	}
 
 	ret = rte_event_port_setup(TEST_DEV_ID, info.max_event_ports,
@@ -580,7 +792,7 @@ test_eventdev_port_setup(void)
 				RTE_EVENT_DEV_ATTR_PORT_COUNT,
 				&port_count), "Port count get failed");
 
-	for (i = 0; i < (int)port_count; i++) {
+	for (i = 1; i < (int)port_count; i++) {
 		ret = rte_event_port_setup(TEST_DEV_ID, i, NULL);
 		TEST_ASSERT_SUCCESS(ret, "Failed to setup port%d", i);
 	}
@@ -924,6 +1136,121 @@ test_eventdev_link_get(void)
 }
 
 static int
+test_eventdev_profile_switch(void)
+{
+#define MAX_RETRIES   4
+	uint8_t priorities[RTE_EVENT_MAX_QUEUES_PER_DEV];
+	uint8_t queues[RTE_EVENT_MAX_QUEUES_PER_DEV];
+	struct rte_event_queue_conf qcfg;
+	struct rte_event_port_conf pcfg;
+	struct rte_event_dev_info info;
+	struct rte_event ev;
+	uint8_t q, re;
+	int rc;
+
+	rte_event_dev_info_get(TEST_DEV_ID, &info);
+
+	if (info.max_profiles_per_port <= 1)
+		return TEST_SKIPPED;
+
+	if (info.max_event_queues <= 1)
+		return TEST_SKIPPED;
+
+	rc = rte_event_port_default_conf_get(TEST_DEV_ID, 0, &pcfg);
+	TEST_ASSERT_SUCCESS(rc, "Failed to get port0 default config");
+	rc = rte_event_port_setup(TEST_DEV_ID, 0, &pcfg);
+	TEST_ASSERT_SUCCESS(rc, "Failed to setup port0");
+
+	rc = rte_event_queue_default_conf_get(TEST_DEV_ID, 0, &qcfg);
+	TEST_ASSERT_SUCCESS(rc, "Failed to get queue0 default config");
+	rc = rte_event_queue_setup(TEST_DEV_ID, 0, &qcfg);
+	TEST_ASSERT_SUCCESS(rc, "Failed to setup queue0");
+
+	q = 0;
+	rc = rte_event_port_profile_links_set(TEST_DEV_ID, 0, &q, NULL, 1, 0);
+	TEST_ASSERT(rc == 1, "Failed to link queue 0 to port 0 with profile 0");
+	q = 1;
+	rc = rte_event_port_profile_links_set(TEST_DEV_ID, 0, &q, NULL, 1, 1);
+	TEST_ASSERT(rc == 1, "Failed to link queue 1 to port 0 with profile 1");
+
+	rc = rte_event_port_profile_links_get(TEST_DEV_ID, 0, queues, priorities, 0);
+	TEST_ASSERT(rc == 1, "Failed to links");
+	TEST_ASSERT(queues[0] == 0, "Invalid queue found in link");
+
+	rc = rte_event_port_profile_links_get(TEST_DEV_ID, 0, queues, priorities, 1);
+	TEST_ASSERT(rc == 1, "Failed to links");
+	TEST_ASSERT(queues[0] == 1, "Invalid queue found in link");
+
+	rc = rte_event_dev_start(TEST_DEV_ID);
+	TEST_ASSERT_SUCCESS(rc, "Failed to start event device");
+
+	ev.event_type = RTE_EVENT_TYPE_CPU;
+	ev.queue_id = 0;
+	ev.op = RTE_EVENT_OP_NEW;
+	ev.flow_id = 0;
+	ev.u64 = 0xBADF00D0;
+	rc = rte_event_enqueue_burst(TEST_DEV_ID, 0, &ev, 1);
+	TEST_ASSERT(rc == 1, "Failed to enqueue event");
+	ev.queue_id = 1;
+	ev.flow_id = 1;
+	rc = rte_event_enqueue_burst(TEST_DEV_ID, 0, &ev, 1);
+	TEST_ASSERT(rc == 1, "Failed to enqueue event");
+
+	ev.event = 0;
+	ev.u64 = 0;
+
+	rc = rte_event_port_profile_switch(TEST_DEV_ID, 0, 1);
+	TEST_ASSERT_SUCCESS(rc, "Failed to change profile");
+
+	re = MAX_RETRIES;
+	while (re--) {
+		rc = rte_event_dequeue_burst(TEST_DEV_ID, 0, &ev, 1, 0);
+		printf("rc %d\n", rc);
+		if (rc)
+			break;
+	}
+
+	TEST_ASSERT(rc == 1, "Failed to dequeue event from profile 1");
+	TEST_ASSERT(ev.flow_id == 1, "Incorrect flow identifier from profile 1");
+	TEST_ASSERT(ev.queue_id == 1, "Incorrect queue identifier from profile 1");
+
+	re = MAX_RETRIES;
+	while (re--) {
+		rc = rte_event_dequeue_burst(TEST_DEV_ID, 0, &ev, 1, 0);
+		TEST_ASSERT(rc == 0, "Unexpected event dequeued from active profile");
+	}
+
+	rc = rte_event_port_profile_switch(TEST_DEV_ID, 0, 0);
+	TEST_ASSERT_SUCCESS(rc, "Failed to change profile");
+
+	re = MAX_RETRIES;
+	while (re--) {
+		rc = rte_event_dequeue_burst(TEST_DEV_ID, 0, &ev, 1, 0);
+		if (rc)
+			break;
+	}
+
+	TEST_ASSERT(rc == 1, "Failed to dequeue event from profile 1");
+	TEST_ASSERT(ev.flow_id == 0, "Incorrect flow identifier from profile 0");
+	TEST_ASSERT(ev.queue_id == 0, "Incorrect queue identifier from profile 0");
+
+	re = MAX_RETRIES;
+	while (re--) {
+		rc = rte_event_dequeue_burst(TEST_DEV_ID, 0, &ev, 1, 0);
+		TEST_ASSERT(rc == 0, "Unexpected event dequeued from active profile");
+	}
+
+	q = 0;
+	rc = rte_event_port_profile_unlink(TEST_DEV_ID, 0, &q, 1, 0);
+	TEST_ASSERT(rc == 1, "Failed to unlink queue 0 to port 0 with profile 0");
+	q = 1;
+	rc = rte_event_port_profile_unlink(TEST_DEV_ID, 0, &q, 1, 1);
+	TEST_ASSERT(rc == 1, "Failed to unlink queue 1 to port 0 with profile 1");
+
+	return TEST_SUCCESS;
+}
+
+static int
 test_eventdev_close(void)
 {
 	rte_event_dev_stop(TEST_DEV_ID);
@@ -953,6 +1280,12 @@ static struct unit_test_suite eventdev_common_testsuite  = {
 			test_eventdev_queue_count),
 		TEST_CASE_ST(eventdev_configure_setup, NULL,
 			test_eventdev_queue_attr_priority),
+		TEST_CASE_ST(eventdev_configure_setup, eventdev_stop_device,
+			test_eventdev_queue_attr_priority_runtime),
+		TEST_CASE_ST(eventdev_configure_setup, NULL,
+			test_eventdev_queue_attr_weight_runtime),
+		TEST_CASE_ST(eventdev_configure_setup, NULL,
+			test_eventdev_queue_attr_affinity_runtime),
 		TEST_CASE_ST(eventdev_configure_setup, NULL,
 			test_eventdev_queue_attr_nb_atomic_flows),
 		TEST_CASE_ST(eventdev_configure_setup, NULL,
@@ -975,6 +1308,8 @@ static struct unit_test_suite eventdev_common_testsuite  = {
 			test_eventdev_timeout_ticks),
 		TEST_CASE_ST(NULL, NULL,
 			test_eventdev_start_stop),
+		TEST_CASE_ST(eventdev_configure_setup, eventdev_stop_device,
+			test_eventdev_profile_switch),
 		TEST_CASE_ST(eventdev_setup_device, eventdev_stop_device,
 			test_eventdev_link),
 		TEST_CASE_ST(eventdev_setup_device, eventdev_stop_device,
@@ -1019,21 +1354,39 @@ test_eventdev_selftest_octeontx(void)
 }
 
 static int
-test_eventdev_selftest_octeontx2(void)
-{
-	return test_eventdev_selftest_impl("event_octeontx2", "");
-}
-
-static int
 test_eventdev_selftest_dpaa2(void)
 {
 	return test_eventdev_selftest_impl("event_dpaa2", "");
 }
 
-REGISTER_TEST_COMMAND(eventdev_common_autotest, test_eventdev_common);
-REGISTER_TEST_COMMAND(eventdev_selftest_sw, test_eventdev_selftest_sw);
-REGISTER_TEST_COMMAND(eventdev_selftest_octeontx,
-		test_eventdev_selftest_octeontx);
-REGISTER_TEST_COMMAND(eventdev_selftest_octeontx2,
-		test_eventdev_selftest_octeontx2);
-REGISTER_TEST_COMMAND(eventdev_selftest_dpaa2, test_eventdev_selftest_dpaa2);
+static int
+test_eventdev_selftest_dlb2(void)
+{
+	return test_eventdev_selftest_impl("dlb2_event", "");
+}
+
+static int
+test_eventdev_selftest_cn9k(void)
+{
+	return test_eventdev_selftest_impl("event_cn9k", "");
+}
+
+static int
+test_eventdev_selftest_cn10k(void)
+{
+	return test_eventdev_selftest_impl("event_cn10k", "");
+}
+
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_FAST_TEST(eventdev_common_autotest, true, true, test_eventdev_common);
+
+#ifndef RTE_EXEC_ENV_WINDOWS
+REGISTER_FAST_TEST(eventdev_selftest_sw, true, true, test_eventdev_selftest_sw);
+REGISTER_DRIVER_TEST(eventdev_selftest_octeontx, test_eventdev_selftest_octeontx);
+REGISTER_DRIVER_TEST(eventdev_selftest_dpaa2, test_eventdev_selftest_dpaa2);
+REGISTER_DRIVER_TEST(eventdev_selftest_dlb2, test_eventdev_selftest_dlb2);
+REGISTER_DRIVER_TEST(eventdev_selftest_cn9k, test_eventdev_selftest_cn9k);
+REGISTER_DRIVER_TEST(eventdev_selftest_cn10k, test_eventdev_selftest_cn10k);
+
+#endif /* !RTE_EXEC_ENV_WINDOWS */

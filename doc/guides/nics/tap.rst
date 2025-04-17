@@ -34,14 +34,14 @@ Using the option ``mac=fixed`` you can create a fixed known MAC address::
 
 The MAC address will have a fixed value with the last octet incrementing by one
 for each interface string containing ``mac=fixed``. The MAC address is formatted
-as 00:'d':'t':'a':'p':[00-FF]. Convert the characters to hex and you get the
-actual MAC address: ``00:64:74:61:70:[00-FF]``.
+as 02:'d':'t':'a':'p':[00-FF]. Convert the characters to hex and you get the
+actual MAC address: ``02:64:74:61:70:[00-FF]``.
 
-   --vdev=net_tap0,mac="00:64:74:61:70:11"
+   --vdev=net_tap0,mac="02:64:74:61:70:11"
 
 The MAC address will have a user value passed as string. The MAC address is in
 format with delimiter ``:``. The string is byte converted to hex and you get
-the actual MAC address: ``00:64:74:61:70:11``.
+the actual MAC address: ``02:64:74:61:70:11``.
 
 It is possible to specify a remote netdevice to capture packets from by adding
 ``remote=foo1``, for example::
@@ -82,6 +82,12 @@ If you have a Network Stack in your DPDK application or something like it you
 can utilize that stack to handle the network protocols. Plus you would be able
 to address the interface using an IP address assigned to the internal
 interface.
+
+Normally, when the DPDK application exits,
+the TAP device is marked down and is removed.
+But this behaviour can be overridden by the use of the persist flag, example::
+
+  --vdev=net_tap0,iface=tap0,persist ...
 
 The TUN PMD allows user to create a TUN device on host. The PMD allows user
 to transmit and receive packets via DPDK API calls with L3 header and payload.
@@ -191,7 +197,7 @@ following::
 
 .. Note:
 
-   Change the ``-b`` options to blacklist all of your physical ports. The
+   Change the ``-b`` options to exclude all of your physical ports. The
    following command line is all one line.
 
    Also, ``-f themes/black-yellow.theme`` is optional if the default colors
@@ -243,22 +249,19 @@ It is possible to support different RSS hash algorithms by updating file
 ``tap_bpf_program.c``  In order to add a new RSS hash algorithm follow these
 steps:
 
-1. Write the new RSS implementation in file ``tap_bpf_program.c``
+#. Write the new RSS implementation in file ``tap_bpf_program.c``
 
-BPF programs which are uploaded to the kernel correspond to
-C functions under different ELF sections.
+   BPF programs which are uploaded to the kernel correspond to
+   C functions under different ELF sections.
 
-2. Install ``LLVM`` library and ``clang`` compiler versions 3.7 and above
+#. Install ``LLVM`` library and ``clang`` compiler versions 3.7 and above
 
-3. Compile ``tap_bpf_program.c`` via ``LLVM`` into an object file::
+#. Use make to compile  `tap_bpf_program.c`` via ``LLVM`` into an object file
+   and extract the resulting instructions into ``tap_bpf_insn.h``::
 
-    clang -O2 -emit-llvm -c tap_bpf_program.c -o - | llc -march=bpf \
-    -filetype=obj -o <tap_bpf_program.o>
+    cd bpf; make
 
-
-4. Use a tool that receives two parameters: an eBPF object file and a section
-name, and prints out the section as a C array of eBPF instructions.
-Embed the C array in your TAP PMD tree.
+#. Recompile the TAP PMD.
 
 The C arrays are uploaded to the kernel using BPF system calls.
 
@@ -275,7 +278,7 @@ An example utility for eBPF instruction generation in the format of C arrays wil
 be added in next releases
 
 TAP reports on supported RSS functions as part of dev_infos_get callback:
-``ETH_RSS_IP``, ``ETH_RSS_UDP`` and ``ETH_RSS_TCP``.
+``RTE_ETH_RSS_IP``, ``RTE_ETH_RSS_UDP`` and ``RTE_ETH_RSS_TCP``.
 **Known limitation:** TAP supports all of the above hash functions together
 and not in partial combinations.
 
@@ -298,3 +301,8 @@ Systems supporting flow API
 | Azure Ubuntu 16.04,| No limitation         |
 | kernel 4.13        |                       |
 +--------------------+-----------------------+
+
+Limitations
+-----------
+
+* Rx/Tx must have the same number of queues.

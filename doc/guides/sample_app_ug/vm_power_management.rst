@@ -236,7 +236,7 @@ Compiling and Running the Host Application
 Compiling the Host Application
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For information on compiling the DPDK and sample applications, see
+For information on compiling the DPDK and sample applications,
 see :doc:`compiling`.
 
 The application is located in the ``vm_power_manager`` subdirectory.
@@ -245,26 +245,23 @@ To build just the ``vm_power_manager`` application using ``make``:
 
 .. code-block:: console
 
-   export RTE_SDK=/path/to/rte_sdk
-   export RTE_TARGET=build
-   cd ${RTE_SDK}/examples/vm_power_manager/
+   cd dpdk/examples/vm_power_manager/
    make
 
-The resulting binary is ``${RTE_SDK}/build/examples/vm_power_manager``.
+The resulting binary is ``dpdk/build/examples/vm_power_manager``.
 
 To build just the ``vm_power_manager`` application using ``meson``/``ninja``:
 
 .. code-block:: console
 
-   export RTE_SDK=/path/to/rte_sdk
-   cd ${RTE_SDK}
-   meson build
+   cd dpdk
+   meson setup build
    cd build
    ninja
    meson configure -Dexamples=vm_power_manager
    ninja
 
-The resulting binary is ``${RTE_SDK}/build/examples/dpdk-vm_power_manager``.
+The resulting binary is ``dpdk/build/examples/dpdk-vm_power_manager``.
 
 Running the Host Application
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -274,7 +271,7 @@ than the EAL options:
 
 .. code-block:: console
 
-   ./build/vm_power_mgr [EAL options]
+   ./<build_dir>/examples/dpdk-vm_power_mgr [EAL options]
 
 The application requires exactly two cores to run. One core for the CLI
 and the other for the channel endpoint monitor. For example, to run on
@@ -282,7 +279,7 @@ cores 0 and 1 on a system with four memory channels, issue the command:
 
 .. code-block:: console
 
-   ./build/vm_power_mgr -l 0-1 -n 4
+   ./<build_dir>/examples/dpdk-vm_power_mgr -l 0-1 -n 4
 
 After successful initialization, the VM Power Manager CLI prompt appears:
 
@@ -410,19 +407,21 @@ There are a couple of command line parameters for enabling the out-of-band
 monitoring of branch ratios on cores doing busy polling using PMDs as
 described below:
 
-``--core-list {list of cores}``
+``--core-branch-ratio {list of cores}:{branch ratio for listed cores}``
    Specify the list of cores to monitor the ratio of branch misses
    to branch hits.  A tightly-polling PMD thread has a very low
    branch ratio, therefore the core frequency scales down to the
    minimum allowed value. On receiving packets, the code path changes,
    causing the branch ratio to increase. When the ratio goes above
    the ratio threshold, the core frequency scales up to the maximum
-   allowed value.
+   allowed value. The specified branch-ratio is a floating point number
+   that identifies the threshold at which to scale up or down for the
+   elements of the core-list. If not included the default branch ratio of
+   0.01 but will need adjustment for different workloads
 
-``--branch-ratio {ratio}``
-   Specify a floating-point number that identifies the threshold at which
-   to scale up or down for the given workload. The default branch ratio
-   is 0.01 and needs adjustment for different workloads.
+   This parameter can be used multiple times for different sets of cores.
+   The branch ratio mechanism can also be useful for non-PMD cores and
+   hyper-threaded environments where C-States are disabled.
 
 
 Compiling and Running the Guest Applications
@@ -460,12 +459,10 @@ the following commands:
 
 .. code-block:: console
 
-   export RTE_SDK=/path/to/rte_sdk
-   export RTE_TARGET=build
-   cd ${RTE_SDK}/examples/vm_power_manager/guest_cli/
+   cd dpdk/examples/vm_power_manager/guest_cli/
    make
 
-The resulting binary is ``${RTE_SDK}/build/examples/guest_cli``.
+The resulting binary is ``dpdk/build/examples/guest_cli``.
 
 **Note**: This sample application conditionally links in the Jansson JSON
 library. Consequently, if you are using a multilib or cross-compile
@@ -496,15 +493,14 @@ To build just the ``vm_power_manager`` application using ``meson``/``ninja``:
 
 .. code-block:: console
 
-   export RTE_SDK=/path/to/rte_sdk
-   cd ${RTE_SDK}
-   meson build
+   cd dpdk
+   meson setup build
    cd build
    ninja
    meson configure -Dexamples=vm_power_manager/guest_cli
    ninja
 
-The resulting binary is ``${RTE_SDK}/build/examples/guest_cli``.
+The resulting binary is ``dpdk/build/examples/guest_cli``.
 
 Running the Guest Application
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -513,14 +509,14 @@ The standard EAL command line parameters are necessary:
 
 .. code-block:: console
 
-   ./build/vm_power_mgr [EAL options] -- [guest options]
+   ./<build_dir>/examples/dpdk-vm_power_mgr [EAL options] -- [guest options]
 
 The guest example uses a channel for each lcore enabled. For example, to
 run on cores 0, 1, 2 and 3:
 
 .. code-block:: console
 
-   ./build/guest_vm_power_mgr -l 0-3
+   ./<build_dir>/examples/dpdk-guest_vm_power_mgr -l 0-3
 
 .. _sending_policy:
 
@@ -591,7 +587,7 @@ host, use a command like the following:
 
 .. code-block:: console
 
-   ./build/guest_vm_power_mgr -l 0-3 -n 4 -- --vm-name=ubuntu --policy=BRANCH_RATIO --vcpu-list=2-4
+   ./<build_dir>/examples/dpdk-guest_vm_power_mgr -l 0-3 -n 4 -- --vm-name=ubuntu --policy=BRANCH_RATIO --vcpu-list=2-4
 
 Once the VM Power Manager Guest CLI appears, issuing the 'send_policy now' command
 will send the policy to the host:
@@ -685,7 +681,7 @@ The following is an example JSON string for a power management request.
    "resource_id": 10
    }}
 
-To query the available frequences of an lcore, use the query_cpu_freq command.
+To query the available frequencies of an lcore, use the query_cpu_freq command.
 Where {core_num} is the lcore to query.
 Before using this command, please enable responses via the set_query command on the host.
 
@@ -705,7 +701,7 @@ To start the application and configure the power policy, and send it to the host
 
 .. code-block:: console
 
- ./build/guest_vm_power_mgr -l 0-3 -n 4 -- --vm-name=ubuntu --policy=BRANCH_RATIO --vcpu-list=2-4
+ ./<build_dir>/examples/dpdk-guest_vm_power_mgr -l 0-3 -n 4 -- --vm-name=ubuntu --policy=BRANCH_RATIO --vcpu-list=2-4
 
 Once the VM Power Manager Guest CLI appears, issuing the 'send_policy now' command
 will send the policy to the host:

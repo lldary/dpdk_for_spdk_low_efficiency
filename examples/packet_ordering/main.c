@@ -2,8 +2,10 @@
  * Copyright(c) 2010-2016 Intel Corporation
  */
 
+#include <stdlib.h>
 #include <signal.h>
 #include <getopt.h>
+#include <stdbool.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -28,6 +30,13 @@
 
 /* Macros for printing using RTE_LOG */
 #define RTE_LOGTYPE_REORDERAPP          RTE_LOGTYPE_USER1
+
+enum {
+#define OPT_DISABLE_REORDER "disable-reorder"
+	OPT_DISABLE_REORDER_NUM = 256,
+#define OPT_INSIGHT_WORKER  "insight-worker"
+	OPT_INSIGHT_WORKER_NUM,
+};
 
 unsigned int portmask;
 unsigned int disable_reorder;
@@ -143,10 +152,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -160,9 +166,9 @@ parse_args(int argc, char **argv)
 	char **argvopt;
 	char *prgname = argv[0];
 	static struct option lgopts[] = {
-		{"disable-reorder", 0, 0, 0},
-		{"insight-worker", 0, 0, 0},
-		{NULL, 0, 0, 0}
+		{OPT_DISABLE_REORDER, 0, NULL, OPT_DISABLE_REORDER_NUM},
+		{OPT_INSIGHT_WORKER,  0, NULL, OPT_INSIGHT_WORKER_NUM },
+		{NULL,                0, 0,    0                      }
 	};
 
 	argvopt = argv;
@@ -179,18 +185,18 @@ parse_args(int argc, char **argv)
 				return -1;
 			}
 			break;
+
 		/* long options */
-		case 0:
-			if (!strcmp(lgopts[option_index].name, "disable-reorder")) {
-				printf("reorder disabled\n");
-				disable_reorder = 1;
-			}
-			if (!strcmp(lgopts[option_index].name,
-						"insight-worker")) {
-				printf("print all worker statistics\n");
-				insight_worker = 1;
-			}
+		case OPT_DISABLE_REORDER_NUM:
+			printf("reorder disabled\n");
+			disable_reorder = 1;
 			break;
+
+		case OPT_INSIGHT_WORKER_NUM:
+			printf("print all worker statistics\n");
+			insight_worker = 1;
+			break;
+
 		default:
 			print_usage(prgname);
 			return -1;
@@ -290,10 +296,10 @@ configure_eth_port(uint16_t port_id)
 		return ret;
 	}
 
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 		port_conf.txmode.offloads |=
-			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
-	ret = rte_eth_dev_configure(port_id, rxRings, txRings, &port_conf_default);
+			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+	ret = rte_eth_dev_configure(port_id, rxRings, txRings, &port_conf);
 	if (ret != 0)
 		return ret;
 
@@ -331,10 +337,7 @@ configure_eth_port(uint16_t port_id)
 
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
-			port_id,
-			addr.addr_bytes[0], addr.addr_bytes[1],
-			addr.addr_bytes[2], addr.addr_bytes[3],
-			addr.addr_bytes[4], addr.addr_bytes[5]);
+			port_id, RTE_ETHER_ADDR_BYTES(&addr));
 
 	ret = rte_eth_promiscuous_enable(port_id);
 	if (ret != 0)
@@ -348,10 +351,10 @@ print_stats(void)
 {
 	uint16_t i;
 	struct rte_eth_stats eth_stats;
-	unsigned int lcore_id, last_lcore_id, master_lcore_id, end_w_lcore_id;
+	unsigned int lcore_id, last_lcore_id, main_lcore_id, end_w_lcore_id;
 
 	last_lcore_id   = get_last_lcore_id();
-	master_lcore_id = rte_get_master_lcore();
+	main_lcore_id = rte_get_main_lcore();
 	end_w_lcore_id  = get_previous_lcore_id(last_lcore_id);
 
 	printf("\nRX thread stats:\n");
@@ -363,7 +366,7 @@ print_stats(void)
 	for (lcore_id = 0; lcore_id <= end_w_lcore_id; lcore_id++) {
 		if (insight_worker
 			&& rte_lcore_is_enabled(lcore_id)
-			&& lcore_id != master_lcore_id) {
+			&& lcore_id != main_lcore_id) {
 			printf("\nWorker thread stats on core [%u]:\n",
 					lcore_id);
 			printf(" - Pkts deqd from workers ring:		%"PRIu64"\n",
@@ -425,8 +428,8 @@ int_handler(int sig_num)
  * The mbufs are then passed to the worker threads via the rx_to_workers
  * ring.
  */
-static int
-rx_thread(struct rte_ring *ring_out)
+static __rte_always_inline int
+rx_thread(struct rte_ring *ring_out, bool disable_reorder_flag)
 {
 	uint32_t seqn = 0;
 	uint16_t i, ret = 0;
@@ -452,9 +455,11 @@ rx_thread(struct rte_ring *ring_out)
 				}
 				app_stats.rx.rx_pkts += nb_rx_pkts;
 
-				/* mark sequence number */
-				for (i = 0; i < nb_rx_pkts; )
-					pkts[i++]->seqn = seqn++;
+				/* mark sequence number if reorder is enabled */
+				if (!disable_reorder_flag) {
+					for (i = 0; i < nb_rx_pkts;)
+						*rte_reorder_seqn(pkts[i++]) = seqn++;
+				}
 
 				/* enqueue to rx_to_workers ring */
 				ret = rte_ring_enqueue_burst(ring_out,
@@ -469,6 +474,18 @@ rx_thread(struct rte_ring *ring_out)
 		}
 	}
 	return 0;
+}
+
+static __rte_noinline int
+rx_thread_reorder(struct rte_ring *ring_out)
+{
+	return rx_thread(ring_out, false);
+}
+
+static __rte_noinline int
+rx_thread_reorder_disabled(struct rte_ring *ring_out)
+{
+	return rx_thread(ring_out, true);
 }
 
 /**
@@ -661,7 +678,7 @@ main(int argc, char **argv)
 {
 	int ret;
 	unsigned nb_ports;
-	unsigned int lcore_id, last_lcore_id, master_lcore_id;
+	unsigned int lcore_id, last_lcore_id, main_lcore_id;
 	uint16_t port_id;
 	uint16_t nb_ports_available;
 	struct worker_thread_args worker_args = {NULL, NULL};
@@ -675,7 +692,7 @@ main(int argc, char **argv)
 	/* Initialize EAL */
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
-		return -1;
+		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
 
 	argc -= ret;
 	argv += ret;
@@ -683,9 +700,9 @@ main(int argc, char **argv)
 	/* Parse the application specific arguments */
 	ret = parse_args(argc, argv);
 	if (ret < 0)
-		return -1;
+		rte_exit(EXIT_FAILURE, "Invalid packet_ordering arguments\n");
 
-	/* Check if we have enought cores */
+	/* Check if we have enough cores */
 	if (rte_lcore_count() < 3)
 		rte_exit(EXIT_FAILURE, "Error, This application needs at "
 				"least 3 logical cores to run:\n"
@@ -748,36 +765,43 @@ main(int argc, char **argv)
 	}
 
 	last_lcore_id   = get_last_lcore_id();
-	master_lcore_id = rte_get_master_lcore();
+	main_lcore_id = rte_get_main_lcore();
 
 	worker_args.ring_in  = rx_to_workers;
 	worker_args.ring_out = workers_to_tx;
 
-	/* Start worker_thread() on all the available slave cores but the last 1 */
+	/* Start worker_thread() on all the available worker cores but the last 1 */
 	for (lcore_id = 0; lcore_id <= get_previous_lcore_id(last_lcore_id); lcore_id++)
-		if (rte_lcore_is_enabled(lcore_id) && lcore_id != master_lcore_id)
+		if (rte_lcore_is_enabled(lcore_id) && lcore_id != main_lcore_id)
 			rte_eal_remote_launch(worker_thread, (void *)&worker_args,
 					lcore_id);
 
 	if (disable_reorder) {
-		/* Start tx_thread() on the last slave core */
+		/* Start tx_thread() on the last worker core */
 		rte_eal_remote_launch((lcore_function_t *)tx_thread, workers_to_tx,
 				last_lcore_id);
 	} else {
 		send_args.ring_in = workers_to_tx;
-		/* Start send_thread() on the last slave core */
+		/* Start send_thread() on the last worker core */
 		rte_eal_remote_launch((lcore_function_t *)send_thread,
 				(void *)&send_args, last_lcore_id);
 	}
 
-	/* Start rx_thread() on the master core */
-	rx_thread(rx_to_workers);
+	/* Start rx_thread_xxx() on the main core */
+	if (disable_reorder)
+		rx_thread_reorder_disabled(rx_to_workers);
+	else
+		rx_thread_reorder(rx_to_workers);
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			return -1;
 	}
 
 	print_stats();
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
+
 	return 0;
 }

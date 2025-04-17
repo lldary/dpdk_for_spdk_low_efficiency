@@ -1,6 +1,8 @@
 ..  SPDX-License-Identifier: BSD-3-Clause
     Copyright(c) 2018 Intel Corporation.
 
+.. include:: <isonum.txt>
+
 NTB Rawdev Driver
 =================
 
@@ -14,28 +16,26 @@ allocation for the peer to access and read/write allocated memory from peer.
 Also, the PMD allows to use doorbell registers to notify the peer and share
 some information by using scratchpad registers.
 
-BIOS setting on Intel Skylake
------------------------------
+BIOS setting on Intel Xeon
+--------------------------
 
-Intel Non-transparent Bridge needs special BIOS setting. Since the PMD only
-supports Intel Skylake platform, introduce BIOS setting here. The referencce
-is https://www.intel.com/content/dam/support/us/en/documents/server-products/Intel_Xeon_Processor_Scalable_Family_BIOS_User_Guide.pdf
+Intel Non-transparent Bridge (NTB) needs special BIOS settings on both systems.
+Note that for 4th Generation Intel\ |reg| Xeon\ |reg| Scalable Processors,
+option ``Port Subsystem Mode`` should be changed from ``Gen5`` to ``Gen4 Only``,
+then reboot.
 
-- Set the needed PCIe port as NTB to NTB mode on both hosts.
-- Enable NTB bars and set bar size of bar 23 and bar 45 as 12-29 (2K-512M)
-  on both hosts. Note that bar size on both hosts should be the same.
-- Disable split bars for both hosts.
-- Set crosslink control override as DSD/USP on one host, USD/DSP on
-  another host.
-- Disable PCIe PII SSC (Spread Spectrum Clocking) for both hosts. This
-  is a hardware requirement.
-
-Build Options
--------------
-
-- ``CONFIG_RTE_LIBRTE_PMD_NTB_RAWDEV`` (default ``y``)
-
-   Toggle compilation of the ``ntb`` driver.
+- Set ``Non-Transparent Bridge PCIe Port Definition`` for needed PCIe ports
+  as ``NTB to NTB`` mode, on both hosts.
+- Set ``Enable NTB BARs`` as ``Enabled``, on both hosts.
+- Set ``Enable SPLIT BARs`` as ``Disabled``, on both hosts.
+- Set ``Imbar1 Size``, ``Imbar2 Size``, ``Embar1 Size`` and ``Embar2 Size``,
+  as 12-29 (i.e., 4K-512M) for 2nd Generation Intel\ |reg| Xeon\ |reg| Scalable Processors;
+  as 12-51 (i.e., 4K-128PB) for 3rd and 4th Generation Intel\ |reg| Xeon\ |reg| Scalable Processors.
+  Note that those bar sizes on both hosts should be the same.
+- Set ``Crosslink Control override`` as ``DSD/USP`` on one host,
+  ``USD/DSP`` on another host.
+- Set ``PCIe PLL SSC (Spread Spectrum Clocking)`` as ``Disabled``, on both hosts.
+  This is a hardware requirement when using Re-timer Cards.
 
 Device Setup
 ------------
@@ -151,4 +151,8 @@ like the following:
 Limitation
 ----------
 
-- This PMD only supports Intel Skylake platform.
+This PMD is only supported on Intel Xeon Platforms:
+
+- 4th Generation Intel® Xeon® Scalable Processors.
+- 3rd Generation Intel® Xeon® Scalable Processors.
+- 2nd Generation Intel® Xeon® Scalable Processors.

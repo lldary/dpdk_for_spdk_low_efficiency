@@ -43,8 +43,8 @@ const uint32_t nb_entries = 5*1024*1024;
 const uint32_t nb_total_tsx_insertion = 4.5*1024*1024;
 uint32_t rounded_nb_total_tsx_insertion;
 
-static rte_atomic64_t gcycles;
-static rte_atomic64_t ginsertions;
+static uint64_t gcycles;
+static uint64_t ginsertions;
 
 static int use_htm;
 
@@ -64,7 +64,7 @@ test_hash_multiwriter_worker(void *arg)
 
 	/*
 	 * Calculate offset for entries based on the position of the
-	 * logical core, from the master core (not counting not enabled cores)
+	 * logical core, from the main core (not counting not enabled cores)
 	 */
 	offset = pos_core * tbl_multiwriter_test_params.nb_tsx_insertion;
 
@@ -84,8 +84,8 @@ test_hash_multiwriter_worker(void *arg)
 	}
 
 	cycles = rte_rdtsc_precise() - begin;
-	rte_atomic64_add(&gcycles, cycles);
-	rte_atomic64_add(&ginsertions, i - offset);
+	__atomic_fetch_add(&gcycles, cycles, __ATOMIC_RELAXED);
+	__atomic_fetch_add(&ginsertions, i - offset, __ATOMIC_RELAXED);
 
 	for (; i < offset + tbl_multiwriter_test_params.nb_tsx_insertion; i++)
 		tbl_multiwriter_test_params.keys[i]
@@ -146,8 +146,6 @@ test_hash_multiwriter(void)
 		tbl_multiwriter_test_params.nb_tsx_insertion)
 		* tbl_multiwriter_test_params.nb_tsx_insertion;
 
-	rte_srand(rte_rdtsc());
-
 	keys = rte_malloc(NULL, sizeof(uint32_t) * nb_entries, 0);
 
 	if (keys == NULL) {
@@ -168,11 +166,8 @@ test_hash_multiwriter(void)
 
 	tbl_multiwriter_test_params.found = found;
 
-	rte_atomic64_init(&gcycles);
-	rte_atomic64_clear(&gcycles);
-
-	rte_atomic64_init(&ginsertions);
-	rte_atomic64_clear(&ginsertions);
+	__atomic_store_n(&gcycles, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ginsertions, 0, __ATOMIC_RELAXED);
 
 	/* Get list of enabled cores */
 	i = 0;
@@ -194,7 +189,7 @@ test_hash_multiwriter(void)
 
 	/* Fire all threads. */
 	rte_eal_mp_remote_launch(test_hash_multiwriter_worker,
-				 enabled_core_ids, CALL_MASTER);
+				 enabled_core_ids, CALL_MAIN);
 	rte_eal_mp_wait_lcore();
 
 	count = rte_hash_count(handle);
@@ -238,8 +233,8 @@ test_hash_multiwriter(void)
 	printf("No key corrupted during multiwriter insertion.\n");
 
 	unsigned long long int cycles_per_insertion =
-		rte_atomic64_read(&gcycles)/
-		rte_atomic64_read(&ginsertions);
+		__atomic_load_n(&gcycles, __ATOMIC_RELAXED)/
+		__atomic_load_n(&ginsertions, __ATOMIC_RELAXED);
 
 	printf(" cycles per insertion: %llu\n", cycles_per_insertion);
 
@@ -290,4 +285,4 @@ test_hash_multiwriter_main(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(hash_multiwriter_autotest, test_hash_multiwriter_main);
+REGISTER_PERF_TEST(hash_multiwriter_autotest, test_hash_multiwriter_main);

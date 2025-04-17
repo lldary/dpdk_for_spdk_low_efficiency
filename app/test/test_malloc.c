@@ -2,13 +2,17 @@
  * Copyright(c) 2010-2019 Intel Corporation
  */
 
+#include "test.h"
+
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <stdlib.h>
+#ifndef RTE_EXEC_ENV_WINDOWS
 #include <sys/mman.h>
+#endif
 #include <sys/queue.h>
 #include <unistd.h>
 
@@ -23,10 +27,7 @@
 #include <rte_random.h>
 #include <rte_string_fns.h>
 
-#include "test.h"
-
 #define N 10000
-
 
 static int
 is_mem_on_socket(int32_t socket);
@@ -47,8 +48,8 @@ addr_to_socket(void *addr);
 static int
 is_memory_overlap(void *p1, size_t len1, void *p2, size_t len2)
 {
-	unsigned long ptr1 = (unsigned long)p1;
-	unsigned long ptr2 = (unsigned long)p2;
+	uintptr_t ptr1 = (uintptr_t)p1;
+	uintptr_t ptr2 = (uintptr_t)p2;
 
 	if (ptr2 >= ptr1 && (ptr2 - ptr1) < len1)
 		return 1;
@@ -60,7 +61,7 @@ is_memory_overlap(void *p1, size_t len1, void *p2, size_t len2)
 static int
 is_aligned(void *p, int align)
 {
-	unsigned long addr = (unsigned long)p;
+	uintptr_t addr = (uintptr_t)p;
 	unsigned mask = align - 1;
 
 	if (addr & mask)
@@ -301,11 +302,11 @@ test_multi_alloc_statistics(void)
 	rte_malloc_get_socket_stats(socket,&post_stats);
 	/* Check statistics reported are correct */
 	/* All post stats should be equal to pre stats after alloc freed */
-	if ((post_stats.heap_totalsz_bytes != pre_stats.heap_totalsz_bytes) &&
-			(post_stats.heap_freesz_bytes!=pre_stats.heap_freesz_bytes) &&
-			(post_stats.heap_allocsz_bytes!=pre_stats.heap_allocsz_bytes)&&
-			(post_stats.alloc_count!=pre_stats.alloc_count)&&
-			(post_stats.free_count!=pre_stats.free_count)) {
+	if ((post_stats.heap_totalsz_bytes != pre_stats.heap_totalsz_bytes) ||
+			(post_stats.heap_freesz_bytes != pre_stats.heap_freesz_bytes) ||
+			(post_stats.heap_allocsz_bytes != pre_stats.heap_allocsz_bytes) ||
+			(post_stats.alloc_count != pre_stats.alloc_count) ||
+			(post_stats.free_count != pre_stats.free_count)) {
 		printf("Malloc statistics are incorrect - freed alloc\n");
 		return -1;
 	}
@@ -362,16 +363,24 @@ test_multi_alloc_statistics(void)
 		return -1;
 	}
 
-	if ((post_stats.heap_totalsz_bytes != pre_stats.heap_totalsz_bytes) &&
-			(post_stats.heap_freesz_bytes!=pre_stats.heap_freesz_bytes) &&
-			(post_stats.heap_allocsz_bytes!=pre_stats.heap_allocsz_bytes)&&
-			(post_stats.alloc_count!=pre_stats.alloc_count)&&
-			(post_stats.free_count!=pre_stats.free_count)) {
+	if ((post_stats.heap_totalsz_bytes != pre_stats.heap_totalsz_bytes) ||
+			(post_stats.heap_freesz_bytes != pre_stats.heap_freesz_bytes) ||
+			(post_stats.heap_allocsz_bytes != pre_stats.heap_allocsz_bytes) ||
+			(post_stats.alloc_count != pre_stats.alloc_count) ||
+			(post_stats.free_count != pre_stats.free_count)) {
 		printf("Malloc statistics are incorrect - freed alloc\n");
 		return -1;
 	}
 	return 0;
 }
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_realloc(void)
+{
+	return TEST_SKIPPED;
+}
+#else
 
 static int
 test_realloc_socket(int socket)
@@ -603,7 +612,7 @@ test_realloc_numa(void)
 		}
 	}
 
-	/* Print warnign if only a single socket, but don't fail the test */
+	/* Print warning if only a single socket, but don't fail the test */
 	if (socket_count < 2)
 		printf("WARNING: realloc_socket test needs memory on multiple sockets!\n");
 
@@ -671,6 +680,8 @@ end:
 	return ret;
 }
 
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
 static int
 test_random_alloc_free(void *_ __rte_unused)
 {
@@ -680,8 +691,6 @@ test_random_alloc_free(void *_ __rte_unused)
 	} *list_head = NULL;
 	unsigned i;
 	unsigned count = 0;
-
-	rte_srand((unsigned)rte_rdtsc());
 
 	for (i = 0; i < N; i++){
 		unsigned free_mem = 0;
@@ -812,7 +821,7 @@ test_zero_aligned_alloc(void)
 
 err_return:
 	/*clean up */
-	if (p1) rte_free(p1);
+	rte_free(p1);
 	return -1;
 }
 
@@ -846,6 +855,9 @@ test_malloc_bad_params(void)
 	if (bad_ptr != NULL)
 		goto err_return;
 
+#if defined(RTE_CC_GCC) || defined(RTE_CC_CLANG)
+	/* this test can not be built, will get trapped at compile time! */
+#else
 	/* rte_malloc expected to return null with size will cause overflow */
 	align = RTE_CACHE_LINE_SIZE;
 	size = (size_t)-8;
@@ -857,13 +869,12 @@ test_malloc_bad_params(void)
 	bad_ptr = rte_realloc(NULL, size, align);
 	if (bad_ptr != NULL)
 		goto err_return;
-
+#endif
 	return 0;
 
 err_return:
 	/* clean up pointer */
-	if (bad_ptr)
-		rte_free(bad_ptr);
+	rte_free(bad_ptr);
 	return -1;
 }
 
@@ -924,6 +935,7 @@ test_alloc_single_socket(int32_t socket)
 	if (mem == NULL)
 		return -1;
 	if (addr_to_socket(mem) != desired_socket) {
+		rte_free(mem);
 		return -1;
 	}
 	rte_free(mem);
@@ -968,7 +980,7 @@ test_alloc_socket(void)
 		}
 	}
 
-	/* Print warnign if only a single socket, but don't fail the test */
+	/* Print warning if only a single socket, but don't fail the test */
 	if (socket_count < 2) {
 		printf("WARNING: alloc_socket test needs memory on multiple sockets!\n");
 	}
@@ -1007,11 +1019,11 @@ test_malloc(void)
 	else printf("test_realloc() passed\n");
 
 	/*----------------------------*/
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		rte_eal_remote_launch(test_align_overlap_per_lcore, NULL, lcore_id);
 	}
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			ret = -1;
 	}
@@ -1022,11 +1034,11 @@ test_malloc(void)
 	else printf("test_align_overlap_per_lcore() passed\n");
 
 	/*----------------------------*/
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		rte_eal_remote_launch(test_reordered_free_per_lcore, NULL, lcore_id);
 	}
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			ret = -1;
 	}
@@ -1037,11 +1049,11 @@ test_malloc(void)
 	else printf("test_reordered_free_per_lcore() passed\n");
 
 	/*----------------------------*/
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		rte_eal_remote_launch(test_random_alloc_free, NULL, lcore_id);
 	}
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			ret = -1;
 	}
@@ -1077,4 +1089,4 @@ test_malloc(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(malloc_autotest, test_malloc);
+REGISTER_FAST_TEST(malloc_autotest, false, true, test_malloc);

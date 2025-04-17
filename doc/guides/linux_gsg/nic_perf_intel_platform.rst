@@ -1,3 +1,6 @@
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright(c) 2015 Intel Corporation.
+
 How to get best performance with NICs on Intel platforms
 ========================================================
 
@@ -124,16 +127,10 @@ The following are some recommendations on GRUB boot settings:
 Configurations before running DPDK
 ----------------------------------
 
-1. Build the DPDK target and reserve huge pages.
+#. Reserve huge pages.
    See the earlier section on :ref:`linux_gsg_hugepages` for more details.
 
-   The following shell commands may help with building and configuration:
-
    .. code-block:: console
-
-      # Build DPDK target.
-      cd dpdk_folder
-      make install T=x86_64-native-linux-gcc -j
 
       # Get the hugepage size.
       awk '/Hugepagesize/ {print $2}' /proc/meminfo
@@ -150,7 +147,7 @@ Configurations before running DPDK
       # Mount to the specific folder.
       mount -t hugetlbfs nodev /mnt/huge
 
-2. Check the CPU layout using the DPDK ``cpu_layout`` utility:
+#. Check the CPU layout using the DPDK ``cpu_layout`` utility:
 
    .. code-block:: console
 
@@ -160,7 +157,7 @@ Configurations before running DPDK
 
    Or run ``lscpu`` to check the cores on each socket.
 
-3. Check your NIC id and related socket id:
+#. Check your NIC id and related socket id:
 
    .. code-block:: console
 
@@ -184,5 +181,5 @@ Configurations before running DPDK
    **Note**: To get the best performance, ensure that the core and NICs are in the same socket.
    In the example above ``85:00.0`` is on socket 1 and should be used by cores on socket 1 for the best performance.
 
-4. Check which kernel drivers needs to be loaded and whether there is a need to unbind the network ports from their kernel drivers.
-More details about DPDK setup and Linux kernel requirements see :ref:`linux_gsg_compiling_dpdk` and :ref:`linux_gsg_linux_drivers`.
+#. Check which kernel drivers needs to be loaded and whether there is a need to unbind the network ports from their kernel drivers.
+   More details about DPDK setup and Linux kernel requirements see :ref:`linux_gsg_compiling_dpdk` and :ref:`linux_gsg_linux_drivers`.

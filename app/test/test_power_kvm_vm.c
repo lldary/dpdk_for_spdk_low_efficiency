@@ -10,7 +10,7 @@
 
 #include "test.h"
 
-#ifndef RTE_LIBRTE_POWER
+#ifndef RTE_LIB_POWER
 
 static int
 test_power_kvm_vm(void)
@@ -299,4 +299,4 @@ fail_all:
 }
 #endif
 
-REGISTER_TEST_COMMAND(power_kvm_vm_autotest, test_power_kvm_vm);
+REGISTER_FAST_TEST(power_kvm_vm_autotest, false, true, test_power_kvm_vm);

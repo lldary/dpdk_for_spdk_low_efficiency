@@ -7,8 +7,15 @@
 # DPDK instance, use 'make'
 
 allow_experimental_apis = true
-ext_deps += cc.find_library('rt')
+librt = cc.find_library('rt', required: false)
+if not librt.found()
+    build = false
+    subdir_done()
+endif
+
+ext_deps += librt
 deps += 'timer'
 sources = files(
-	'main.c', 'shm.c'
+        'main.c',
+        'shm.c',
 )

@@ -9,13 +9,13 @@
 #include <rte_mempool.h>
 #include <rte_lcore.h>
 #include "axgbe_common.h"
+#include "rte_time.h"
 
 #define IRQ				0xff
-#define VLAN_HLEN			4
 
 #define AXGBE_TX_MAX_BUF_SIZE		(0x3fff & ~(64 - 1))
 #define AXGBE_RX_MAX_BUF_SIZE		(0x3fff & ~(64 - 1))
-#define AXGBE_RX_MIN_BUF_SIZE		(RTE_ETHER_MAX_LEN + VLAN_HLEN)
+#define AXGBE_RX_MIN_BUF_SIZE		(RTE_ETHER_MAX_LEN + RTE_VLAN_HLEN)
 #define AXGBE_MAX_MAC_ADDRS		32
 #define AXGBE_MAX_HASH_MAC_ADDRS	256
 
@@ -63,6 +63,13 @@
 #define AXGBE_V2_DMA_CLOCK_FREQ		500000000
 #define AXGBE_V2_PTP_CLOCK_FREQ		125000000
 
+/* Timestamp support - values based on 50MHz PTP clock
+ *   50MHz => 20 nsec
+ */
+#define AXGBE_TSTAMP_SSINC       20
+#define AXGBE_TSTAMP_SNSINC      0
+#define AXGBE_CYCLECOUNTER_MASK 0xffffffffffffffffULL
+
 #define AXGMAC_FIFO_MIN_ALLOC		2048
 #define AXGMAC_FIFO_UNIT		256
 #define AXGMAC_FIFO_ALIGN(_x)                            \
@@ -89,12 +96,12 @@
 
 /* Receive Side Scaling */
 #define AXGBE_RSS_OFFLOAD  ( \
-	ETH_RSS_IPV4 | \
-	ETH_RSS_NONFRAG_IPV4_TCP | \
-	ETH_RSS_NONFRAG_IPV4_UDP | \
-	ETH_RSS_IPV6 | \
-	ETH_RSS_NONFRAG_IPV6_TCP | \
-	ETH_RSS_NONFRAG_IPV6_UDP)
+	RTE_ETH_RSS_IPV4 | \
+	RTE_ETH_RSS_NONFRAG_IPV4_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV4_UDP | \
+	RTE_ETH_RSS_IPV6 | \
+	RTE_ETH_RSS_NONFRAG_IPV6_TCP | \
+	RTE_ETH_RSS_NONFRAG_IPV6_UDP)
 
 #define AXGBE_RSS_HASH_KEY_SIZE		40
 #define AXGBE_RSS_MAX_TABLE_SIZE	256
@@ -116,6 +123,12 @@
 
 /* MDIO port types */
 #define AXGMAC_MAX_C22_PORT		3
+
+/* The max frame size with default MTU */
+#define AXGBE_ETH_MAX_LEN ( \
+	RTE_ETHER_MTU + \
+	RTE_ETHER_HDR_LEN + \
+	RTE_ETHER_CRC_LEN)
 
 /* Helper macro for descriptor handling
  *  Always use AXGBE_GET_DESC_DATA to access the descriptor data
@@ -291,6 +304,13 @@ struct axgbe_hw_if {
 	int (*config_tx_flow_control)(struct axgbe_port *);
 	int (*config_rx_flow_control)(struct axgbe_port *);
 
+	/* vlan */
+	int (*enable_rx_vlan_stripping)(struct axgbe_port *);
+	int (*disable_rx_vlan_stripping)(struct axgbe_port *);
+	int (*enable_rx_vlan_filtering)(struct axgbe_port *);
+	int (*disable_rx_vlan_filtering)(struct axgbe_port *);
+	int (*update_vlan_hash_table)(struct axgbe_port *);
+
 	int (*exit)(struct axgbe_port *);
 };
 
@@ -425,6 +445,12 @@ struct axgbe_hw_features {
 	unsigned int tx_ch_cnt;		/* Number of DMA Transmit Channels */
 	unsigned int pps_out_num;	/* Number of PPS outputs */
 	unsigned int aux_snap_num;	/* Number of Aux snapshot inputs */
+
+	/* HW Feature Register3 */
+	unsigned int tx_q_vlan_tag_ins; /* Queue/Channel based VLAN tag */
+					/* insertion on Tx Enable */
+	unsigned int no_of_vlan_extn;   /* Number of Extended VLAN Tag */
+					/* Filters Enabled */
 };
 
 struct axgbe_version_data {
@@ -513,6 +539,13 @@ struct axgbe_port {
 	void *xprop_regs;	/* AXGBE property registers */
 	void *xi2c_regs;	/* AXGBE I2C CSRs */
 
+	/* Port property registers */
+	unsigned int pp0;
+	unsigned int pp1;
+	unsigned int pp2;
+	unsigned int pp3;
+	unsigned int pp4;
+
 	bool cdr_track_early;
 	/* XPCS indirect addressing lock */
 	unsigned int xpcs_window_def_reg;
@@ -522,7 +555,7 @@ struct axgbe_port {
 	unsigned int xpcs_window_mask;
 
 	/* Flags representing axgbe_state */
-	unsigned long dev_state;
+	uint32_t dev_state;
 
 	struct axgbe_hw_if hw_if;
 	struct axgbe_phy_if phy_if;
@@ -556,6 +589,7 @@ struct axgbe_port {
 	unsigned int tx_pbl;
 	unsigned int tx_osp_mode;
 	unsigned int tx_max_fifo_size;
+	unsigned int multi_segs_tx;
 
 	/* Rx settings */
 	unsigned int rx_sf_mode;
@@ -594,6 +628,7 @@ struct axgbe_port {
 	uint32_t rss_table[AXGBE_RSS_MAX_TABLE_SIZE];
 	uint32_t rss_options;
 	int rss_enable;
+	uint64_t rss_hf;
 
 	/* Hardware features of the device */
 	struct axgbe_hw_features hw_feat;
@@ -614,7 +649,7 @@ struct axgbe_port {
 
 	unsigned int kr_redrv;
 
-	/* Auto-negotiation atate machine support */
+	/* Auto-negotiation state machine support */
 	unsigned int an_int;
 	unsigned int an_status;
 	enum axgbe_an an_result;
@@ -644,6 +679,15 @@ struct axgbe_port {
 	unsigned int hash_table_count;
 	unsigned int uc_hash_mac_addr;
 	unsigned int uc_hash_table[AXGBE_MAC_HASH_TABLE_SIZE];
+
+	/* Filtering support */
+	unsigned long active_vlans[VLAN_TABLE_SIZE];
+
+	/* For IEEE1588 PTP */
+	struct rte_timecounter systime_tc;
+	struct rte_timecounter tx_tstamp;
+	unsigned int tstamp_addend;
+
 };
 
 void axgbe_init_function_ptrs_dev(struct axgbe_hw_if *hw_if);
@@ -653,5 +697,7 @@ void axgbe_init_function_ptrs_i2c(struct axgbe_i2c_if *i2c_if);
 void axgbe_set_mac_addn_addr(struct axgbe_port *pdata, u8 *addr,
 			     uint32_t index);
 void axgbe_set_mac_hash_table(struct axgbe_port *pdata, u8 *addr, bool add);
+int axgbe_write_rss_lookup_table(struct axgbe_port *pdata);
+int axgbe_write_rss_hash_key(struct axgbe_port *pdata);
 
 #endif /* RTE_ETH_AXGBE_H_ */

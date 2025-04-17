@@ -5,6 +5,8 @@
 #ifndef _DSW_EVDEV_H_
 #define _DSW_EVDEV_H_
 
+#include <eventdev_pmd.h>
+
 #include <rte_event_ring.h>
 #include <rte_eventdev.h>
 
@@ -22,7 +24,7 @@
 /* Multiple 24-bit flow ids will map to the same DSW-level flow. The
  * number of DSW flows should be high enough make it unlikely that
  * flow ids of several large flows hash to the same DSW-level flow.
- * Such collisions will limit parallism and thus the number of cores
+ * Such collisions will limit parallelism and thus the number of cores
  * that may be utilized. However, configuring a large number of DSW
  * flows might potentially, depending on traffic and actual
  * application flow id value range, result in each such DSW-level flow
@@ -102,7 +104,7 @@
 /* Only one outstanding migration per port is allowed */
 #define DSW_MAX_PAUSED_FLOWS (DSW_MAX_PORTS*DSW_MAX_FLOWS_PER_MIGRATION)
 
-/* Enough room for paus request/confirm and unpaus request/confirm for
+/* Enough room for pause request/confirm and unpaus request/confirm for
  * all possible senders.
  */
 #define DSW_CTL_IN_RING_SIZE ((DSW_MAX_PORTS-1)*4)
@@ -126,7 +128,6 @@ struct dsw_queue_flow {
 enum dsw_migration_state {
 	DSW_MIGRATION_STATE_IDLE,
 	DSW_MIGRATION_STATE_PAUSING,
-	DSW_MIGRATION_STATE_FORWARDING,
 	DSW_MIGRATION_STATE_UNPAUSING
 };
 
@@ -190,6 +191,13 @@ struct dsw_port {
 	uint16_t paused_events_len;
 	struct rte_event paused_events[DSW_MAX_EVENTS];
 
+	uint16_t emigrating_events_len;
+	/* Buffer for not-yet-processed events pertaining to a flow
+	 * emigrating from this port. These events will be forwarded
+	 * to the target port.
+	 */
+	struct rte_event emigrating_events[DSW_MAX_EVENTS];
+
 	uint16_t seen_events_len;
 	uint16_t seen_events_idx;
 	struct dsw_queue_flow seen_events[DSW_MAX_EVENTS_RECORDED];
@@ -219,18 +227,21 @@ struct dsw_port {
 	struct rte_ring *ctl_in_ring __rte_cache_aligned;
 
 	/* Estimate of current port load. */
-	rte_atomic16_t load __rte_cache_aligned;
+	int16_t load __rte_cache_aligned;
 	/* Estimate of flows currently migrating to this port. */
-	rte_atomic32_t immigration_load __rte_cache_aligned;
+	int32_t immigration_load __rte_cache_aligned;
 } __rte_cache_aligned;
 
 struct dsw_queue {
 	uint8_t schedule_type;
-	uint8_t serving_ports[DSW_MAX_PORTS];
+	uint64_t serving_ports;
 	uint16_t num_serving_ports;
 
 	uint8_t flow_to_port_map[DSW_MAX_FLOWS] __rte_cache_aligned;
 };
+
+/* Limited by the size of the 'serving_ports' bitmask */
+static_assert(DSW_MAX_PORTS <= 64, "Max compile-time port count exceeded");
 
 struct dsw_evdev {
 	struct rte_eventdev_data *data;
@@ -241,7 +252,7 @@ struct dsw_evdev {
 	uint8_t num_queues;
 	int32_t max_inflight;
 
-	rte_atomic32_t credits_on_loan __rte_cache_aligned;
+	int32_t credits_on_loan __rte_cache_aligned;
 };
 
 #define DSW_CTL_PAUS_REQ (0)
@@ -269,17 +280,18 @@ uint16_t dsw_event_enqueue_forward_burst(void *port,
 uint16_t dsw_event_dequeue(void *port, struct rte_event *ev, uint64_t wait);
 uint16_t dsw_event_dequeue_burst(void *port, struct rte_event *events,
 				 uint16_t num, uint64_t wait);
+void dsw_event_maintain(void *port, int op);
 
 int dsw_xstats_get_names(const struct rte_eventdev *dev,
 			 enum rte_event_dev_xstats_mode mode,
 			 uint8_t queue_port_id,
 			 struct rte_event_dev_xstats_name *xstats_names,
-			 unsigned int *ids, unsigned int size);
+			 uint64_t *ids, unsigned int size);
 int dsw_xstats_get(const struct rte_eventdev *dev,
 		   enum rte_event_dev_xstats_mode mode, uint8_t queue_port_id,
-		   const unsigned int ids[], uint64_t values[], unsigned int n);
+		   const uint64_t ids[], uint64_t values[], unsigned int n);
 uint64_t dsw_xstats_get_by_name(const struct rte_eventdev *dev,
-				const char *name, unsigned int *id);
+				const char *name, uint64_t *id);
 
 static inline struct dsw_evdev *
 dsw_pmd_priv(const struct rte_eventdev *eventdev)

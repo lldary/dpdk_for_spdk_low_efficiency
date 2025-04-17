@@ -14,7 +14,6 @@
 #include "cli.h"
 
 #include "cryptodev.h"
-#include "kni.h"
 #include "link.h"
 #include "mempool.h"
 #include "parser.h"
@@ -272,8 +271,8 @@ print_link_info(struct link *link, char *out, size_t out_size)
 	snprintf(out, out_size,
 		"\n"
 		"%s: flags=<%s> mtu %u\n"
-		"\tether %02X:%02X:%02X:%02X:%02X:%02X rxqueues %u txqueues %u\n"
-		"\tport# %u  speed %u Mbps\n"
+		"\tether " RTE_ETHER_ADDR_PRT_FMT " rxqueues %u txqueues %u\n"
+		"\tport# %u  speed %s\n"
 		"\tRX packets %" PRIu64"  bytes %" PRIu64"\n"
 		"\tRX errors %" PRIu64"  missed %" PRIu64"  no-mbuf %" PRIu64"\n"
 		"\tTX packets %" PRIu64"  bytes %" PRIu64"\n"
@@ -281,13 +280,11 @@ print_link_info(struct link *link, char *out, size_t out_size)
 		link->name,
 		eth_link.link_status == 0 ? "DOWN" : "UP",
 		mtu,
-		mac_addr.addr_bytes[0], mac_addr.addr_bytes[1],
-		mac_addr.addr_bytes[2], mac_addr.addr_bytes[3],
-		mac_addr.addr_bytes[4], mac_addr.addr_bytes[5],
+		RTE_ETHER_ADDR_BYTES(&mac_addr),
 		link->n_rxq,
 		link->n_txq,
 		link->port_id,
-		eth_link.link_speed,
+		rte_eth_link_speed_to_str(eth_link.link_speed),
 		stats.ipackets,
 		stats.ibytes,
 		stats.ierrors,
@@ -393,12 +390,7 @@ static const char cmd_tmgr_subport_profile_help[] =
 "   <tc0_rate> <tc1_rate> <tc2_rate> <tc3_rate> <tc4_rate>"
 "        <tc5_rate> <tc6_rate> <tc7_rate> <tc8_rate>"
 "        <tc9_rate> <tc10_rate> <tc11_rate> <tc12_rate>\n"
-"   <tc_period>\n"
-"   pps <n_pipes_per_subport>\n"
-"   qsize <qsize_tc0> <qsize_tc1> <qsize_tc2>"
-"       <qsize_tc3> <qsize_tc4> <qsize_tc5> <qsize_tc6>"
-"       <qsize_tc7> <qsize_tc8> <qsize_tc9> <qsize_tc10>"
-"       <qsize_tc11> <qsize_tc12>";
+"   <tc_period>\n";
 
 static void
 cmd_tmgr_subport_profile(char **tokens,
@@ -406,57 +398,37 @@ cmd_tmgr_subport_profile(char **tokens,
 	char *out,
 	size_t out_size)
 {
-	struct rte_sched_subport_params p;
+	struct rte_sched_subport_profile_params subport_profile;
 	int status, i;
 
-	if (n_tokens != 35) {
+	if (n_tokens != 19) {
 		snprintf(out, out_size, MSG_ARG_MISMATCH, tokens[0]);
 		return;
 	}
 
-	if (parser_read_uint64(&p.tb_rate, tokens[3]) != 0) {
+	if (parser_read_uint64(&subport_profile.tb_rate, tokens[3]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "tb_rate");
 		return;
 	}
 
-	if (parser_read_uint64(&p.tb_size, tokens[4]) != 0) {
+	if (parser_read_uint64(&subport_profile.tb_size, tokens[4]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "tb_size");
 		return;
 	}
 
 	for (i = 0; i < RTE_SCHED_TRAFFIC_CLASSES_PER_PIPE; i++)
-		if (parser_read_uint64(&p.tc_rate[i], tokens[5 + i]) != 0) {
+		if (parser_read_uint64(&subport_profile.tc_rate[i],
+				tokens[5 + i]) != 0) {
 			snprintf(out, out_size, MSG_ARG_INVALID, "tc_rate");
 			return;
 		}
 
-	if (parser_read_uint64(&p.tc_period, tokens[18]) != 0) {
+	if (parser_read_uint64(&subport_profile.tc_period, tokens[18]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "tc_period");
 		return;
 	}
 
-	if (strcmp(tokens[19], "pps") != 0) {
-		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "pps");
-		return;
-	}
-
-	if (parser_read_uint32(&p.n_pipes_per_subport_enabled, tokens[20]) != 0) {
-		snprintf(out, out_size, MSG_ARG_INVALID, "n_pipes_per_subport");
-		return;
-	}
-
-	if (strcmp(tokens[21], "qsize") != 0) {
-		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "qsize");
-		return;
-	}
-
-	for (i = 0; i < RTE_SCHED_TRAFFIC_CLASSES_PER_PIPE; i++)
-		if (parser_read_uint16(&p.qsize[i], tokens[22 + i]) != 0) {
-			snprintf(out, out_size, MSG_ARG_INVALID, "qsize");
-			return;
-		}
-
-	status = tmgr_subport_profile_add(&p);
+	status = tmgr_subport_profile_add(&subport_profile);
 	if (status != 0) {
 		snprintf(out, out_size, MSG_CMD_FAIL, tokens[0]);
 		return;
@@ -530,6 +502,7 @@ static const char cmd_tmgr_help[] =
 "tmgr <tmgr_name>\n"
 "   rate <rate>\n"
 "   spp <n_subports_per_port>\n"
+"   pps <n_pipes_per_subport>\n"
 "   fo <frame_overhead>\n"
 "   mtu <mtu>\n"
 "   cpu <cpu_id>\n";
@@ -544,7 +517,7 @@ cmd_tmgr(char **tokens,
 	char *name;
 	struct tmgr_port *tmgr_port;
 
-	if (n_tokens != 12) {
+	if (n_tokens != 14) {
 		snprintf(out, out_size, MSG_ARG_MISMATCH, tokens[0]);
 		return;
 	}
@@ -571,32 +544,42 @@ cmd_tmgr(char **tokens,
 		return;
 	}
 
-	if (strcmp(tokens[6], "fo") != 0) {
+	if (strcmp(tokens[6], "pps") != 0) {
+		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "spp");
+		return;
+	}
+
+	if (parser_read_uint32(&p.n_pipes_per_subport, tokens[7]) != 0) {
+		snprintf(out, out_size, MSG_ARG_INVALID, "n_pipes_per_subport");
+		return;
+	}
+
+	if (strcmp(tokens[8], "fo") != 0) {
 		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "fo");
 		return;
 	}
 
-	if (parser_read_uint32(&p.frame_overhead, tokens[7]) != 0) {
+	if (parser_read_uint32(&p.frame_overhead, tokens[9]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "frame_overhead");
 		return;
 	}
 
-	if (strcmp(tokens[8], "mtu") != 0) {
+	if (strcmp(tokens[10], "mtu") != 0) {
 		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "mtu");
 		return;
 	}
 
-	if (parser_read_uint32(&p.mtu, tokens[9]) != 0) {
+	if (parser_read_uint32(&p.mtu, tokens[11]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "mtu");
 		return;
 	}
 
-	if (strcmp(tokens[10], "cpu") != 0) {
+	if (strcmp(tokens[12], "cpu") != 0) {
 		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "cpu");
 		return;
 	}
 
-	if (parser_read_uint32(&p.cpu_id, tokens[11]) != 0) {
+	if (parser_read_uint32(&p.cpu_id, tokens[13]) != 0) {
 		snprintf(out, out_size, MSG_ARG_INVALID, "cpu_id");
 		return;
 	}
@@ -744,65 +727,6 @@ cmd_tap(char **tokens,
 	}
 }
 
-static const char cmd_kni_help[] =
-"kni <kni_name>\n"
-"   link <link_name>\n"
-"   mempool <mempool_name>\n"
-"   [thread <thread_id>]\n";
-
-static void
-cmd_kni(char **tokens,
-	uint32_t n_tokens,
-	char *out,
-	size_t out_size)
-{
-	struct kni_params p;
-	char *name;
-	struct kni *kni;
-
-	memset(&p, 0, sizeof(p));
-	if ((n_tokens != 6) && (n_tokens != 8)) {
-		snprintf(out, out_size, MSG_ARG_MISMATCH, tokens[0]);
-		return;
-	}
-
-	name = tokens[1];
-
-	if (strcmp(tokens[2], "link") != 0) {
-		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "link");
-		return;
-	}
-
-	p.link_name = tokens[3];
-
-	if (strcmp(tokens[4], "mempool") != 0) {
-		snprintf(out, out_size, MSG_ARG_NOT_FOUND, "mempool");
-		return;
-	}
-
-	p.mempool_name = tokens[5];
-
-	if (n_tokens == 8) {
-		if (strcmp(tokens[6], "thread") != 0) {
-			snprintf(out, out_size, MSG_ARG_NOT_FOUND, "thread");
-			return;
-		}
-
-		if (parser_read_uint32(&p.thread_id, tokens[7]) != 0) {
-			snprintf(out, out_size, MSG_ARG_INVALID, "thread_id");
-			return;
-		}
-
-		p.force_bind = 1;
-	} else
-		p.force_bind = 0;
-
-	kni = kni_create(name, &p);
-	if (kni == NULL) {
-		snprintf(out, out_size, MSG_CMD_FAIL, tokens[0]);
-		return;
-	}
-}
 
 static const char cmd_cryptodev_help[] =
 "cryptodev <cryptodev_name>\n"
@@ -1557,7 +1481,6 @@ static const char cmd_pipeline_port_in_help[] =
 "   | swq <swq_name>\n"
 "   | tmgr <tmgr_name>\n"
 "   | tap <tap_name> mempool <mempool_name> mtu <mtu>\n"
-"   | kni <kni_name>\n"
 "   | source mempool <mempool_name> file <file_name> bpp <n_bytes_per_pkt>\n"
 "   | cryptodev <cryptodev_name> rxq <queue_id>\n"
 "   [action <port_in_action_profile_name>]\n"
@@ -1680,18 +1603,6 @@ cmd_pipeline_port_in(char **tokens,
 		}
 
 		t0 += 6;
-	} else if (strcmp(tokens[t0], "kni") == 0) {
-		if (n_tokens < t0 + 2) {
-			snprintf(out, out_size, MSG_ARG_MISMATCH,
-				"pipeline port in kni");
-			return;
-		}
-
-		p.type = PORT_IN_KNI;
-
-		p.dev_name = tokens[t0 + 1];
-
-		t0 += 2;
 	} else if (strcmp(tokens[t0], "source") == 0) {
 		if (n_tokens < t0 + 6) {
 			snprintf(out, out_size, MSG_ARG_MISMATCH,
@@ -1797,7 +1708,6 @@ static const char cmd_pipeline_port_out_help[] =
 "   | swq <swq_name>\n"
 "   | tmgr <tmgr_name>\n"
 "   | tap <tap_name>\n"
-"   | kni <kni_name>\n"
 "   | sink [file <file_name> pkts <max_n_pkts>]\n"
 "   | cryptodev <cryptodev_name> txq <txq_id> offset <crypto_op_offset>\n";
 
@@ -1888,16 +1798,6 @@ cmd_pipeline_port_out(char **tokens,
 		}
 
 		p.type = PORT_OUT_TAP;
-
-		p.dev_name = tokens[7];
-	} else if (strcmp(tokens[6], "kni") == 0) {
-		if (n_tokens != 8) {
-			snprintf(out, out_size, MSG_ARG_MISMATCH,
-				"pipeline port out kni");
-			return;
-		}
-
-		p.type = PORT_OUT_KNI;
 
 		p.dev_name = tokens[7];
 	} else if (strcmp(tokens[6], "sink") == 0) {
@@ -3789,10 +3689,8 @@ parse_free_sym_crypto_param_data(struct rte_table_action_sym_crypto_params *p)
 
 		switch (xform[i]->type) {
 		case RTE_CRYPTO_SYM_XFORM_CIPHER:
-			if (p->cipher_auth.cipher_iv.val)
-				free(p->cipher_auth.cipher_iv.val);
-			if (p->cipher_auth.cipher_iv_update.val)
-				free(p->cipher_auth.cipher_iv_update.val);
+			free(p->cipher_auth.cipher_iv.val);
+			free(p->cipher_auth.cipher_iv_update.val);
 			break;
 		case RTE_CRYPTO_SYM_XFORM_AUTH:
 			if (p->cipher_auth.auth_iv.val)
@@ -3801,10 +3699,8 @@ parse_free_sym_crypto_param_data(struct rte_table_action_sym_crypto_params *p)
 				free(p->cipher_auth.cipher_iv_update.val);
 			break;
 		case RTE_CRYPTO_SYM_XFORM_AEAD:
-			if (p->aead.iv.val)
-				free(p->aead.iv.val);
-			if (p->aead.aad.val)
-				free(p->aead.aad.val);
+			free(p->aead.iv.val);
+			free(p->aead.aad.val);
 			break;
 		default:
 			continue;
@@ -4790,10 +4686,7 @@ cmd_pipeline_table_rule_delete_default(char **tokens,
 static void
 ether_addr_show(FILE *f, struct rte_ether_addr *addr)
 {
-	fprintf(f, "%02x:%02x:%02x:%02x:%02x:%02x",
-		(uint32_t)addr->addr_bytes[0], (uint32_t)addr->addr_bytes[1],
-		(uint32_t)addr->addr_bytes[2], (uint32_t)addr->addr_bytes[3],
-		(uint32_t)addr->addr_bytes[4], (uint32_t)addr->addr_bytes[5]);
+	fprintf(f, RTE_ETHER_ADDR_PRT_FMT, RTE_ETHER_ADDR_BYTES(addr));
 }
 
 static void
@@ -6061,7 +5954,6 @@ cmd_help(char **tokens, uint32_t n_tokens, char *out, size_t out_size)
 			"\ttmgr subport\n"
 			"\ttmgr subport pipe\n"
 			"\ttap\n"
-			"\tkni\n"
 			"\tport in action profile\n"
 			"\ttable action profile\n"
 			"\tpipeline\n"
@@ -6144,11 +6036,6 @@ cmd_help(char **tokens, uint32_t n_tokens, char *out, size_t out_size)
 
 	if (strcmp(tokens[0], "tap") == 0) {
 		snprintf(out, out_size, "\n%s\n", cmd_tap_help);
-		return;
-	}
-
-	if (strcmp(tokens[0], "kni") == 0) {
-		snprintf(out, out_size, "\n%s\n", cmd_kni_help);
 		return;
 	}
 
@@ -6456,11 +6343,6 @@ cli_process(char *in, char *out, size_t out_size)
 
 	if (strcmp(tokens[0], "tap") == 0) {
 		cmd_tap(tokens, n_tokens, out, out_size);
-		return;
-	}
-
-	if (strcmp(tokens[0], "kni") == 0) {
-		cmd_kni(tokens, n_tokens, out, out_size);
 		return;
 	}
 

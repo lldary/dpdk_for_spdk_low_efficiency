@@ -8,14 +8,25 @@
 #include "axgbe_common.h"
 #include "axgbe_phy.h"
 #include "axgbe_regs.h"
+#include "rte_time.h"
+
+#include "eal_filesystem.h"
+
+#include <rte_vect.h>
+
+#ifdef RTE_ARCH_X86
+#include <cpuid.h>
+#else
+#define __cpuid(n, a, b, c, d)
+#endif
 
 static int eth_axgbe_dev_init(struct rte_eth_dev *eth_dev);
-static int eth_axgbe_dev_uninit(struct rte_eth_dev *eth_dev);
 static int  axgbe_dev_configure(struct rte_eth_dev *dev);
 static int  axgbe_dev_start(struct rte_eth_dev *dev);
-static void axgbe_dev_stop(struct rte_eth_dev *dev);
+static int  axgbe_dev_stop(struct rte_eth_dev *dev);
 static void axgbe_dev_interrupt_handler(void *param);
-static void axgbe_dev_close(struct rte_eth_dev *dev);
+static int axgbe_dev_close(struct rte_eth_dev *dev);
+static int axgbe_dev_reset(struct rte_eth_dev *dev);
 static int axgbe_dev_promiscuous_enable(struct rte_eth_dev *dev);
 static int axgbe_dev_promiscuous_disable(struct rte_eth_dev *dev);
 static int axgbe_dev_allmulticast_enable(struct rte_eth_dev *dev);
@@ -56,10 +67,20 @@ axgbe_dev_xstats_get_by_id(struct rte_eth_dev *dev,
 			   unsigned int n);
 static int
 axgbe_dev_xstats_get_names_by_id(struct rte_eth_dev *dev,
-				 struct rte_eth_xstat_name *xstats_names,
 				 const uint64_t *ids,
+				 struct rte_eth_xstat_name *xstats_names,
 				 unsigned int size);
 static int axgbe_dev_xstats_reset(struct rte_eth_dev *dev);
+static int axgbe_dev_rss_reta_update(struct rte_eth_dev *dev,
+			  struct rte_eth_rss_reta_entry64 *reta_conf,
+			  uint16_t reta_size);
+static int axgbe_dev_rss_reta_query(struct rte_eth_dev *dev,
+			 struct rte_eth_rss_reta_entry64 *reta_conf,
+			 uint16_t reta_size);
+static int axgbe_dev_rss_hash_update(struct rte_eth_dev *dev,
+				     struct rte_eth_rss_conf *rss_conf);
+static int axgbe_dev_rss_hash_conf_get(struct rte_eth_dev *dev,
+				       struct rte_eth_rss_conf *rss_conf);
 static int  axgbe_dev_info_get(struct rte_eth_dev *dev,
 			       struct rte_eth_dev_info *dev_info);
 static int axgbe_flow_ctrl_get(struct rte_eth_dev *dev,
@@ -72,7 +93,39 @@ static void axgbe_rxq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
 	struct rte_eth_rxq_info *qinfo);
 static void axgbe_txq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
 	struct rte_eth_txq_info *qinfo);
-const uint32_t *axgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev);
+const uint32_t *axgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev,
+					       size_t *no_of_elements);
+static int axgb_mtu_set(struct rte_eth_dev *dev, uint16_t mtu);
+
+static int
+axgbe_timesync_enable(struct rte_eth_dev *dev);
+static int
+axgbe_timesync_disable(struct rte_eth_dev *dev);
+static int
+axgbe_timesync_read_rx_timestamp(struct rte_eth_dev *dev,
+			struct timespec *timestamp, uint32_t flags);
+static int
+axgbe_timesync_read_tx_timestamp(struct rte_eth_dev *dev,
+			struct timespec *timestamp);
+static int
+axgbe_timesync_adjust_time(struct rte_eth_dev *dev, int64_t delta);
+static int
+axgbe_timesync_read_time(struct rte_eth_dev *dev,
+			struct timespec *timestamp);
+static int
+axgbe_timesync_write_time(struct rte_eth_dev *dev,
+			const struct timespec *timestamp);
+static void
+axgbe_set_tstamp_time(struct axgbe_port *pdata, unsigned int sec,
+			unsigned int nsec);
+static void
+axgbe_update_tstamp_addend(struct axgbe_port *pdata,
+			unsigned int addend);
+static int
+	axgbe_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vid, int on);
+static int axgbe_vlan_tpid_set(struct rte_eth_dev *dev,
+				enum rte_vlan_type vlan_type, uint16_t tpid);
+static int axgbe_vlan_offload_set(struct rte_eth_dev *dev, int mask);
 
 struct axgbe_xstats {
 	char name[RTE_ETH_XSTATS_NAME_SIZE];
@@ -128,12 +181,16 @@ static const struct axgbe_xstats axgbe_xstats_strings[] = {
 
 /* The set of PCI devices this driver supports */
 #define AMD_PCI_VENDOR_ID       0x1022
-#define AMD_PCI_RV_ROOT_COMPLEX_ID	0x15d0
+
+#define	Fam17h	0x17
+#define	Fam19h	0x19
+
+#define	CPUID_VENDOR_AuthenticAMD_ebx	0x68747541
+#define	CPUID_VENDOR_AuthenticAMD_ecx	0x444d4163
+#define	CPUID_VENDOR_AuthenticAMD_edx	0x69746e65
+
 #define AMD_PCI_AXGBE_DEVICE_V2A 0x1458
 #define AMD_PCI_AXGBE_DEVICE_V2B 0x1459
-
-int axgbe_logtype_init;
-int axgbe_logtype_driver;
 
 static const struct rte_pci_id pci_id_axgbe_map[] = {
 	{RTE_PCI_DEVICE(AMD_PCI_VENDOR_ID, AMD_PCI_AXGBE_DEVICE_V2A)},
@@ -182,6 +239,7 @@ static const struct eth_dev_ops axgbe_eth_dev_ops = {
 	.dev_start            = axgbe_dev_start,
 	.dev_stop             = axgbe_dev_stop,
 	.dev_close            = axgbe_dev_close,
+	.dev_reset            = axgbe_dev_reset,
 	.promiscuous_enable   = axgbe_dev_promiscuous_enable,
 	.promiscuous_disable  = axgbe_dev_promiscuous_disable,
 	.allmulticast_enable  = axgbe_dev_allmulticast_enable,
@@ -201,6 +259,10 @@ static const struct eth_dev_ops axgbe_eth_dev_ops = {
 	.xstats_get_names     = axgbe_dev_xstats_get_names,
 	.xstats_get_names_by_id = axgbe_dev_xstats_get_names_by_id,
 	.xstats_get_by_id     = axgbe_dev_xstats_get_by_id,
+	.reta_update          = axgbe_dev_rss_reta_update,
+	.reta_query           = axgbe_dev_rss_reta_query,
+	.rss_hash_update      = axgbe_dev_rss_hash_update,
+	.rss_hash_conf_get    = axgbe_dev_rss_hash_conf_get,
 	.dev_infos_get        = axgbe_dev_info_get,
 	.rx_queue_setup       = axgbe_dev_rx_queue_setup,
 	.rx_queue_release     = axgbe_dev_rx_queue_release,
@@ -212,8 +274,18 @@ static const struct eth_dev_ops axgbe_eth_dev_ops = {
 	.rxq_info_get                 = axgbe_rxq_info_get,
 	.txq_info_get                 = axgbe_txq_info_get,
 	.dev_supported_ptypes_get     = axgbe_dev_supported_ptypes_get,
-	.rx_descriptor_status         = axgbe_dev_rx_descriptor_status,
-	.tx_descriptor_status         = axgbe_dev_tx_descriptor_status,
+	.mtu_set		= axgb_mtu_set,
+	.vlan_filter_set      = axgbe_vlan_filter_set,
+	.vlan_tpid_set        = axgbe_vlan_tpid_set,
+	.vlan_offload_set     = axgbe_vlan_offload_set,
+	.timesync_enable              = axgbe_timesync_enable,
+	.timesync_disable             = axgbe_timesync_disable,
+	.timesync_read_rx_timestamp   = axgbe_timesync_read_rx_timestamp,
+	.timesync_read_tx_timestamp   = axgbe_timesync_read_tx_timestamp,
+	.timesync_adjust_time         = axgbe_timesync_adjust_time,
+	.timesync_read_time           = axgbe_timesync_read_time,
+	.timesync_write_time          = axgbe_timesync_write_time,
+	.fw_version_get			= axgbe_dev_fw_version_get,
 };
 
 static int axgbe_phy_reset(struct axgbe_port *pdata)
@@ -230,7 +302,7 @@ static int axgbe_phy_reset(struct axgbe_port *pdata)
  * @param handle
  *  Pointer to interrupt handle.
  * @param param
- *  The address of parameter (struct rte_eth_dev *) regsitered before.
+ *  The address of parameter (struct rte_eth_dev *) registered before.
  *
  * @return
  *  void
@@ -259,7 +331,7 @@ axgbe_dev_interrupt_handler(void *param)
 		}
 	}
 	/* Unmask interrupts since disabled after generation */
-	rte_intr_ack(&pdata->pci_dev->intr_handle);
+	rte_intr_ack(pdata->pci_dev->intr_handle);
 }
 
 /*
@@ -272,7 +344,7 @@ axgbe_dev_configure(struct rte_eth_dev *dev)
 	struct axgbe_port *pdata =  dev->data->dev_private;
 	/* Checksum offload to hardware */
 	pdata->rx_csum_enable = dev->data->dev_conf.rxmode.offloads &
-				DEV_RX_OFFLOAD_CHECKSUM;
+				RTE_ETH_RX_OFFLOAD_CHECKSUM;
 	return 0;
 }
 
@@ -281,9 +353,9 @@ axgbe_dev_rx_mq_config(struct rte_eth_dev *dev)
 {
 	struct axgbe_port *pdata = dev->data->dev_private;
 
-	if (dev->data->dev_conf.rxmode.mq_mode == ETH_MQ_RX_RSS)
+	if (dev->data->dev_conf.rxmode.mq_mode == RTE_ETH_MQ_RX_RSS)
 		pdata->rss_enable = 1;
-	else if (dev->data->dev_conf.rxmode.mq_mode == ETH_MQ_RX_NONE)
+	else if (dev->data->dev_conf.rxmode.mq_mode == RTE_ETH_MQ_RX_NONE)
 		pdata->rss_enable = 0;
 	else
 		return  -1;
@@ -294,9 +366,8 @@ static int
 axgbe_dev_start(struct rte_eth_dev *dev)
 {
 	struct axgbe_port *pdata = dev->data->dev_private;
+	uint16_t i;
 	int ret;
-	struct rte_eth_dev_data *dev_data = dev->data;
-	uint16_t max_pkt_len = dev_data->dev_conf.rxmode.max_rx_pkt_len;
 
 	dev->dev_ops = &axgbe_eth_dev_ops;
 
@@ -320,56 +391,50 @@ axgbe_dev_start(struct rte_eth_dev *dev)
 	}
 
 	/* enable uio/vfio intr/eventfd mapping */
-	rte_intr_enable(&pdata->pci_dev->intr_handle);
+	rte_intr_enable(pdata->pci_dev->intr_handle);
 
 	/* phy start*/
 	pdata->phy_if.phy_start(pdata);
 	axgbe_dev_enable_tx(dev);
 	axgbe_dev_enable_rx(dev);
 
-	axgbe_clear_bit(AXGBE_STOPPED, &pdata->dev_state);
-	axgbe_clear_bit(AXGBE_DOWN, &pdata->dev_state);
-	if ((dev_data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_SCATTER) ||
-				max_pkt_len > pdata->rx_buf_size)
-		dev_data->scattered_rx = 1;
+	rte_bit_relaxed_clear32(AXGBE_STOPPED, &pdata->dev_state);
+	rte_bit_relaxed_clear32(AXGBE_DOWN, &pdata->dev_state);
 
-	/*  Scatter Rx handling */
-	if (dev_data->scattered_rx)
-		dev->rx_pkt_burst = &eth_axgbe_recv_scattered_pkts;
-	else
-		dev->rx_pkt_burst = &axgbe_recv_pkts;
+	axgbe_set_rx_function(dev);
+	axgbe_set_tx_function(dev);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
 
 	return 0;
 }
 
 /* Stop device: disable rx and tx functions to allow for reconfiguring. */
-static void
+static int
 axgbe_dev_stop(struct rte_eth_dev *dev)
 {
 	struct axgbe_port *pdata = dev->data->dev_private;
 
 	PMD_INIT_FUNC_TRACE();
 
-	rte_intr_disable(&pdata->pci_dev->intr_handle);
+	rte_intr_disable(pdata->pci_dev->intr_handle);
 
-	if (axgbe_test_bit(AXGBE_STOPPED, &pdata->dev_state))
-		return;
+	if (rte_bit_relaxed_get32(AXGBE_STOPPED, &pdata->dev_state))
+		return 0;
 
-	axgbe_set_bit(AXGBE_STOPPED, &pdata->dev_state);
+	rte_bit_relaxed_set32(AXGBE_STOPPED, &pdata->dev_state);
 	axgbe_dev_disable_tx(dev);
 	axgbe_dev_disable_rx(dev);
 
 	pdata->phy_if.phy_stop(pdata);
 	pdata->hw_if.exit(pdata);
 	memset(&dev->data->dev_link, 0, sizeof(struct rte_eth_link));
-	axgbe_set_bit(AXGBE_DOWN, &pdata->dev_state);
-}
+	rte_bit_relaxed_set32(AXGBE_DOWN, &pdata->dev_state);
 
-/* Clear all resources like TX/RX queues. */
-static void
-axgbe_dev_close(struct rte_eth_dev *dev)
-{
-	axgbe_dev_clear_queues(dev);
+	return 0;
 }
 
 static int
@@ -448,6 +513,150 @@ axgbe_dev_mac_addr_add(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr,
 	}
 	axgbe_set_mac_addn_addr(pdata, (u8 *)mac_addr, index);
 	return 0;
+}
+
+static int
+axgbe_dev_rss_reta_update(struct rte_eth_dev *dev,
+			  struct rte_eth_rss_reta_entry64 *reta_conf,
+			  uint16_t reta_size)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int i, idx, shift;
+	int ret;
+
+	if (!pdata->rss_enable) {
+		PMD_DRV_LOG(ERR, "RSS not enabled\n");
+		return -ENOTSUP;
+	}
+
+	if (reta_size == 0 || reta_size > AXGBE_RSS_MAX_TABLE_SIZE) {
+		PMD_DRV_LOG(ERR, "reta_size %d is not supported\n", reta_size);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < reta_size; i++) {
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
+		if ((reta_conf[idx].mask & (1ULL << shift)) == 0)
+			continue;
+		pdata->rss_table[i] = reta_conf[idx].reta[shift];
+	}
+
+	/* Program the lookup table */
+	ret = axgbe_write_rss_lookup_table(pdata);
+	return ret;
+}
+
+static int
+axgbe_dev_rss_reta_query(struct rte_eth_dev *dev,
+			 struct rte_eth_rss_reta_entry64 *reta_conf,
+			 uint16_t reta_size)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int i, idx, shift;
+
+	if (!pdata->rss_enable) {
+		PMD_DRV_LOG(ERR, "RSS not enabled\n");
+		return -ENOTSUP;
+	}
+
+	if (reta_size == 0 || reta_size > AXGBE_RSS_MAX_TABLE_SIZE) {
+		PMD_DRV_LOG(ERR, "reta_size %d is not supported\n", reta_size);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < reta_size; i++) {
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
+		if ((reta_conf[idx].mask & (1ULL << shift)) == 0)
+			continue;
+		reta_conf[idx].reta[shift] = pdata->rss_table[i];
+	}
+	return 0;
+}
+
+static int
+axgbe_dev_rss_hash_update(struct rte_eth_dev *dev,
+			  struct rte_eth_rss_conf *rss_conf)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	int ret;
+
+	if (!pdata->rss_enable) {
+		PMD_DRV_LOG(ERR, "RSS not enabled\n");
+		return -ENOTSUP;
+	}
+
+	if (rss_conf == NULL) {
+		PMD_DRV_LOG(ERR, "rss_conf value isn't valid\n");
+		return -EINVAL;
+	}
+
+	if (rss_conf->rss_key != NULL &&
+	    rss_conf->rss_key_len == AXGBE_RSS_HASH_KEY_SIZE) {
+		rte_memcpy(pdata->rss_key, rss_conf->rss_key,
+		       AXGBE_RSS_HASH_KEY_SIZE);
+		/* Program the hash key */
+		ret = axgbe_write_rss_hash_key(pdata);
+		if (ret != 0)
+			return ret;
+	}
+
+	pdata->rss_hf = rss_conf->rss_hf & AXGBE_RSS_OFFLOAD;
+
+	if (pdata->rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_IPV6))
+		AXGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, IP2TE, 1);
+	if (pdata->rss_hf &
+	    (RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV6_TCP))
+		AXGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, TCP4TE, 1);
+	if (pdata->rss_hf &
+	    (RTE_ETH_RSS_NONFRAG_IPV4_UDP | RTE_ETH_RSS_NONFRAG_IPV6_UDP))
+		AXGMAC_SET_BITS(pdata->rss_options, MAC_RSSCR, UDP4TE, 1);
+
+	/* Set the RSS options */
+	AXGMAC_IOWRITE(pdata, MAC_RSSCR, pdata->rss_options);
+
+	return 0;
+}
+
+static int
+axgbe_dev_rss_hash_conf_get(struct rte_eth_dev *dev,
+			    struct rte_eth_rss_conf *rss_conf)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+
+	if (!pdata->rss_enable) {
+		PMD_DRV_LOG(ERR, "RSS not enabled\n");
+		return -ENOTSUP;
+	}
+
+	if (rss_conf == NULL) {
+		PMD_DRV_LOG(ERR, "rss_conf value isn't valid\n");
+		return -EINVAL;
+	}
+
+	if (rss_conf->rss_key != NULL &&
+	    rss_conf->rss_key_len >= AXGBE_RSS_HASH_KEY_SIZE) {
+		rte_memcpy(rss_conf->rss_key, pdata->rss_key,
+		       AXGBE_RSS_HASH_KEY_SIZE);
+	}
+	rss_conf->rss_key_len = AXGBE_RSS_HASH_KEY_SIZE;
+	rss_conf->rss_hf = pdata->rss_hf;
+	return 0;
+}
+
+static int
+axgbe_dev_reset(struct rte_eth_dev *dev)
+{
+	int ret = 0;
+
+	ret = axgbe_dev_close(dev);
+	if (ret)
+		return ret;
+
+	ret = eth_axgbe_dev_init(dev);
+
+	return ret;
 }
 
 static void
@@ -570,7 +779,7 @@ axgbe_dev_link_update(struct rte_eth_dev *dev,
 	link.link_status = pdata->phy_link;
 	link.link_speed = pdata->phy_speed;
 	link.link_autoneg = !(dev->data->dev_conf.link_speeds &
-			      ETH_LINK_SPEED_FIXED);
+			      RTE_ETH_LINK_SPEED_FIXED);
 	ret = rte_eth_linkstatus_set(dev, &link);
 	if (ret == -1)
 		PMD_DRV_LOG(ERR, "No change in link status\n");
@@ -814,18 +1023,18 @@ axgbe_dev_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *stats,
 	struct axgbe_port *pdata = dev->data->dev_private;
 	unsigned int i;
 
-	if (!stats)
-		return 0;
+	if (n < AXGBE_XSTATS_COUNT)
+		return AXGBE_XSTATS_COUNT;
 
 	axgbe_read_mmc_stats(pdata);
 
-	for (i = 0; i < n && i < AXGBE_XSTATS_COUNT; i++) {
+	for (i = 0; i < AXGBE_XSTATS_COUNT; i++) {
 		stats[i].id = i;
 		stats[i].value = *(u64 *)((uint8_t *)&pdata->mmc_stats +
 				axgbe_xstats_strings[i].offset);
 	}
 
-	return i;
+	return AXGBE_XSTATS_COUNT;
 }
 
 static int
@@ -883,8 +1092,8 @@ axgbe_dev_xstats_get_by_id(struct rte_eth_dev *dev, const uint64_t *ids,
 
 static int
 axgbe_dev_xstats_get_names_by_id(struct rte_eth_dev *dev,
-				 struct rte_eth_xstat_name *xstats_names,
 				 const uint64_t *ids,
+				 struct rte_eth_xstat_name *xstats_names,
 				 unsigned int size)
 {
 	struct rte_eth_xstat_name xstats_names_copy[AXGBE_XSTATS_COUNT];
@@ -936,22 +1145,33 @@ axgbe_dev_stats_get(struct rte_eth_dev *dev,
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		rxq = dev->data->rx_queues[i];
-		stats->q_ipackets[i] = rxq->pkts;
-		stats->ipackets += rxq->pkts;
-		stats->q_ibytes[i] = rxq->bytes;
-		stats->ibytes += rxq->bytes;
-		stats->rx_nombuf += rxq->rx_mbuf_alloc_failed;
-		stats->q_errors[i] = rxq->errors + rxq->rx_mbuf_alloc_failed;
-		stats->ierrors += rxq->errors;
+		if (rxq) {
+			stats->q_ipackets[i] = rxq->pkts;
+			stats->ipackets += rxq->pkts;
+			stats->q_ibytes[i] = rxq->bytes;
+			stats->ibytes += rxq->bytes;
+			stats->rx_nombuf += rxq->rx_mbuf_alloc_failed;
+			stats->q_errors[i] = rxq->errors
+				+ rxq->rx_mbuf_alloc_failed;
+			stats->ierrors += rxq->errors;
+		} else {
+			PMD_DRV_LOG(DEBUG, "Rx queue not setup for port %d\n",
+					dev->data->port_id);
+		}
 	}
 
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
 		txq = dev->data->tx_queues[i];
-		stats->q_opackets[i] = txq->pkts;
-		stats->opackets += txq->pkts;
-		stats->q_obytes[i] = txq->bytes;
-		stats->obytes += txq->bytes;
-		stats->oerrors += txq->errors;
+		if (txq) {
+			stats->q_opackets[i] = txq->pkts;
+			stats->opackets += txq->pkts;
+			stats->q_obytes[i] = txq->bytes;
+			stats->obytes += txq->bytes;
+			stats->oerrors += txq->errors;
+		} else {
+			PMD_DRV_LOG(DEBUG, "Tx queue not setup for port %d\n",
+					dev->data->port_id);
+		}
 	}
 
 	return 0;
@@ -966,16 +1186,26 @@ axgbe_dev_stats_reset(struct rte_eth_dev *dev)
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++) {
 		rxq = dev->data->rx_queues[i];
-		rxq->pkts = 0;
-		rxq->bytes = 0;
-		rxq->errors = 0;
-		rxq->rx_mbuf_alloc_failed = 0;
+		if (rxq) {
+			rxq->pkts = 0;
+			rxq->bytes = 0;
+			rxq->errors = 0;
+			rxq->rx_mbuf_alloc_failed = 0;
+		} else {
+			PMD_DRV_LOG(DEBUG, "Rx queue not setup for port %d\n",
+					dev->data->port_id);
+		}
 	}
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
 		txq = dev->data->tx_queues[i];
-		txq->pkts = 0;
-		txq->bytes = 0;
-		txq->errors = 0;
+		if (txq) {
+			txq->pkts = 0;
+			txq->bytes = 0;
+			txq->errors = 0;
+		} else {
+			PMD_DRV_LOG(DEBUG, "Tx queue not setup for port %d\n",
+					dev->data->port_id);
+		}
 	}
 
 	return 0;
@@ -992,20 +1222,25 @@ axgbe_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 	dev_info->max_rx_pktlen = AXGBE_RX_MAX_BUF_SIZE;
 	dev_info->max_mac_addrs = pdata->hw_feat.addn_mac + 1;
 	dev_info->max_hash_mac_addrs = pdata->hw_feat.hash_table_size;
-	dev_info->speed_capa =  ETH_LINK_SPEED_10G;
+	dev_info->speed_capa = RTE_ETH_LINK_SPEED_10G;
 
 	dev_info->rx_offload_capa =
-		DEV_RX_OFFLOAD_IPV4_CKSUM |
-		DEV_RX_OFFLOAD_UDP_CKSUM  |
-		DEV_RX_OFFLOAD_TCP_CKSUM  |
-		DEV_RX_OFFLOAD_JUMBO_FRAME	|
-		DEV_RX_OFFLOAD_SCATTER	  |
-		DEV_RX_OFFLOAD_KEEP_CRC;
+		RTE_ETH_RX_OFFLOAD_VLAN_STRIP |
+		RTE_ETH_RX_OFFLOAD_VLAN_FILTER |
+		RTE_ETH_RX_OFFLOAD_VLAN_EXTEND |
+		RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
+		RTE_ETH_RX_OFFLOAD_UDP_CKSUM  |
+		RTE_ETH_RX_OFFLOAD_TCP_CKSUM  |
+		RTE_ETH_RX_OFFLOAD_SCATTER	  |
+		RTE_ETH_RX_OFFLOAD_KEEP_CRC;
 
 	dev_info->tx_offload_capa =
-		DEV_TX_OFFLOAD_IPV4_CKSUM  |
-		DEV_TX_OFFLOAD_UDP_CKSUM   |
-		DEV_TX_OFFLOAD_TCP_CKSUM;
+		RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+		RTE_ETH_TX_OFFLOAD_QINQ_INSERT |
+		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM  |
+		RTE_ETH_TX_OFFLOAD_MULTI_SEGS  |
+		RTE_ETH_TX_OFFLOAD_UDP_CKSUM   |
+		RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
 
 	if (pdata->hw_feat.rss) {
 		dev_info->flow_type_rss_offloads = AXGBE_RSS_OFFLOAD;
@@ -1042,13 +1277,13 @@ axgbe_flow_ctrl_get(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 	fc.autoneg = pdata->pause_autoneg;
 
 	if (pdata->rx_pause && pdata->tx_pause)
-		fc.mode = RTE_FC_FULL;
+		fc.mode = RTE_ETH_FC_FULL;
 	else if (pdata->rx_pause)
-		fc.mode = RTE_FC_RX_PAUSE;
+		fc.mode = RTE_ETH_FC_RX_PAUSE;
 	else if (pdata->tx_pause)
-		fc.mode = RTE_FC_TX_PAUSE;
+		fc.mode = RTE_ETH_FC_TX_PAUSE;
 	else
-		fc.mode = RTE_FC_NONE;
+		fc.mode = RTE_ETH_FC_NONE;
 
 	fc_conf->high_water =  (1024 + (fc.low_water[0] << 9)) / 1024;
 	fc_conf->low_water =  (1024 + (fc.high_water[0] << 9)) / 1024;
@@ -1078,13 +1313,13 @@ axgbe_flow_ctrl_set(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 	AXGMAC_IOWRITE(pdata, reg, reg_val);
 	fc.mode = fc_conf->mode;
 
-	if (fc.mode == RTE_FC_FULL) {
+	if (fc.mode == RTE_ETH_FC_FULL) {
 		pdata->tx_pause = 1;
 		pdata->rx_pause = 1;
-	} else if (fc.mode == RTE_FC_RX_PAUSE) {
+	} else if (fc.mode == RTE_ETH_FC_RX_PAUSE) {
 		pdata->tx_pause = 0;
 		pdata->rx_pause = 1;
-	} else if (fc.mode == RTE_FC_TX_PAUSE) {
+	} else if (fc.mode == RTE_ETH_FC_TX_PAUSE) {
 		pdata->tx_pause = 1;
 		pdata->rx_pause = 0;
 	} else {
@@ -1166,15 +1401,15 @@ axgbe_priority_flow_ctrl_set(struct rte_eth_dev *dev,
 
 	fc.mode = pfc_conf->fc.mode;
 
-	if (fc.mode == RTE_FC_FULL) {
+	if (fc.mode == RTE_ETH_FC_FULL) {
 		pdata->tx_pause = 1;
 		pdata->rx_pause = 1;
 		AXGMAC_IOWRITE_BITS(pdata, MAC_RFCR, PFCE, 1);
-	} else if (fc.mode == RTE_FC_RX_PAUSE) {
+	} else if (fc.mode == RTE_ETH_FC_RX_PAUSE) {
 		pdata->tx_pause = 0;
 		pdata->rx_pause = 1;
 		AXGMAC_IOWRITE_BITS(pdata, MAC_RFCR, PFCE, 1);
-	} else if (fc.mode == RTE_FC_TX_PAUSE) {
+	} else if (fc.mode == RTE_ETH_FC_TX_PAUSE) {
 		pdata->tx_pause = 1;
 		pdata->rx_pause = 0;
 		AXGMAC_IOWRITE_BITS(pdata, MAC_RFCR, PFCE, 0);
@@ -1220,7 +1455,7 @@ axgbe_txq_info_get(struct rte_eth_dev *dev, uint16_t queue_id,
 	qinfo->conf.tx_free_thresh = txq->free_thresh;
 }
 const uint32_t *
-axgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev)
+axgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev, size_t *no_of_elements)
 {
 	static const uint32_t ptypes[] = {
 		RTE_PTYPE_L2_ETHER,
@@ -1247,22 +1482,492 @@ axgbe_dev_supported_ptypes_get(struct rte_eth_dev *dev)
 		RTE_PTYPE_INNER_L4_SCTP,
 		RTE_PTYPE_INNER_L4_TCP,
 		RTE_PTYPE_INNER_L4_UDP,
-		RTE_PTYPE_UNKNOWN
 	};
 
-	if (dev->rx_pkt_burst == axgbe_recv_pkts)
+	if (dev->rx_pkt_burst == axgbe_recv_pkts) {
+		*no_of_elements = RTE_DIM(ptypes);
 		return ptypes;
+	}
 	return NULL;
+}
+
+static int axgb_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int val;
+
+	/* mtu setting is forbidden if port is start */
+	if (dev->data->dev_started) {
+		PMD_DRV_LOG(ERR, "port %d must be stopped before configuration",
+				dev->data->port_id);
+		return -EBUSY;
+	}
+	val = mtu > RTE_ETHER_MTU ? 1 : 0;
+	AXGMAC_IOWRITE_BITS(pdata, MAC_RCR, JE, val);
+
+	return 0;
+}
+
+static void
+axgbe_update_tstamp_time(struct axgbe_port *pdata,
+		unsigned int sec, unsigned int nsec, int addsub)
+{
+	unsigned int count = 100;
+	uint32_t sub_val = 0;
+	uint32_t sub_val_sec = 0xFFFFFFFF;
+	uint32_t sub_val_nsec = 0x3B9ACA00;
+
+	if (addsub) {
+		if (sec)
+			sub_val = sub_val_sec - (sec - 1);
+		else
+			sub_val = sec;
+
+		AXGMAC_IOWRITE(pdata, MAC_STSUR, sub_val);
+		sub_val = sub_val_nsec - nsec;
+		AXGMAC_IOWRITE(pdata, MAC_STNUR, sub_val);
+		AXGMAC_IOWRITE_BITS(pdata, MAC_STNUR, ADDSUB, 1);
+	} else {
+		AXGMAC_IOWRITE(pdata, MAC_STSUR, sec);
+		AXGMAC_IOWRITE_BITS(pdata, MAC_STNUR, ADDSUB, 0);
+		AXGMAC_IOWRITE(pdata, MAC_STNUR, nsec);
+	}
+	AXGMAC_IOWRITE_BITS(pdata, MAC_TSCR, TSUPDT, 1);
+	/* Wait for time update to complete */
+	while (--count && AXGMAC_IOREAD_BITS(pdata, MAC_TSCR, TSUPDT))
+		rte_delay_ms(1);
+}
+
+static inline uint64_t
+div_u64_rem(uint64_t dividend, uint32_t divisor, uint32_t *remainder)
+{
+	*remainder = dividend % divisor;
+	return dividend / divisor;
+}
+
+static inline uint64_t
+div_u64(uint64_t dividend, uint32_t divisor)
+{
+	uint32_t remainder;
+	return div_u64_rem(dividend, divisor, &remainder);
+}
+
+static int
+axgbe_adjfreq(struct axgbe_port *pdata, int64_t delta)
+{
+	uint64_t adjust;
+	uint32_t addend, diff;
+	unsigned int neg_adjust = 0;
+
+	if (delta < 0) {
+		neg_adjust = 1;
+		delta = -delta;
+	}
+	adjust = (uint64_t)pdata->tstamp_addend;
+	adjust *= delta;
+	diff = (uint32_t)div_u64(adjust, 1000000000UL);
+	addend = (neg_adjust) ? pdata->tstamp_addend - diff :
+				pdata->tstamp_addend + diff;
+	pdata->tstamp_addend = addend;
+	axgbe_update_tstamp_addend(pdata, addend);
+	return 0;
+}
+
+static int
+axgbe_timesync_adjust_time(struct rte_eth_dev *dev, int64_t delta)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	struct timespec timestamp_delta;
+
+	axgbe_adjfreq(pdata, delta);
+	pdata->systime_tc.nsec += delta;
+
+	if (delta < 0) {
+		delta = -delta;
+		timestamp_delta = rte_ns_to_timespec(delta);
+		axgbe_update_tstamp_time(pdata, timestamp_delta.tv_sec,
+				timestamp_delta.tv_nsec, 1);
+	} else {
+		timestamp_delta = rte_ns_to_timespec(delta);
+		axgbe_update_tstamp_time(pdata, timestamp_delta.tv_sec,
+				timestamp_delta.tv_nsec, 0);
+	}
+	return 0;
+}
+
+static int
+axgbe_timesync_read_time(struct rte_eth_dev *dev,
+		struct timespec *timestamp)
+{
+	uint64_t nsec;
+	struct axgbe_port *pdata = dev->data->dev_private;
+
+	nsec = AXGMAC_IOREAD(pdata, MAC_STSR);
+	nsec *= NSEC_PER_SEC;
+	nsec += AXGMAC_IOREAD(pdata, MAC_STNR);
+	*timestamp = rte_ns_to_timespec(nsec);
+	return 0;
+}
+static int
+axgbe_timesync_write_time(struct rte_eth_dev *dev,
+				    const struct timespec *timestamp)
+{
+	unsigned int count = 100;
+	struct axgbe_port *pdata = dev->data->dev_private;
+
+	AXGMAC_IOWRITE(pdata, MAC_STSUR, timestamp->tv_sec);
+	AXGMAC_IOWRITE(pdata, MAC_STNUR, timestamp->tv_nsec);
+	AXGMAC_IOWRITE_BITS(pdata, MAC_TSCR, TSUPDT, 1);
+	/* Wait for time update to complete */
+	while (--count && AXGMAC_IOREAD_BITS(pdata, MAC_TSCR, TSUPDT))
+		rte_delay_ms(1);
+	if (!count)
+		PMD_DRV_LOG(ERR, "Timed out update timestamp\n");
+	return 0;
+}
+
+static void
+axgbe_update_tstamp_addend(struct axgbe_port *pdata,
+		uint32_t addend)
+{
+	unsigned int count = 100;
+
+	AXGMAC_IOWRITE(pdata, MAC_TSAR, addend);
+	AXGMAC_IOWRITE_BITS(pdata, MAC_TSCR, TSADDREG, 1);
+
+	/* Wait for addend update to complete */
+	while (--count && AXGMAC_IOREAD_BITS(pdata, MAC_TSCR, TSADDREG))
+		rte_delay_ms(1);
+	if (!count)
+		PMD_DRV_LOG(ERR, "Timed out updating timestamp addend register\n");
+}
+
+static void
+axgbe_set_tstamp_time(struct axgbe_port *pdata, unsigned int sec,
+		unsigned int nsec)
+{
+	unsigned int count = 100;
+
+	/*System Time Sec Update*/
+	AXGMAC_IOWRITE(pdata, MAC_STSUR, sec);
+	/*System Time nanoSec Update*/
+	AXGMAC_IOWRITE(pdata, MAC_STNUR, nsec);
+	/*Initialize Timestamp*/
+	AXGMAC_IOWRITE_BITS(pdata, MAC_TSCR, TSINIT, 1);
+
+	/* Wait for time update to complete */
+	while (--count && AXGMAC_IOREAD_BITS(pdata, MAC_TSCR, TSINIT))
+		rte_delay_ms(1);
+	if (!count)
+		PMD_DRV_LOG(ERR, "Timed out initializing timestamp\n");
+}
+
+static int
+axgbe_timesync_enable(struct rte_eth_dev *dev)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int mac_tscr = 0;
+	uint64_t dividend;
+	struct timespec timestamp;
+	uint64_t nsec;
+
+	/* Set one nano-second accuracy */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSCTRLSSR, 1);
+
+	/* Set fine timestamp update */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSCFUPDT, 1);
+
+	/* Overwrite earlier timestamps */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TXTSSTSM, 1);
+
+	AXGMAC_IOWRITE(pdata, MAC_TSCR, mac_tscr);
+
+	/* Enabling processing of ptp over eth pkt */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSIPENA, 1);
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSVER2ENA, 1);
+	/* Enable timestamp for all pkts*/
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENALL, 1);
+
+	/* enabling timestamp */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 1);
+	AXGMAC_IOWRITE(pdata, MAC_TSCR, mac_tscr);
+
+	/* Exit if timestamping is not enabled */
+	if (!AXGMAC_GET_BITS(mac_tscr, MAC_TSCR, TSENA)) {
+		PMD_DRV_LOG(ERR, "Exiting as timestamp is not enabled\n");
+		return 0;
+	}
+
+	/* Sub-second Increment Value*/
+	AXGMAC_IOWRITE_BITS(pdata, MAC_SSIR, SSINC, AXGBE_TSTAMP_SSINC);
+	/* Sub-nanosecond Increment Value */
+	AXGMAC_IOWRITE_BITS(pdata, MAC_SSIR, SNSINC, AXGBE_TSTAMP_SNSINC);
+
+	pdata->ptpclk_rate = AXGBE_V2_PTP_CLOCK_FREQ;
+	dividend = 50000000;
+	dividend <<= 32;
+	pdata->tstamp_addend = div_u64(dividend, pdata->ptpclk_rate);
+
+	axgbe_update_tstamp_addend(pdata, pdata->tstamp_addend);
+	axgbe_set_tstamp_time(pdata, 0, 0);
+
+	/* Initialize the timecounter */
+	memset(&pdata->systime_tc, 0, sizeof(struct rte_timecounter));
+
+	pdata->systime_tc.cc_mask = AXGBE_CYCLECOUNTER_MASK;
+	pdata->systime_tc.cc_shift = 0;
+	pdata->systime_tc.nsec_mask = 0;
+
+	PMD_DRV_LOG(DEBUG, "Initializing system time counter with realtime\n");
+
+	/* Updating the counter once with clock real time */
+	clock_gettime(CLOCK_REALTIME, &timestamp);
+	nsec = rte_timespec_to_ns(&timestamp);
+	nsec = rte_timecounter_update(&pdata->systime_tc, nsec);
+	axgbe_set_tstamp_time(pdata, timestamp.tv_sec, timestamp.tv_nsec);
+	return 0;
+}
+
+static int
+axgbe_timesync_disable(struct rte_eth_dev *dev)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int mac_tscr = 0;
+
+	/*disable timestamp for all pkts*/
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENALL, 0);
+	/*disable the addened register*/
+	AXGMAC_IOWRITE_BITS(pdata, MAC_TSCR, TSADDREG, 0);
+	/* disable timestamp update */
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSCFUPDT, 0);
+	/*disable time stamp*/
+	AXGMAC_SET_BITS(mac_tscr, MAC_TSCR, TSENA, 0);
+	return 0;
+}
+
+static int
+axgbe_timesync_read_rx_timestamp(struct rte_eth_dev *dev,
+				struct timespec *timestamp, uint32_t flags)
+{
+	uint64_t nsec = 0;
+	volatile union axgbe_rx_desc *desc;
+	uint16_t idx, pmt;
+	struct axgbe_rx_queue *rxq = *dev->data->rx_queues;
+
+	idx = AXGBE_GET_DESC_IDX(rxq, rxq->cur);
+	desc = &rxq->desc[idx];
+
+	while (AXGMAC_GET_BITS_LE(desc->write.desc3, RX_NORMAL_DESC3, OWN))
+		rte_delay_ms(1);
+	if (AXGMAC_GET_BITS_LE(desc->write.desc3, RX_NORMAL_DESC3, CTXT)) {
+		if (AXGMAC_GET_BITS_LE(desc->write.desc3, RX_CONTEXT_DESC3, TSA) &&
+				!AXGMAC_GET_BITS_LE(desc->write.desc3,
+					RX_CONTEXT_DESC3, TSD)) {
+			pmt = AXGMAC_GET_BITS_LE(desc->write.desc3,
+					RX_CONTEXT_DESC3, PMT);
+			nsec = rte_le_to_cpu_32(desc->write.desc1);
+			nsec *= NSEC_PER_SEC;
+			nsec += rte_le_to_cpu_32(desc->write.desc0);
+			if (nsec != 0xffffffffffffffffULL) {
+				if (pmt == 0x01)
+					*timestamp = rte_ns_to_timespec(nsec);
+				PMD_DRV_LOG(DEBUG,
+					"flags = 0x%x nsec = %"PRIu64"\n",
+					flags, nsec);
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int
+axgbe_timesync_read_tx_timestamp(struct rte_eth_dev *dev,
+				struct timespec *timestamp)
+{
+	uint64_t nsec;
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned int tx_snr, tx_ssr;
+
+	rte_delay_us(5);
+	if (pdata->vdata->tx_tstamp_workaround) {
+		tx_snr = AXGMAC_IOREAD(pdata, MAC_TXSNR);
+		tx_ssr = AXGMAC_IOREAD(pdata, MAC_TXSSR);
+
+	} else {
+		tx_ssr = AXGMAC_IOREAD(pdata, MAC_TXSSR);
+		tx_snr = AXGMAC_IOREAD(pdata, MAC_TXSNR);
+	}
+	if (AXGMAC_GET_BITS(tx_snr, MAC_TXSNR, TXTSSTSMIS)) {
+		PMD_DRV_LOG(DEBUG, "Waiting for TXTSSTSMIS\n");
+		return 0;
+	}
+	nsec = tx_ssr;
+	nsec *= NSEC_PER_SEC;
+	nsec += tx_snr;
+	PMD_DRV_LOG(DEBUG, "nsec = %"PRIu64" tx_ssr = %d tx_snr = %d\n",
+			nsec, tx_ssr, tx_snr);
+	*timestamp = rte_ns_to_timespec(nsec);
+	return 0;
+}
+
+static int
+axgbe_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vid, int on)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	unsigned long vid_bit, vid_idx;
+
+	vid_bit = VLAN_TABLE_BIT(vid);
+	vid_idx = VLAN_TABLE_IDX(vid);
+
+	if (on) {
+		PMD_DRV_LOG(DEBUG, "Set VLAN vid=%d for device = %s\n",
+			    vid, pdata->eth_dev->device->name);
+		pdata->active_vlans[vid_idx] |= vid_bit;
+	} else {
+		PMD_DRV_LOG(DEBUG, "Reset VLAN vid=%d for device = %s\n",
+			    vid, pdata->eth_dev->device->name);
+		pdata->active_vlans[vid_idx] &= ~vid_bit;
+	}
+	pdata->hw_if.update_vlan_hash_table(pdata);
+	return 0;
+}
+
+static int
+axgbe_vlan_tpid_set(struct rte_eth_dev *dev,
+		    enum rte_vlan_type vlan_type,
+		    uint16_t tpid)
+{
+	struct axgbe_port *pdata = dev->data->dev_private;
+	uint32_t reg = 0;
+	uint32_t qinq = 0;
+
+	qinq = AXGMAC_IOREAD_BITS(pdata, MAC_VLANTR, EDVLP);
+	PMD_DRV_LOG(DEBUG, "EDVLP: qinq = 0x%x\n", qinq);
+
+	switch (vlan_type) {
+	case RTE_ETH_VLAN_TYPE_INNER:
+		PMD_DRV_LOG(DEBUG, "RTE_ETH_VLAN_TYPE_INNER\n");
+		if (qinq) {
+			if (tpid != 0x8100 && tpid != 0x88a8)
+				PMD_DRV_LOG(ERR,
+					    "tag supported 0x8100/0x88A8\n");
+			PMD_DRV_LOG(DEBUG, "qinq with inner tag\n");
+
+			/*Enable Inner VLAN Tag */
+			AXGMAC_IOWRITE_BITS(pdata, MAC_VLANTR, ERIVLT, 1);
+			reg = AXGMAC_IOREAD_BITS(pdata, MAC_VLANTR, ERIVLT);
+			PMD_DRV_LOG(DEBUG, "bit ERIVLT = 0x%x\n", reg);
+
+		} else {
+			PMD_DRV_LOG(ERR,
+				    "Inner type not supported in single tag\n");
+		}
+		break;
+	case RTE_ETH_VLAN_TYPE_OUTER:
+		PMD_DRV_LOG(DEBUG, "RTE_ETH_VLAN_TYPE_OUTER\n");
+		if (qinq) {
+			PMD_DRV_LOG(DEBUG, "double tagging is enabled\n");
+			/*Enable outer VLAN tag*/
+			AXGMAC_IOWRITE_BITS(pdata, MAC_VLANTR, ERIVLT, 0);
+			reg = AXGMAC_IOREAD_BITS(pdata, MAC_VLANTR, ERIVLT);
+			PMD_DRV_LOG(DEBUG, "bit ERIVLT = 0x%x\n", reg);
+
+			AXGMAC_IOWRITE_BITS(pdata, MAC_VLANIR, CSVL, 1);
+			reg = AXGMAC_IOREAD_BITS(pdata, MAC_VLANIR, CSVL);
+			PMD_DRV_LOG(DEBUG, "bit CSVL = 0x%x\n", reg);
+		} else {
+			if (tpid != 0x8100 && tpid != 0x88a8)
+				PMD_DRV_LOG(ERR,
+					    "tag supported 0x8100/0x88A8\n");
+		}
+		break;
+	case RTE_ETH_VLAN_TYPE_MAX:
+		PMD_DRV_LOG(ERR, "RTE_ETH_VLAN_TYPE_MAX\n");
+		break;
+	case RTE_ETH_VLAN_TYPE_UNKNOWN:
+		PMD_DRV_LOG(ERR, "RTE_ETH_VLAN_TYPE_UNKNOWN\n");
+		break;
+	}
+	return 0;
+}
+
+static void axgbe_vlan_extend_enable(struct axgbe_port *pdata)
+{
+	int qinq = 0;
+
+	AXGMAC_IOWRITE_BITS(pdata, MAC_VLANTR, EDVLP, 1);
+	qinq = AXGMAC_IOREAD_BITS(pdata, MAC_VLANTR, EDVLP);
+	PMD_DRV_LOG(DEBUG, "vlan double tag enabled EDVLP:qinq=0x%x\n", qinq);
+}
+
+static void axgbe_vlan_extend_disable(struct axgbe_port *pdata)
+{
+	int qinq = 0;
+
+	AXGMAC_IOWRITE_BITS(pdata, MAC_VLANTR, EDVLP, 0);
+	qinq = AXGMAC_IOREAD_BITS(pdata, MAC_VLANTR, EDVLP);
+	PMD_DRV_LOG(DEBUG, "vlan double tag disable EDVLP:qinq=0x%x\n", qinq);
+}
+
+static int
+axgbe_vlan_offload_set(struct rte_eth_dev *dev, int mask)
+{
+	struct rte_eth_rxmode *rxmode = &dev->data->dev_conf.rxmode;
+	struct axgbe_port *pdata = dev->data->dev_private;
+
+	/* Indicate that VLAN Tx CTAGs come from context descriptors */
+	AXGMAC_IOWRITE_BITS(pdata, MAC_VLANIR, CSVL, 0);
+	AXGMAC_IOWRITE_BITS(pdata, MAC_VLANIR, VLTI, 1);
+
+	if (mask & RTE_ETH_VLAN_STRIP_MASK) {
+		if (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_STRIP) {
+			PMD_DRV_LOG(DEBUG, "Strip ON for device = %s\n",
+				    pdata->eth_dev->device->name);
+			pdata->hw_if.enable_rx_vlan_stripping(pdata);
+		} else {
+			PMD_DRV_LOG(DEBUG, "Strip OFF for device = %s\n",
+				    pdata->eth_dev->device->name);
+			pdata->hw_if.disable_rx_vlan_stripping(pdata);
+		}
+	}
+	if (mask & RTE_ETH_VLAN_FILTER_MASK) {
+		if (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_FILTER) {
+			PMD_DRV_LOG(DEBUG, "Filter ON for device = %s\n",
+				    pdata->eth_dev->device->name);
+			pdata->hw_if.enable_rx_vlan_filtering(pdata);
+		} else {
+			PMD_DRV_LOG(DEBUG, "Filter OFF for device = %s\n",
+				    pdata->eth_dev->device->name);
+			pdata->hw_if.disable_rx_vlan_filtering(pdata);
+		}
+	}
+	if (mask & RTE_ETH_VLAN_EXTEND_MASK) {
+		if (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_EXTEND) {
+			PMD_DRV_LOG(DEBUG, "enabling vlan extended mode\n");
+			axgbe_vlan_extend_enable(pdata);
+			/* Set global registers with default ethertype*/
+			axgbe_vlan_tpid_set(dev, RTE_ETH_VLAN_TYPE_OUTER,
+					    RTE_ETHER_TYPE_VLAN);
+			axgbe_vlan_tpid_set(dev, RTE_ETH_VLAN_TYPE_INNER,
+					    RTE_ETHER_TYPE_VLAN);
+		} else {
+			PMD_DRV_LOG(DEBUG, "disabling vlan extended mode\n");
+			axgbe_vlan_extend_disable(pdata);
+		}
+	}
+	return 0;
 }
 
 static void axgbe_get_all_hw_features(struct axgbe_port *pdata)
 {
-	unsigned int mac_hfr0, mac_hfr1, mac_hfr2;
+	unsigned int mac_hfr0, mac_hfr1, mac_hfr2, mac_hfr3;
 	struct axgbe_hw_features *hw_feat = &pdata->hw_feat;
 
 	mac_hfr0 = AXGMAC_IOREAD(pdata, MAC_HWF0R);
 	mac_hfr1 = AXGMAC_IOREAD(pdata, MAC_HWF1R);
 	mac_hfr2 = AXGMAC_IOREAD(pdata, MAC_HWF2R);
+	mac_hfr3 = AXGMAC_IOREAD(pdata, MAC_HWF3R);
 
 	memset(hw_feat, 0, sizeof(*hw_feat));
 
@@ -1312,6 +2017,12 @@ static void axgbe_get_all_hw_features(struct axgbe_port *pdata)
 	hw_feat->pps_out_num  = AXGMAC_GET_BITS(mac_hfr2, MAC_HWF2R, PPSOUTNUM);
 	hw_feat->aux_snap_num = AXGMAC_GET_BITS(mac_hfr2, MAC_HWF2R,
 						AUXSNAPNUM);
+
+	/* Hardware feature register 3 */
+	hw_feat->tx_q_vlan_tag_ins  = AXGMAC_GET_BITS(mac_hfr3,
+						      MAC_HWF3R, CBTISEL);
+	hw_feat->no_of_vlan_extn    = AXGMAC_GET_BITS(mac_hfr3,
+						      MAC_HWF3R, NRVF);
 
 	/* Translate the Hash Table size into actual number */
 	switch (hw_feat->hash_table_size) {
@@ -1422,28 +2133,43 @@ static void axgbe_default_config(struct axgbe_port *pdata)
 	pdata->power_down = 0;
 }
 
-static int
-pci_device_cmp(const struct rte_device *dev, const void *_pci_id)
+/* Used in dev_start by primary process and then
+ * in dev_init by secondary process when attaching to an existing ethdev.
+ */
+void
+axgbe_set_tx_function(struct rte_eth_dev *dev)
 {
-	const struct rte_pci_device *pdev = RTE_DEV_TO_PCI_CONST(dev);
-	const struct rte_pci_id *pcid = _pci_id;
+	struct axgbe_port *pdata = dev->data->dev_private;
 
-	if (pdev->id.vendor_id == AMD_PCI_VENDOR_ID &&
-			pdev->id.device_id == pcid->device_id)
-		return 0;
-	return 1;
+	dev->tx_pkt_burst = &axgbe_xmit_pkts;
+
+	if (pdata->multi_segs_tx)
+		dev->tx_pkt_burst = &axgbe_xmit_pkts_seg;
+#ifdef RTE_ARCH_X86
+	struct axgbe_tx_queue *txq = dev->data->tx_queues[0];
+	if (!txq->vector_disable &&
+			rte_vect_get_max_simd_bitwidth() >= RTE_VECT_SIMD_128)
+		dev->tx_pkt_burst = &axgbe_xmit_pkts_vec;
+#endif
 }
 
-static bool
-pci_search_device(int device_id)
+void
+axgbe_set_rx_function(struct rte_eth_dev *dev)
 {
-	struct rte_bus *pci_bus;
-	struct rte_pci_id dev_id;
+	struct rte_eth_dev_data *dev_data = dev->data;
+	uint16_t max_pkt_len;
+	struct axgbe_port *pdata;
 
-	dev_id.device_id = device_id;
-	pci_bus = rte_bus_find_by_name("pci");
-	return (pci_bus != NULL) &&
-		(pci_bus->find_device(NULL, pci_device_cmp, &dev_id) != NULL);
+	pdata = dev->data->dev_private;
+	max_pkt_len = dev_data->mtu + RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+	if ((dev_data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_SCATTER) ||
+			max_pkt_len > pdata->rx_buf_size)
+		dev_data->scattered_rx = 1;
+	/*  Scatter Rx handling */
+	if (dev_data->scattered_rx)
+		dev->rx_pkt_burst = &eth_axgbe_recv_scattered_pkts;
+	else
+		dev->rx_pkt_burst = &axgbe_recv_pkts;
 }
 
 /*
@@ -1459,34 +2185,37 @@ eth_axgbe_dev_init(struct rte_eth_dev *eth_dev)
 	uint32_t len;
 	int ret;
 
+	unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+	unsigned char cpu_family = 0, cpu_model = 0;
+
 	eth_dev->dev_ops = &axgbe_eth_dev_ops;
+
+	eth_dev->rx_descriptor_status = axgbe_dev_rx_descriptor_status;
+	eth_dev->tx_descriptor_status = axgbe_dev_tx_descriptor_status;
+
+	eth_dev->tx_pkt_burst = &axgbe_xmit_pkts;
+	eth_dev->rx_pkt_burst = &axgbe_recv_pkts;
 
 	/*
 	 * For secondary processes, we don't initialise any further as primary
 	 * has already done this work.
 	 */
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
+		axgbe_set_tx_function(eth_dev);
+		axgbe_set_rx_function(eth_dev);
 		return 0;
+	}
+
+	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	pdata = eth_dev->data->dev_private;
 	/* initial state */
-	axgbe_set_bit(AXGBE_DOWN, &pdata->dev_state);
-	axgbe_set_bit(AXGBE_STOPPED, &pdata->dev_state);
+	rte_bit_relaxed_set32(AXGBE_DOWN, &pdata->dev_state);
+	rte_bit_relaxed_set32(AXGBE_STOPPED, &pdata->dev_state);
 	pdata->eth_dev = eth_dev;
 
 	pci_dev = RTE_DEV_TO_PCI(eth_dev->device);
 	pdata->pci_dev = pci_dev;
-
-	/*
-	 * Use root complex device ID to differentiate RV AXGBE vs SNOWY AXGBE
-	 */
-	if (pci_search_device(AMD_PCI_RV_ROOT_COMPLEX_ID)) {
-		pdata->xpcs_window_def_reg = PCS_V2_RV_WINDOW_DEF;
-		pdata->xpcs_window_sel_reg = PCS_V2_RV_WINDOW_SELECT;
-	} else {
-		pdata->xpcs_window_def_reg = PCS_V2_WINDOW_DEF;
-		pdata->xpcs_window_sel_reg = PCS_V2_WINDOW_SELECT;
-	}
 
 	pdata->xgmac_regs =
 		(void *)pci_dev->mem_resource[AXGBE_AXGMAC_BAR].addr;
@@ -1501,6 +2230,58 @@ eth_axgbe_dev_init(struct rte_eth_dev *eth_dev)
 		pdata->vdata = &axgbe_v2a;
 	else
 		pdata->vdata = &axgbe_v2b;
+
+	/*
+	 * Use CPUID to get Family and model ID to identify the CPU
+	 */
+	__cpuid(0x0, eax, ebx, ecx, edx);
+
+	if (ebx == CPUID_VENDOR_AuthenticAMD_ebx &&
+		edx == CPUID_VENDOR_AuthenticAMD_edx &&
+		ecx == CPUID_VENDOR_AuthenticAMD_ecx) {
+		int unknown_cpu = 0;
+		eax = 0, ebx = 0, ecx = 0, edx = 0;
+
+		__cpuid(0x1, eax, ebx, ecx, edx);
+
+		cpu_family = ((GET_BITS(eax, 8, 4)) + (GET_BITS(eax, 20, 8)));
+		cpu_model = ((GET_BITS(eax, 4, 4)) | (((GET_BITS(eax, 16, 4)) << 4) & 0xF0));
+
+		switch (cpu_family) {
+		case Fam17h:
+		/* V1000/R1000 */
+		if (cpu_model >= 0x10 && cpu_model <= 0x1F) {
+			pdata->xpcs_window_def_reg = PCS_V2_RV_WINDOW_DEF;
+			pdata->xpcs_window_sel_reg = PCS_V2_RV_WINDOW_SELECT;
+		/* EPYC 3000 */
+		} else if (cpu_model >= 0x01 && cpu_model <= 0x0F) {
+			pdata->xpcs_window_def_reg = PCS_V2_WINDOW_DEF;
+			pdata->xpcs_window_sel_reg = PCS_V2_WINDOW_SELECT;
+		} else {
+			unknown_cpu = 1;
+		}
+		break;
+		case Fam19h:
+		/* V3000 (Yellow Carp) */
+		if (cpu_model >= 0x44 && cpu_model <= 0x47) {
+			pdata->xpcs_window_def_reg = PCS_V2_YC_WINDOW_DEF;
+			pdata->xpcs_window_sel_reg = PCS_V2_YC_WINDOW_SELECT;
+
+			/* Yellow Carp devices do not need cdr workaround */
+			pdata->vdata->an_cdr_workaround = 0;
+		} else {
+			unknown_cpu = 1;
+		}
+		break;
+		default:
+			unknown_cpu = 1;
+			break;
+		}
+		if (unknown_cpu) {
+			PMD_DRV_LOG(ERR, "Unknown CPU family, no supported axgbe device found\n");
+			return -ENODEV;
+		}
+	}
 
 	/* Configure the PCS indirect addressing support */
 	reg = XPCS32_IOREAD(pdata, pdata->xpcs_window_def_reg);
@@ -1563,23 +2344,28 @@ eth_axgbe_dev_init(struct rte_eth_dev *eth_dev)
 	pdata->arcache = AXGBE_DMA_OS_ARCACHE;
 	pdata->awcache = AXGBE_DMA_OS_AWCACHE;
 
+	/* Read the port property registers */
+	pdata->pp0 = XP_IOREAD(pdata, XP_PROP_0);
+	pdata->pp1 = XP_IOREAD(pdata, XP_PROP_1);
+	pdata->pp2 = XP_IOREAD(pdata, XP_PROP_2);
+	pdata->pp3 = XP_IOREAD(pdata, XP_PROP_3);
+	pdata->pp4 = XP_IOREAD(pdata, XP_PROP_4);
+
 	/* Set the maximum channels and queues */
-	reg = XP_IOREAD(pdata, XP_PROP_1);
-	pdata->tx_max_channel_count = XP_GET_BITS(reg, XP_PROP_1, MAX_TX_DMA);
-	pdata->rx_max_channel_count = XP_GET_BITS(reg, XP_PROP_1, MAX_RX_DMA);
-	pdata->tx_max_q_count = XP_GET_BITS(reg, XP_PROP_1, MAX_TX_QUEUES);
-	pdata->rx_max_q_count = XP_GET_BITS(reg, XP_PROP_1, MAX_RX_QUEUES);
+	pdata->tx_max_channel_count = XP_GET_BITS(pdata->pp1, XP_PROP_1, MAX_TX_DMA);
+	pdata->rx_max_channel_count = XP_GET_BITS(pdata->pp1, XP_PROP_1, MAX_RX_DMA);
+	pdata->tx_max_q_count = XP_GET_BITS(pdata->pp1, XP_PROP_1, MAX_TX_QUEUES);
+	pdata->rx_max_q_count = XP_GET_BITS(pdata->pp1, XP_PROP_1, MAX_RX_QUEUES);
 
 	/* Set the hardware channel and queue counts */
 	axgbe_set_counts(pdata);
 
 	/* Set the maximum fifo amounts */
-	reg = XP_IOREAD(pdata, XP_PROP_2);
-	pdata->tx_max_fifo_size = XP_GET_BITS(reg, XP_PROP_2, TX_FIFO_SIZE);
+	pdata->tx_max_fifo_size = XP_GET_BITS(pdata->pp2, XP_PROP_2, TX_FIFO_SIZE);
 	pdata->tx_max_fifo_size *= 16384;
 	pdata->tx_max_fifo_size = RTE_MIN(pdata->tx_max_fifo_size,
 					  pdata->vdata->tx_max_fifo_size);
-	pdata->rx_max_fifo_size = XP_GET_BITS(reg, XP_PROP_2, RX_FIFO_SIZE);
+	pdata->rx_max_fifo_size = XP_GET_BITS(pdata->pp2, XP_PROP_2, RX_FIFO_SIZE);
 	pdata->rx_max_fifo_size *= 16384;
 	pdata->rx_max_fifo_size = RTE_MIN(pdata->rx_max_fifo_size,
 					  pdata->vdata->rx_max_fifo_size);
@@ -1611,7 +2397,7 @@ eth_axgbe_dev_init(struct rte_eth_dev *eth_dev)
 		return ret;
 	}
 
-	rte_intr_callback_register(&pci_dev->intr_handle,
+	rte_intr_callback_register(pci_dev->intr_handle,
 				   axgbe_dev_interrupt_handler,
 				   (void *)eth_dev);
 	PMD_INIT_LOG(DEBUG, "port %d vendorID=0x%x deviceID=0x%x",
@@ -1622,7 +2408,7 @@ eth_axgbe_dev_init(struct rte_eth_dev *eth_dev)
 }
 
 static int
-eth_axgbe_dev_uninit(struct rte_eth_dev *eth_dev)
+axgbe_dev_close(struct rte_eth_dev *eth_dev)
 {
 	struct rte_pci_device *pci_dev;
 
@@ -1632,14 +2418,11 @@ eth_axgbe_dev_uninit(struct rte_eth_dev *eth_dev)
 		return 0;
 
 	pci_dev = RTE_DEV_TO_PCI(eth_dev->device);
-	eth_dev->dev_ops = NULL;
-	eth_dev->rx_pkt_burst = NULL;
-	eth_dev->tx_pkt_burst = NULL;
 	axgbe_dev_clear_queues(eth_dev);
 
 	/* disable uio intr before callback unregister */
-	rte_intr_disable(&pci_dev->intr_handle);
-	rte_intr_callback_unregister(&pci_dev->intr_handle,
+	rte_intr_disable(pci_dev->intr_handle);
+	rte_intr_callback_unregister(pci_dev->intr_handle,
 				     axgbe_dev_interrupt_handler,
 				     (void *)eth_dev);
 
@@ -1655,7 +2438,7 @@ static int eth_axgbe_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 
 static int eth_axgbe_pci_remove(struct rte_pci_device *pci_dev)
 {
-	return rte_eth_dev_pci_generic_remove(pci_dev, eth_axgbe_dev_uninit);
+	return rte_eth_dev_pci_generic_remove(pci_dev, axgbe_dev_close);
 }
 
 static struct rte_pci_driver rte_axgbe_pmd = {
@@ -1668,13 +2451,5 @@ static struct rte_pci_driver rte_axgbe_pmd = {
 RTE_PMD_REGISTER_PCI(net_axgbe, rte_axgbe_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_axgbe, pci_id_axgbe_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_axgbe, "* igb_uio | uio_pci_generic | vfio-pci");
-
-RTE_INIT(axgbe_init_log)
-{
-	axgbe_logtype_init = rte_log_register("pmd.net.axgbe.init");
-	if (axgbe_logtype_init >= 0)
-		rte_log_set_level(axgbe_logtype_init, RTE_LOG_NOTICE);
-	axgbe_logtype_driver = rte_log_register("pmd.net.axgbe.driver");
-	if (axgbe_logtype_driver >= 0)
-		rte_log_set_level(axgbe_logtype_driver, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER_SUFFIX(axgbe_logtype_init, init, NOTICE);
+RTE_LOG_REGISTER_SUFFIX(axgbe_logtype_driver, driver, NOTICE);

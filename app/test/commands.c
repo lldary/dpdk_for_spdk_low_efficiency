@@ -8,8 +8,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <netinet/in.h>
-#include <termios.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <sys/queue.h>
@@ -25,7 +23,6 @@
 #include <rte_eal.h>
 #include <rte_per_lcore.h>
 #include <rte_lcore.h>
-#include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_ring.h>
 #include <rte_malloc.h>
@@ -111,6 +108,7 @@ dump_struct_sizes(void)
 #undef DUMP_SIZE
 }
 
+/* Add the dump_* tests cases 8< */
 static void cmd_dump_parsed(void *parsed_result,
 			    __rte_unused struct cmdline *cl,
 			    __rte_unused void *data)
@@ -158,6 +156,7 @@ cmdline_parse_inst_t cmd_dump = {
 		NULL,
 	},
 };
+/* >8 End of add the dump_* tests cases */
 
 /****************/
 

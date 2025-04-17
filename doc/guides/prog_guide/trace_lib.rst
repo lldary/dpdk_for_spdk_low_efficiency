@@ -100,12 +100,7 @@ Register the tracepoint
 
  #include <my_tracepoint.h>
 
- RTE_TRACE_POINT_DEFINE(app_trace_string);
-
- RTE_INIT(app_trace_init)
- {
-       RTE_TRACE_POINT_REGISTER(app_trace_string, app.trace.string);
- }
+ RTE_TRACE_POINT_REGISTER(app_trace_string, app.trace.string)
 
 The above code snippet registers the ``app_trace_string`` tracepoint to
 trace library. Here, the ``my_tracepoint.h`` is the header file
@@ -118,9 +113,6 @@ There is no requirement for the tracepoint function and its name to be similar.
 However, it is recommended to have a similar name for a better naming
 convention.
 
-The user must register the tracepoint before the ``rte_eal_init`` invocation.
-The user can use the ``RTE_INIT`` construction scheme to achieve this.
-
 .. note::
 
    The ``rte_trace_point_register.h`` header must be included before any
@@ -128,10 +120,12 @@ The user can use the ``RTE_INIT`` construction scheme to achieve this.
 
 .. note::
 
-   The ``RTE_TRACE_POINT_DEFINE`` defines the placeholder for the
-   ``rte_trace_point_t`` tracepoint object. The user must export a
-   ``__<trace_function_name>`` symbol in the library ``.map`` file for this
-   tracepoint to be used out of the library, in shared builds.
+   The ``RTE_TRACE_POINT_REGISTER`` defines the placeholder for the
+   ``rte_trace_point_t`` tracepoint object.
+   For generic tracepoint or for tracepoint used in public header files,
+   the user must export a ``__<trace_function_name>`` symbol
+   in the library ``.map`` file for this tracepoint
+   to be used out of the library, in shared builds.
    For example, ``__app_trace_string`` will be the exported symbol in the
    above example.
 
@@ -143,8 +137,7 @@ In order to avoid performance impact in fast path code, the library introduced
 the user must use ``RTE_TRACE_POINT_FP`` instead of ``RTE_TRACE_POINT``.
 
 ``RTE_TRACE_POINT_FP`` is compiled out by default and it can be enabled using
-``CONFIG_RTE_ENABLE_TRACE_FP`` configuration parameter.
-The ``enable_trace_fp`` option shall be used for the same for meson build.
+the ``enable_trace_fp`` option for meson build.
 
 Event record mode
 -----------------
@@ -182,13 +175,13 @@ events.
 
 There are many tools you can use to read DPDK traces:
 
-1. ``babeltrace`` is a command-line utility that converts trace formats; it
-supports the format that DPDK trace library produces, CTF, as well as a
-basic text output that can be grep'ed.
-The babeltrace command is part of the Open Source Babeltrace project.
+#. ``babeltrace`` is a command-line utility that converts trace formats; it
+   supports the format that DPDK trace library produces, CTF, as well as a
+   basic text output that can be grep'ed.
+   The babeltrace command is part of the Open Source Babeltrace project.
 
-2. ``Trace Compass`` is a graphical user interface for viewing and analyzing
-any type of logs or traces, including DPDK traces.
+#. ``Trace Compass`` is a graphical user interface for viewing and analyzing
+   any type of logs or traces, including DPDK traces.
 
 Use the babeltrace command-line tool
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -280,10 +273,16 @@ Trace memory
 The trace memory will be allocated through an internal function
 ``__rte_trace_mem_per_thread_alloc()``. The trace memory will be allocated
 per thread to enable lock less trace-emit function.
-The memory for the trace memory for DPDK lcores will be allocated on
-``rte_eal_init()`` if the trace is enabled through a EAL option.
-For non DPDK threads, on the first trace emission, the memory will be
-allocated.
+
+For non lcore threads, the trace memory is allocated on the first trace
+emission.
+
+For lcore threads, if trace points are enabled through a EAL option, the trace
+memory is allocated when the threads are known of DPDK
+(``rte_eal_init`` for EAL lcores, ``rte_thread_register`` for non-EAL lcores).
+Otherwise, when trace points are enabled later in the life of the application,
+the behavior is the same as non lcore threads and the trace memory is allocated
+on the first trace emission.
 
 Trace memory layout
 ~~~~~~~~~~~~~~~~~~~
@@ -355,3 +354,16 @@ event ID.
 The ``packet.header`` and ``packet.context`` will be written in the slow path
 at the time of trace memory creation. The ``trace.header`` and trace payload
 will be emitted when the tracepoint function is invoked.
+
+Limitations
+-----------
+
+- The ``rte_trace_point_emit_blob()`` function can capture a maximum blob
+  of length ``RTE_TRACE_BLOB_LEN_MAX`` bytes.
+  The application can call ``rte_trace_point_emit_blob()`` multiple times
+  with length less than or equal to ``RTE_TRACE_BLOB_LEN_MAX``,
+  if it needs to capture more than ``RTE_TRACE_BLOB_LEN_MAX`` bytes.
+- If the length passed to the ``rte_trace_point_emit_blob()``
+  is less than ``RTE_TRACE_BLOB_LEN_MAX``,
+  then the trailing ``(RTE_TRACE_BLOB_LEN_MAX - len)`` bytes in the trace
+  are set to zero.

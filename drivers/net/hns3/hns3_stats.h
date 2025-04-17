@@ -1,27 +1,26 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2018-2019 Hisilicon Limited.
+ * Copyright(c) 2018-2021 HiSilicon Limited.
  */
 
-#ifndef _HNS3_STATS_H_
-#define _HNS3_STATS_H_
+#ifndef HNS3_STATS_H
+#define HNS3_STATS_H
 
-/* stats macro */
-#define HNS3_MAC_CMD_NUM		21
-#define HNS3_RD_FIRST_STATS_NUM		2
-#define HNS3_RD_OTHER_STATS_NUM		4
+#include <ethdev_driver.h>
+#include <rte_ethdev.h>
 
 /* TQP stats */
 struct hns3_tqp_stats {
 	uint64_t rcb_tx_ring_pktnum_rcd; /* Total num of transmitted packets */
 	uint64_t rcb_rx_ring_pktnum_rcd; /* Total num of received packets */
-	uint64_t rcb_tx_ring_pktnum[HNS3_MAX_TQP_NUM_PER_FUNC];
-	uint64_t rcb_rx_ring_pktnum[HNS3_MAX_TQP_NUM_PER_FUNC];
+	uint64_t *rcb_rx_ring_pktnum;
+	uint64_t *rcb_tx_ring_pktnum;
 };
 
 /* mac stats, Statistics counters collected by the MAC, opcode id: 0x0032 */
 struct hns3_mac_stats {
 	uint64_t mac_tx_mac_pause_num;
 	uint64_t mac_rx_mac_pause_num;
+	uint64_t rsv0;
 	uint64_t mac_tx_pfc_pri0_pkt_num;
 	uint64_t mac_tx_pfc_pri1_pkt_num;
 	uint64_t mac_tx_pfc_pri2_pkt_num;
@@ -58,7 +57,7 @@ struct hns3_mac_stats {
 	uint64_t mac_tx_1519_2047_oct_pkt_num;
 	uint64_t mac_tx_2048_4095_oct_pkt_num;
 	uint64_t mac_tx_4096_8191_oct_pkt_num;
-	uint64_t rsv0;
+	uint64_t rsv1;
 	uint64_t mac_tx_8192_9216_oct_pkt_num;
 	uint64_t mac_tx_9217_12287_oct_pkt_num;
 	uint64_t mac_tx_12288_16383_oct_pkt_num;
@@ -85,7 +84,7 @@ struct hns3_mac_stats {
 	uint64_t mac_rx_1519_2047_oct_pkt_num;
 	uint64_t mac_rx_2048_4095_oct_pkt_num;
 	uint64_t mac_rx_4096_8191_oct_pkt_num;
-	uint64_t rsv1;
+	uint64_t rsv2;
 	uint64_t mac_rx_8192_9216_oct_pkt_num;
 	uint64_t mac_rx_9217_12287_oct_pkt_num;
 	uint64_t mac_rx_12288_16383_oct_pkt_num;
@@ -110,6 +109,11 @@ struct hns3_mac_stats {
 	uint64_t mac_rx_ctrl_pkt_num;
 };
 
+struct hns3_rx_missed_stats {
+	uint64_t rpu_rx_drop_cnt;
+	uint64_t ssu_rx_drop_cnt;
+};
+
 /* store statistics names and its offset in stats structure */
 struct hns3_xstats_name_offset {
 	char name[RTE_ETH_XSTATS_NAME_SIZE];
@@ -127,12 +131,27 @@ struct hns3_reset_stats;
 	(offsetof(struct hns3_reset_stats, f))
 
 #define HNS3_RX_BD_ERROR_STATS_FIELD_OFFSET(f) \
-	(offsetof(struct hns3_rx_queue, f))
+	(offsetof(struct hns3_rx_bd_errors_stats, f))
 
-#define HNS3_TX_ERROR_STATS_FIELD_OFFSET(f) \
-	(offsetof(struct hns3_tx_queue, f))
+#define HNS3_RXQ_DFX_STATS_FIELD_OFFSET(f) \
+	(offsetof(struct hns3_rx_dfx_stats, f))
 
-int hns3_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *rte_stats);
+#define HNS3_TXQ_DFX_STATS_FIELD_OFFSET(f) \
+	(offsetof(struct hns3_tx_dfx_stats, f))
+
+#define HNS3_RXQ_BASIC_STATS_FIELD_OFFSET(f) \
+	(offsetof(struct hns3_rx_basic_stats, f))
+
+#define HNS3_TXQ_BASIC_STATS_FIELD_OFFSET(f) \
+	(offsetof(struct hns3_tx_basic_stats, f))
+
+#define HNS3_IMISSED_STATS_FIELD_OFFSET(f) \
+	(offsetof(struct hns3_rx_missed_stats, f))
+
+struct hns3_hw;
+
+int hns3_stats_get(struct rte_eth_dev *eth_dev,
+		   struct rte_eth_stats *rte_stats);
 int hns3_dev_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *xstats,
 			unsigned int n);
 int hns3_dev_xstats_reset(struct rte_eth_dev *dev);
@@ -140,12 +159,17 @@ int hns3_dev_xstats_get_names(struct rte_eth_dev *dev,
 			      struct rte_eth_xstat_name *xstats_names,
 			      __rte_unused unsigned int size);
 int hns3_dev_xstats_get_by_id(struct rte_eth_dev *dev,
-			      __rte_unused const uint64_t *ids,
-			      __rte_unused uint64_t *values,
+			      const uint64_t *ids,
+			      uint64_t *values,
 			      uint32_t size);
 int hns3_dev_xstats_get_names_by_id(struct rte_eth_dev *dev,
-				    struct rte_eth_xstat_name *xstats_names,
 				    const uint64_t *ids,
+				    struct rte_eth_xstat_name *xstats_names,
 				    uint32_t size);
-int hns3_stats_reset(struct rte_eth_dev *dev);
-#endif /* _HNS3_STATS_H_ */
+int hns3_stats_reset(struct rte_eth_dev *eth_dev);
+int hns3_stats_init(struct hns3_hw *hw);
+void hns3_stats_uninit(struct hns3_hw *hw);
+int hns3_query_mac_stats_reg_num(struct hns3_hw *hw);
+void hns3_update_hw_stats(struct hns3_hw *hw);
+
+#endif /* HNS3_STATS_H */

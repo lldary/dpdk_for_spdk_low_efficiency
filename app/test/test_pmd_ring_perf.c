@@ -155,11 +155,12 @@ test_ring_pmd_perf(void)
 	test_bulk_enqueue_dequeue();
 
 	/* release port and ring resources */
-	rte_eth_dev_stop(ring_ethdev_port);
+	if (rte_eth_dev_stop(ring_ethdev_port) != 0)
+		return -1;
 	rte_eth_dev_get_name_by_port(ring_ethdev_port, name);
 	rte_vdev_uninit(name);
 	rte_ring_free(r);
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(ring_pmd_perf_autotest, test_ring_pmd_perf);
+REGISTER_PERF_TEST(ring_pmd_perf_autotest, test_ring_pmd_perf);

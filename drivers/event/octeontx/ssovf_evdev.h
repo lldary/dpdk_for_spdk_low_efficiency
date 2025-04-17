@@ -6,7 +6,7 @@
 #define __SSOVF_EVDEV_H__
 
 #include <rte_event_eth_tx_adapter.h>
-#include <rte_eventdev_pmd_vdev.h>
+#include <eventdev_pmd_vdev.h>
 #include <rte_io.h>
 
 #include <octeontx_mbox.h>
@@ -86,11 +86,9 @@
 #define SSO_GRP_GET_PRIORITY              0x7
 #define SSO_GRP_SET_PRIORITY              0x8
 
-#define SSOVF_SELFTEST_ARG               ("selftest")
-
 /*
  * In Cavium OCTEON TX SoC, all accesses to the device registers are
- * implictly strongly ordered. So, The relaxed version of IO operation is
+ * implicitly strongly ordered. So, The relaxed version of IO operation is
  * safe to use with out any IO memory barriers.
  */
 #define ssovf_read64 rte_read64_relaxed
@@ -98,14 +96,14 @@
 
 /* ARM64 specific functions */
 #if defined(RTE_ARCH_ARM64)
-#define ssovf_load_pair(val0, val1, addr) ({		\
+#define ssovf_load_pair(val0, val1, addr) __extension__ ({		\
 			asm volatile(			\
 			"ldp %x[x0], %x[x1], [%x[p1]]"	\
 			:[x0]"=r"(val0), [x1]"=r"(val1) \
 			:[p1]"r"(addr)			\
 			); })
 
-#define ssovf_store_pair(val0, val1, addr) ({		\
+#define ssovf_store_pair(val0, val1, addr) __extension__ ({		\
 			asm volatile(			\
 			"stp %x[x0], %x[x1], [%x[p1]]"	\
 			::[x0]"r"(val0), [x1]"r"(val1), [p1]"r"(addr) \
@@ -146,6 +144,12 @@ struct ssovf_evdev {
 	uint32_t min_deq_timeout_ns;
 	uint32_t max_deq_timeout_ns;
 	int32_t max_num_events;
+	uint32_t available_events;
+	uint16_t rxq_pools;
+	uint64_t *rxq_pool_array;
+	uint8_t *rxq_pool_rcnt;
+	uint16_t tim_ring_cnt;
+	uint16_t *tim_ring_ids;
 } __rte_cache_aligned;
 
 /* Event port aka HWS */

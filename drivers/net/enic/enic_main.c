@@ -10,12 +10,13 @@
 #include <fcntl.h>
 
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_memzone.h>
 #include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_string_fns.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
+#include <rte_geneve.h>
 
 #include "enic_compat.h"
 #include "enic.h"
@@ -50,7 +51,7 @@ static int is_eth_addr_valid(uint8_t *addr)
 	return !is_mcast_addr(addr) && !is_zero_addr(addr);
 }
 
-static void
+void
 enic_rxmbuf_queue_release(__rte_unused struct enic *enic, struct vnic_rq *rq)
 {
 	uint16_t i;
@@ -68,7 +69,7 @@ enic_rxmbuf_queue_release(__rte_unused struct enic *enic, struct vnic_rq *rq)
 	}
 }
 
-static void enic_free_wq_buf(struct rte_mbuf **buf)
+void enic_free_wq_buf(struct rte_mbuf **buf)
 {
 	struct rte_mbuf *mbuf = *buf;
 
@@ -191,8 +192,7 @@ int enic_set_mac_address(struct enic *enic, uint8_t *mac_addr)
 	return err;
 }
 
-static void
-enic_free_rq_buf(struct rte_mbuf **mbuf)
+void enic_free_rq_buf(struct rte_mbuf **mbuf)
 {
 	if (*mbuf == NULL)
 		return;
@@ -250,7 +250,7 @@ void enic_init_vnic_resources(struct enic *enic)
 			error_interrupt_offset);
 		/* Compute unsupported ol flags for enic_prep_pkts() */
 		enic->wq[index].tx_offload_notsup_mask =
-			PKT_TX_OFFLOAD_MASK ^ enic->tx_offload_mask;
+			RTE_MBUF_F_TX_OFFLOAD_MASK ^ enic->tx_offload_mask;
 
 		cq_idx = enic_cq_wq(enic, index);
 		vnic_cq_init(&enic->cq[cq_idx],
@@ -275,14 +275,14 @@ void enic_init_vnic_resources(struct enic *enic)
 }
 
 
-static int
+int
 enic_alloc_rx_queue_mbufs(struct enic *enic, struct vnic_rq *rq)
 {
 	struct rte_mbuf *mb;
 	struct rq_enet_desc *rqd = rq->ring.descs;
 	unsigned i;
 	dma_addr_t dma_addr;
-	uint32_t max_rx_pkt_len;
+	uint32_t max_rx_pktlen;
 	uint16_t rq_buf_len;
 
 	if (!rq->in_use)
@@ -293,16 +293,16 @@ enic_alloc_rx_queue_mbufs(struct enic *enic, struct vnic_rq *rq)
 
 	/*
 	 * If *not* using scatter and the mbuf size is greater than the
-	 * requested max packet size (max_rx_pkt_len), then reduce the
-	 * posted buffer size to max_rx_pkt_len. HW still receives packets
-	 * larger than max_rx_pkt_len, but they will be truncated, which we
+	 * requested max packet size (mtu + eth overhead), then reduce the
+	 * posted buffer size to max packet size. HW still receives packets
+	 * larger than max packet size, but they will be truncated, which we
 	 * drop in the rx handler. Not ideal, but better than returning
 	 * large packets when the user is not expecting them.
 	 */
-	max_rx_pkt_len = enic->rte_dev->data->dev_conf.rxmode.max_rx_pkt_len;
+	max_rx_pktlen = enic_mtu_to_max_rx_pktlen(enic->rte_dev->data->mtu);
 	rq_buf_len = rte_pktmbuf_data_room_size(rq->mp) - RTE_PKTMBUF_HEADROOM;
-	if (max_rx_pkt_len < rq_buf_len && !rq->data_queue_enable)
-		rq_buf_len = max_rx_pkt_len;
+	if (max_rx_pktlen < rq_buf_len && !rq->data_queue_enable)
+		rq_buf_len = max_rx_pktlen;
 	for (i = 0; i < rq->ring.desc_count; i++, rqd++) {
 		mb = rte_mbuf_raw_alloc(rq->mp);
 		if (mb == NULL) {
@@ -430,7 +430,7 @@ int enic_link_update(struct rte_eth_dev *eth_dev)
 
 	memset(&link, 0, sizeof(link));
 	link.link_status = enic_get_link_status(enic);
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 	link.link_speed = vnic_dev_port_speed(enic->vdev);
 
 	return rte_eth_linkstatus_set(eth_dev, &link);
@@ -445,10 +445,10 @@ enic_intr_handler(void *arg)
 	vnic_intr_return_all_credits(&enic->intr[ENICPMD_LSC_INTR_OFFSET]);
 
 	enic_link_update(dev);
-	_rte_eth_dev_callback_process(dev, RTE_ETH_EVENT_INTR_LSC, NULL);
+	rte_eth_dev_callback_process(dev, RTE_ETH_EVENT_INTR_LSC, NULL);
 	enic_log_q_error(enic);
 	/* Re-enable irq in case of INTx */
-	rte_intr_ack(&enic->pdev->intr_handle);
+	rte_intr_ack(enic->pdev->intr_handle);
 }
 
 static int enic_rxq_intr_init(struct enic *enic)
@@ -477,14 +477,16 @@ static int enic_rxq_intr_init(struct enic *enic)
 			" interrupts\n");
 		return err;
 	}
-	intr_handle->intr_vec = rte_zmalloc("enic_intr_vec",
-					    rxq_intr_count * sizeof(int), 0);
-	if (intr_handle->intr_vec == NULL) {
+
+	if (rte_intr_vec_list_alloc(intr_handle, "enic_intr_vec",
+					   rxq_intr_count)) {
 		dev_err(enic, "Failed to allocate intr_vec\n");
 		return -ENOMEM;
 	}
 	for (i = 0; i < rxq_intr_count; i++)
-		intr_handle->intr_vec[i] = i + ENICPMD_RXQ_INTR_OFFSET;
+		if (rte_intr_vec_list_index_set(intr_handle, i,
+						   i + ENICPMD_RXQ_INTR_OFFSET))
+			return -rte_errno;
 	return 0;
 }
 
@@ -494,10 +496,8 @@ static void enic_rxq_intr_deinit(struct enic *enic)
 
 	intr_handle = enic->rte_dev->intr_handle;
 	rte_intr_efd_disable(intr_handle);
-	if (intr_handle->intr_vec != NULL) {
-		rte_free(intr_handle->intr_vec);
-		intr_handle->intr_vec = NULL;
-	}
+
+	rte_intr_vec_list_free(intr_handle);
 }
 
 static void enic_prep_wq_for_simple_tx(struct enic *enic, uint16_t queue_idx)
@@ -535,6 +535,11 @@ void enic_pick_rx_handler(struct rte_eth_dev *eth_dev)
 {
 	struct enic *enic = pmd_priv(eth_dev);
 
+	if (enic->cq64) {
+		ENICPMD_LOG(DEBUG, " use the normal Rx handler for 64B CQ entry");
+		eth_dev->rx_pkt_burst = &enic_recv_pkts_64;
+		return;
+	}
 	/*
 	 * Preference order:
 	 * 1. The vectorized handler if possible and requested.
@@ -592,7 +597,7 @@ int enic_enable(struct enic *enic)
 	}
 
 	eth_dev->data->dev_link.link_speed = vnic_dev_port_speed(enic->vdev);
-	eth_dev->data->dev_link.link_duplex = ETH_LINK_FULL_DUPLEX;
+	eth_dev->data->dev_link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 
 	/* vnic notification of link status has already been turned on in
 	 * enic_dev_init() which is called during probe time.  Here we are
@@ -604,11 +609,9 @@ int enic_enable(struct enic *enic)
 	err = enic_rxq_intr_init(enic);
 	if (err)
 		return err;
-	if (enic_clsf_init(enic))
-		dev_warning(enic, "Init of hash table for clsf failed."\
-			"Flow director feature will not work\n");
 
-	if (enic_fm_init(enic))
+	/* Initialize flowman if not already initialized during probe */
+	if (enic->fm == NULL && enic_fm_init(enic))
 		dev_warning(enic, "Init of flowman failed.\n");
 
 	for (index = 0; index < enic->rq_count; index++) {
@@ -635,11 +638,11 @@ int enic_enable(struct enic *enic)
 	 * and vlan insertion are supported.
 	 */
 	simple_tx_offloads = enic->tx_offload_capa &
-		(DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM |
-		 DEV_TX_OFFLOAD_VLAN_INSERT |
-		 DEV_TX_OFFLOAD_IPV4_CKSUM |
-		 DEV_TX_OFFLOAD_UDP_CKSUM |
-		 DEV_TX_OFFLOAD_TCP_CKSUM);
+		(RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |
+		 RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+		 RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+		 RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+		 RTE_ETH_TX_OFFLOAD_TCP_CKSUM);
 	if ((eth_dev->data->dev_conf.txmode.offloads &
 	     ~simple_tx_offloads) == 0) {
 		ENICPMD_LOG(DEBUG, " use the simple tx handler");
@@ -664,10 +667,10 @@ int enic_enable(struct enic *enic)
 	vnic_dev_enable_wait(enic->vdev);
 
 	/* Register and enable error interrupt */
-	rte_intr_callback_register(&(enic->pdev->intr_handle),
+	rte_intr_callback_register(enic->pdev->intr_handle,
 		enic_intr_handler, (void *)enic->rte_dev);
 
-	rte_intr_enable(&(enic->pdev->intr_handle));
+	rte_intr_enable(enic->pdev->intr_handle);
 	/* Unmask LSC interrupt */
 	vnic_intr_unmask(&enic->intr[ENICPMD_LSC_INTR_OFFSET]);
 
@@ -805,16 +808,36 @@ int enic_alloc_rq(struct enic *enic, uint16_t queue_idx,
 	unsigned int socket_id, struct rte_mempool *mp,
 	uint16_t nb_desc, uint16_t free_thresh)
 {
+	struct enic_vf_representor *vf;
 	int rc;
-	uint16_t sop_queue_idx = enic_rte_rq_idx_to_sop_idx(queue_idx);
-	uint16_t data_queue_idx = enic_rte_rq_idx_to_data_idx(queue_idx, enic);
-	struct vnic_rq *rq_sop = &enic->rq[sop_queue_idx];
-	struct vnic_rq *rq_data = &enic->rq[data_queue_idx];
+	uint16_t sop_queue_idx;
+	uint16_t data_queue_idx;
+	uint16_t cq_idx;
+	struct vnic_rq *rq_sop;
+	struct vnic_rq *rq_data;
 	unsigned int mbuf_size, mbufs_per_pkt;
 	unsigned int nb_sop_desc, nb_data_desc;
 	uint16_t min_sop, max_sop, min_data, max_data;
-	uint32_t max_rx_pkt_len;
+	uint32_t max_rx_pktlen;
 
+	/*
+	 * Representor uses a reserved PF queue. Translate representor
+	 * queue number to PF queue number.
+	 */
+	if (rte_eth_dev_is_repr(enic->rte_dev)) {
+		RTE_ASSERT(queue_idx == 0);
+		vf = VF_ENIC_TO_VF_REP(enic);
+		sop_queue_idx = vf->pf_rq_sop_idx;
+		data_queue_idx = vf->pf_rq_data_idx;
+		enic = vf->pf;
+		queue_idx = sop_queue_idx;
+	} else {
+		sop_queue_idx = enic_rte_rq_idx_to_sop_idx(queue_idx);
+		data_queue_idx = enic_rte_rq_idx_to_data_idx(queue_idx, enic);
+	}
+	cq_idx = enic_cq_rq(enic, sop_queue_idx);
+	rq_sop = &enic->rq[sop_queue_idx];
+	rq_data = &enic->rq[data_queue_idx];
 	rq_sop->is_sop = 1;
 	rq_sop->data_queue_idx = data_queue_idx;
 	rq_data->is_sop = 0;
@@ -831,23 +854,23 @@ int enic_alloc_rq(struct enic *enic, uint16_t queue_idx,
 
 	mbuf_size = (uint16_t)(rte_pktmbuf_data_room_size(mp) -
 			       RTE_PKTMBUF_HEADROOM);
-	/* max_rx_pkt_len includes the ethernet header and CRC. */
-	max_rx_pkt_len = enic->rte_dev->data->dev_conf.rxmode.max_rx_pkt_len;
+	/* max_rx_pktlen includes the ethernet header and CRC. */
+	max_rx_pktlen = enic_mtu_to_max_rx_pktlen(enic->rte_dev->data->mtu);
 
 	if (enic->rte_dev->data->dev_conf.rxmode.offloads &
-	    DEV_RX_OFFLOAD_SCATTER) {
+	    RTE_ETH_RX_OFFLOAD_SCATTER) {
 		dev_info(enic, "Rq %u Scatter rx mode enabled\n", queue_idx);
 		/* ceil((max pkt len)/mbuf_size) */
-		mbufs_per_pkt = (max_rx_pkt_len + mbuf_size - 1) / mbuf_size;
+		mbufs_per_pkt = (max_rx_pktlen + mbuf_size - 1) / mbuf_size;
 	} else {
 		dev_info(enic, "Scatter rx mode disabled\n");
 		mbufs_per_pkt = 1;
-		if (max_rx_pkt_len > mbuf_size) {
+		if (max_rx_pktlen > mbuf_size) {
 			dev_warning(enic, "The maximum Rx packet size (%u) is"
 				    " larger than the mbuf size (%u), and"
 				    " scatter is disabled. Larger packets will"
 				    " be truncated.\n",
-				    max_rx_pkt_len, mbuf_size);
+				    max_rx_pktlen, mbuf_size);
 		}
 	}
 
@@ -856,16 +879,15 @@ int enic_alloc_rq(struct enic *enic, uint16_t queue_idx,
 		rq_sop->data_queue_enable = 1;
 		rq_data->in_use = 1;
 		/*
-		 * HW does not directly support rxmode.max_rx_pkt_len. HW always
+		 * HW does not directly support MTU. HW always
 		 * receives packet sizes up to the "max" MTU.
 		 * If not using scatter, we can achieve the effect of dropping
 		 * larger packets by reducing the size of posted buffers.
 		 * See enic_alloc_rx_queue_mbufs().
 		 */
-		if (max_rx_pkt_len <
-		    enic_mtu_to_max_rx_pktlen(enic->max_mtu)) {
-			dev_warning(enic, "rxmode.max_rx_pkt_len is ignored"
-				    " when scatter rx mode is in use.\n");
+		if (enic->rte_dev->data->mtu < enic->max_mtu) {
+			dev_warning(enic,
+				"mtu is ignored when scatter rx mode is in use.\n");
 		}
 	} else {
 		dev_info(enic, "Rq %u Scatter rx mode not being used\n",
@@ -908,7 +930,7 @@ int enic_alloc_rq(struct enic *enic, uint16_t queue_idx,
 	if (mbufs_per_pkt > 1) {
 		dev_info(enic, "For max packet size %u and mbuf size %u valid"
 			 " rx descriptor range is %u to %u\n",
-			 max_rx_pkt_len, mbuf_size, min_sop + min_data,
+			 max_rx_pktlen, mbuf_size, min_sop + min_data,
 			 max_sop + max_data);
 	}
 	dev_info(enic, "Using %d rx descriptors (sop %d, data %d)\n",
@@ -934,8 +956,22 @@ int enic_alloc_rq(struct enic *enic, uint16_t queue_idx,
 		}
 		nb_data_desc = rq_data->ring.desc_count;
 	}
-	rc = vnic_cq_alloc(enic->vdev, &enic->cq[queue_idx], queue_idx,
+	/* Enable 64B CQ entry if requested */
+	if (enic->cq64 && vnic_dev_set_cq_entry_size(enic->vdev,
+				sop_queue_idx, VNIC_RQ_CQ_ENTRY_SIZE_64)) {
+		dev_err(enic, "failed to enable 64B CQ entry on sop rq\n");
+		goto err_free_rq_data;
+	}
+	if (rq_data->in_use && enic->cq64 &&
+	    vnic_dev_set_cq_entry_size(enic->vdev, data_queue_idx,
+		VNIC_RQ_CQ_ENTRY_SIZE_64)) {
+		dev_err(enic, "failed to enable 64B CQ entry on data rq\n");
+		goto err_free_rq_data;
+	}
+
+	rc = vnic_cq_alloc(enic->vdev, &enic->cq[cq_idx], cq_idx,
 			   socket_id, nb_sop_desc + nb_data_desc,
+			   enic->cq64 ?	sizeof(struct cq_enet_rq_desc_64) :
 			   sizeof(struct cq_enet_rq_desc));
 	if (rc) {
 		dev_err(enic, "error in allocation of cq for rq\n");
@@ -978,7 +1014,7 @@ err_free_sop_mbuf:
 	rte_free(rq_sop->mbuf_ring);
 err_free_cq:
 	/* cleanup on error */
-	vnic_cq_free(&enic->cq[queue_idx]);
+	vnic_cq_free(&enic->cq[cq_idx]);
 err_free_rq_data:
 	if (rq_data->in_use)
 		vnic_rq_free(rq_data);
@@ -1006,12 +1042,27 @@ void enic_free_wq(void *txq)
 int enic_alloc_wq(struct enic *enic, uint16_t queue_idx,
 	unsigned int socket_id, uint16_t nb_desc)
 {
+	struct enic_vf_representor *vf;
 	int err;
-	struct vnic_wq *wq = &enic->wq[queue_idx];
-	unsigned int cq_index = enic_cq_wq(enic, queue_idx);
+	struct vnic_wq *wq;
+	unsigned int cq_index;
 	char name[RTE_MEMZONE_NAMESIZE];
 	static int instance;
 
+	/*
+	 * Representor uses a reserved PF queue. Translate representor
+	 * queue number to PF queue number.
+	 */
+	if (rte_eth_dev_is_repr(enic->rte_dev)) {
+		RTE_ASSERT(queue_idx == 0);
+		vf = VF_ENIC_TO_VF_REP(enic);
+		queue_idx = vf->pf_wq_idx;
+		cq_index = vf->pf_wq_cq_idx;
+		enic = vf->pf;
+	} else {
+		cq_index = enic_cq_wq(enic, queue_idx);
+	}
+	wq = &enic->wq[queue_idx];
 	wq->socket_id = socket_id;
 	/*
 	 * rte_eth_tx_queue_setup() checks min, max, and alignment. So just
@@ -1060,14 +1111,13 @@ int enic_disable(struct enic *enic)
 		(void)vnic_intr_masked(&enic->intr[i]); /* flush write */
 	}
 	enic_rxq_intr_deinit(enic);
-	rte_intr_disable(&enic->pdev->intr_handle);
-	rte_intr_callback_unregister(&enic->pdev->intr_handle,
+	rte_intr_disable(enic->pdev->intr_handle);
+	rte_intr_callback_unregister(enic->pdev->intr_handle,
 				     enic_intr_handler,
 				     (void *)enic->rte_dev);
 
 	vnic_dev_disable(enic->vdev);
 
-	enic_clsf_destroy(enic);
 	enic_fm_destroy(enic);
 
 	if (!enic_is_sriov_vf(enic))
@@ -1087,7 +1137,7 @@ int enic_disable(struct enic *enic)
 	}
 
 	/* If we were using interrupts, set the interrupt vector to -1
-	 * to disable interrupts.  We are not disabling link notifcations,
+	 * to disable interrupts.  We are not disabling link notifications,
 	 * though, as we want the polling of link status to continue working.
 	 */
 	if (enic->rte_dev->data->dev_conf.intr_conf.lsc)
@@ -1268,6 +1318,18 @@ int enic_setup_finish(struct enic *enic)
 {
 	enic_init_soft_stats(enic);
 
+	/* switchdev: enable promisc mode on PF */
+	if (enic->switchdev_mode) {
+		vnic_dev_packet_filter(enic->vdev,
+				       0 /* directed  */,
+				       0 /* multicast */,
+				       0 /* broadcast */,
+				       1 /* promisc   */,
+				       0 /* allmulti  */);
+		enic->promisc = 1;
+		enic->allmulti = 0;
+		return 0;
+	}
 	/* Default conf */
 	vnic_dev_packet_filter(enic->vdev,
 		1 /* directed  */,
@@ -1323,15 +1385,15 @@ int enic_set_rss_conf(struct enic *enic, struct rte_eth_rss_conf *rss_conf)
 	rss_hash_type = 0;
 	rss_hf = rss_conf->rss_hf & enic->flow_type_rss_offloads;
 	if (enic->rq_count > 1 &&
-	    (eth_dev->data->dev_conf.rxmode.mq_mode & ETH_MQ_RX_RSS_FLAG) &&
+	    (eth_dev->data->dev_conf.rxmode.mq_mode & RTE_ETH_MQ_RX_RSS_FLAG) &&
 	    rss_hf != 0) {
 		rss_enable = 1;
-		if (rss_hf & (ETH_RSS_IPV4 | ETH_RSS_FRAG_IPV4 |
-			      ETH_RSS_NONFRAG_IPV4_OTHER))
+		if (rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_FRAG_IPV4 |
+			      RTE_ETH_RSS_NONFRAG_IPV4_OTHER))
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_IPV4;
-		if (rss_hf & ETH_RSS_NONFRAG_IPV4_TCP)
+		if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP)
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_TCP_IPV4;
-		if (rss_hf & ETH_RSS_NONFRAG_IPV4_UDP) {
+		if (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP) {
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_UDP_IPV4;
 			if (enic->udp_rss_weak) {
 				/*
@@ -1342,12 +1404,12 @@ int enic_set_rss_conf(struct enic *enic, struct rte_eth_rss_conf *rss_conf)
 				rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_TCP_IPV4;
 			}
 		}
-		if (rss_hf & (ETH_RSS_IPV6 | ETH_RSS_IPV6_EX |
-			      ETH_RSS_FRAG_IPV6 | ETH_RSS_NONFRAG_IPV6_OTHER))
+		if (rss_hf & (RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_IPV6_EX |
+			      RTE_ETH_RSS_FRAG_IPV6 | RTE_ETH_RSS_NONFRAG_IPV6_OTHER))
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_IPV6;
-		if (rss_hf & (ETH_RSS_NONFRAG_IPV6_TCP | ETH_RSS_IPV6_TCP_EX))
+		if (rss_hf & (RTE_ETH_RSS_NONFRAG_IPV6_TCP | RTE_ETH_RSS_IPV6_TCP_EX))
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_TCP_IPV6;
-		if (rss_hf & (ETH_RSS_NONFRAG_IPV6_UDP | ETH_RSS_IPV6_UDP_EX)) {
+		if (rss_hf & (RTE_ETH_RSS_NONFRAG_IPV6_UDP | RTE_ETH_RSS_IPV6_UDP_EX)) {
 			rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_UDP_IPV6;
 			if (enic->udp_rss_weak)
 				rss_hash_type |= NIC_CFG_RSS_HASH_TYPE_TCP_IPV6;
@@ -1393,6 +1455,11 @@ int enic_set_vlan_strip(struct enic *enic)
 
 int enic_add_packet_filter(struct enic *enic)
 {
+	/* switchdev ignores packet filters */
+	if (enic->switchdev_mode) {
+		ENICPMD_LOG(DEBUG, " switchdev: ignore packet filter");
+		return 0;
+	}
 	/* Args -> directed, multicast, broadcast, promisc, allmulti */
 	return vnic_dev_packet_filter(enic->vdev, 1, 1, 1,
 		enic->promisc, enic->allmulti);
@@ -1429,6 +1496,17 @@ int enic_set_vnic_res(struct enic *enic)
 	required_intr = 1; /* 1 for LSC even if intr_conf.lsc is 0 */
 	if (eth_dev->data->dev_conf.intr_conf.rxq) {
 		required_intr += eth_dev->data->nb_rx_queues;
+	}
+	ENICPMD_LOG(DEBUG, "Required queues for PF: rq %u wq %u cq %u",
+		    required_rq, required_wq, required_cq);
+	if (enic->vf_required_rq) {
+		/* Queues needed for VF representors */
+		required_rq += enic->vf_required_rq;
+		required_wq += enic->vf_required_wq;
+		required_cq += enic->vf_required_cq;
+		ENICPMD_LOG(DEBUG, "Required queues for VF representors: rq %u wq %u cq %u",
+			    enic->vf_required_rq, enic->vf_required_wq,
+			    enic->vf_required_cq);
 	}
 
 	if (enic->conf_rq_count < required_rq) {
@@ -1475,7 +1553,7 @@ enic_reinit_rq(struct enic *enic, unsigned int rq_idx)
 
 	sop_rq = &enic->rq[enic_rte_rq_idx_to_sop_idx(rq_idx)];
 	data_rq = &enic->rq[enic_rte_rq_idx_to_data_idx(rq_idx, enic)];
-	cq_idx = rq_idx;
+	cq_idx = enic_cq_rq(enic, rq_idx);
 
 	vnic_cq_clean(&enic->cq[cq_idx]);
 	vnic_cq_init(&enic->cq[cq_idx],
@@ -1555,18 +1633,13 @@ int enic_set_mtu(struct enic *enic, uint16_t new_mtu)
 			"MTU (%u) is greater than value configured in NIC (%u)\n",
 			new_mtu, config_mtu);
 
-	/* Update the MTU and maximum packet length */
-	eth_dev->data->mtu = new_mtu;
-	eth_dev->data->dev_conf.rxmode.max_rx_pkt_len =
-		enic_mtu_to_max_rx_pktlen(new_mtu);
-
 	/*
 	 * If the device has not started (enic_enable), nothing to do.
 	 * Later, enic_enable() will set up RQs reflecting the new maximum
 	 * packet length.
 	 */
 	if (!eth_dev->data->dev_started)
-		goto set_mtu_done;
+		return rc;
 
 	/*
 	 * The device has started, re-do RQs on the fly. In the process, we
@@ -1591,7 +1664,8 @@ int enic_set_mtu(struct enic *enic, uint16_t new_mtu)
 	}
 
 	/* replace Rx function with a no-op to avoid getting stale pkts */
-	eth_dev->rx_pkt_burst = enic_dummy_recv_pkts;
+	eth_dev->rx_pkt_burst = rte_eth_pkt_burst_dummy;
+	rte_eth_fp_ops[enic->port_id].rx_pkt_burst = eth_dev->rx_pkt_burst;
 	rte_mb();
 
 	/* Allow time for threads to exit the real Rx function. */
@@ -1626,6 +1700,7 @@ int enic_set_mtu(struct enic *enic, uint16_t new_mtu)
 	/* put back the real receive function */
 	rte_mb();
 	enic_pick_rx_handler(eth_dev);
+	rte_eth_fp_ops[enic->port_id].rx_pkt_burst = eth_dev->rx_pkt_burst;
 	rte_mb();
 
 	/* restart Rx traffic */
@@ -1639,6 +1714,85 @@ set_mtu_done:
 	dev_info(enic, "MTU changed from %u to %u\n",  old_mtu, new_mtu);
 	rte_spinlock_unlock(&enic->mtu_lock);
 	return rc;
+}
+
+static void
+enic_disable_overlay_offload(struct enic *enic)
+{
+	/*
+	 * Disabling fails if the feature is provisioned but
+	 * not enabled. So ignore result and do not log error.
+	 */
+	if (enic->vxlan) {
+		vnic_dev_overlay_offload_ctrl(enic->vdev,
+			OVERLAY_FEATURE_VXLAN, OVERLAY_OFFLOAD_DISABLE);
+	}
+	if (enic->geneve) {
+		vnic_dev_overlay_offload_ctrl(enic->vdev,
+			OVERLAY_FEATURE_GENEVE, OVERLAY_OFFLOAD_DISABLE);
+	}
+}
+
+static int
+enic_enable_overlay_offload(struct enic *enic)
+{
+	if (enic->vxlan && vnic_dev_overlay_offload_ctrl(enic->vdev,
+			OVERLAY_FEATURE_VXLAN, OVERLAY_OFFLOAD_ENABLE) != 0) {
+		dev_err(NULL, "failed to enable VXLAN offload\n");
+		return -EINVAL;
+	}
+	if (enic->geneve && vnic_dev_overlay_offload_ctrl(enic->vdev,
+			OVERLAY_FEATURE_GENEVE, OVERLAY_OFFLOAD_ENABLE) != 0) {
+		dev_err(NULL, "failed to enable Geneve offload\n");
+		return -EINVAL;
+	}
+	enic->tx_offload_capa |=
+		RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |
+		(enic->geneve ? RTE_ETH_TX_OFFLOAD_GENEVE_TNL_TSO : 0) |
+		(enic->vxlan ? RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO : 0);
+	enic->tx_offload_mask |=
+		RTE_MBUF_F_TX_OUTER_IPV6 |
+		RTE_MBUF_F_TX_OUTER_IPV4 |
+		RTE_MBUF_F_TX_OUTER_IP_CKSUM |
+		RTE_MBUF_F_TX_TUNNEL_MASK;
+	enic->overlay_offload = true;
+
+	if (enic->vxlan && enic->geneve)
+		dev_info(NULL, "Overlay offload is enabled (VxLAN, Geneve)\n");
+	else if (enic->vxlan)
+		dev_info(NULL, "Overlay offload is enabled (VxLAN)\n");
+	else
+		dev_info(NULL, "Overlay offload is enabled (Geneve)\n");
+
+	return 0;
+}
+
+static int
+enic_reset_overlay_port(struct enic *enic)
+{
+	if (enic->vxlan) {
+		enic->vxlan_port = RTE_VXLAN_DEFAULT_PORT;
+		/*
+		 * Reset the vxlan port to the default, as the NIC firmware
+		 * does not reset it automatically and keeps the old setting.
+		 */
+		if (vnic_dev_overlay_offload_cfg(enic->vdev,
+						 OVERLAY_CFG_VXLAN_PORT_UPDATE,
+						 RTE_VXLAN_DEFAULT_PORT)) {
+			dev_err(enic, "failed to update vxlan port\n");
+			return -EINVAL;
+		}
+	}
+	if (enic->geneve) {
+		enic->geneve_port = RTE_GENEVE_DEFAULT_PORT;
+		if (vnic_dev_overlay_offload_cfg(enic->vdev,
+						 OVERLAY_CFG_GENEVE_PORT_UPDATE,
+						 RTE_GENEVE_DEFAULT_PORT)) {
+			dev_err(enic, "failed to update vxlan port\n");
+			return -EINVAL;
+		}
+	}
+	return 0;
 }
 
 static int enic_dev_init(struct enic *enic)
@@ -1690,9 +1844,6 @@ static int enic_dev_init(struct enic *enic)
 		return -1;
 	}
 
-	/* Get the supported filters */
-	enic_fdir_info(enic);
-
 	eth_dev->data->mac_addrs = rte_zmalloc("enic_mac_addr",
 					sizeof(struct rte_ether_addr) *
 					ENIC_UNICAST_PERFECT_FILTERS, 0);
@@ -1710,83 +1861,46 @@ static int enic_dev_init(struct enic *enic)
 	/* set up link status checking */
 	vnic_dev_notify_set(enic->vdev, -1); /* No Intr for notify */
 
-	/*
-	 * When Geneve with options offload is available, always disable it
-	 * first as it can interfere with user flow rules.
-	 */
-	if (enic->geneve_opt_avail) {
-		/*
-		 * Disabling fails if the feature is provisioned but
-		 * not enabled. So ignore result and do not log error.
-		 */
-		vnic_dev_overlay_offload_ctrl(enic->vdev,
-			OVERLAY_FEATURE_GENEVE,
-			OVERLAY_OFFLOAD_DISABLE);
-	}
 	enic->overlay_offload = false;
-	if (enic->disable_overlay && enic->vxlan) {
-		/*
-		 * Explicitly disable overlay offload as the setting is
-		 * sticky, and resetting vNIC does not disable it.
-		 */
-		if (vnic_dev_overlay_offload_ctrl(enic->vdev,
-						  OVERLAY_FEATURE_VXLAN,
-						  OVERLAY_OFFLOAD_DISABLE)) {
-			dev_err(enic, "failed to disable overlay offload\n");
-		} else {
-			dev_info(enic, "Overlay offload is disabled\n");
-		}
-	}
-	if (!enic->disable_overlay && enic->vxlan &&
-	    /* 'VXLAN feature' enables VXLAN, NVGRE, and GENEVE. */
-	    vnic_dev_overlay_offload_ctrl(enic->vdev,
-					  OVERLAY_FEATURE_VXLAN,
-					  OVERLAY_OFFLOAD_ENABLE) == 0) {
-		enic->tx_offload_capa |=
-			DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM |
-			DEV_TX_OFFLOAD_GENEVE_TNL_TSO |
-			DEV_TX_OFFLOAD_VXLAN_TNL_TSO;
-		enic->tx_offload_mask |=
-			PKT_TX_OUTER_IPV6 |
-			PKT_TX_OUTER_IPV4 |
-			PKT_TX_OUTER_IP_CKSUM |
-			PKT_TX_TUNNEL_MASK;
-		enic->overlay_offload = true;
-		dev_info(enic, "Overlay offload is enabled\n");
-	}
-	/* Geneve with options offload requires overlay offload */
-	if (enic->overlay_offload && enic->geneve_opt_avail &&
-	    enic->geneve_opt_request) {
-		if (vnic_dev_overlay_offload_ctrl(enic->vdev,
-				OVERLAY_FEATURE_GENEVE,
-				OVERLAY_OFFLOAD_ENABLE)) {
-			dev_err(enic, "failed to enable geneve+option\n");
-		} else {
-			enic->geneve_opt_enabled = 1;
-			dev_info(enic, "Geneve with options is enabled\n");
+	/*
+	 * First, explicitly disable overlay offload as the setting is
+	 * sticky, and resetting vNIC may not disable it.
+	 */
+	enic_disable_overlay_offload(enic);
+	/* Then, enable overlay offload according to vNIC flags */
+	if (!enic->disable_overlay && (enic->vxlan || enic->geneve)) {
+		err = enic_enable_overlay_offload(enic);
+		if (err) {
+			dev_info(NULL, "failed to enable overlay offload\n");
+			return err;
 		}
 	}
 	/*
-	 * Reset the vxlan port if HW vxlan parsing is available. It
+	 * Reset the vxlan/geneve port if HW parsing is available. It
 	 * is always enabled regardless of overlay offload
 	 * enable/disable.
 	 */
-	if (enic->vxlan) {
-		enic->vxlan_port = RTE_VXLAN_DEFAULT_PORT;
-		/*
-		 * Reset the vxlan port to the default, as the NIC firmware
-		 * does not reset it automatically and keeps the old setting.
-		 */
-		if (vnic_dev_overlay_offload_cfg(enic->vdev,
-						 OVERLAY_CFG_VXLAN_PORT_UPDATE,
-						 RTE_VXLAN_DEFAULT_PORT)) {
-			dev_err(enic, "failed to update vxlan port\n");
-			return -EINVAL;
-		}
-	}
+	err = enic_reset_overlay_port(enic);
+	if (err)
+		return err;
 
+	if (enic_fm_init(enic))
+		dev_warning(enic, "Init of flowman failed.\n");
 	return 0;
+}
 
+static void lock_devcmd(void *priv)
+{
+	struct enic *enic = priv;
+
+	rte_spinlock_lock(&enic->devcmd_lock);
+}
+
+static void unlock_devcmd(void *priv)
+{
+	struct enic *enic = priv;
+
+	rte_spinlock_unlock(&enic->devcmd_lock);
 }
 
 int enic_probe(struct enic *enic)
@@ -1864,6 +1978,11 @@ int enic_probe(struct enic *enic)
 		goto err_out_dev_close;
 	}
 
+	/* Use a PF spinlock to serialize devcmd from PF and VF representors */
+	if (enic->switchdev_mode) {
+		rte_spinlock_init(&enic->devcmd_lock);
+		vnic_register_lock(enic->vdev, lock_devcmd, unlock_devcmd);
+	}
 	return 0;
 
 err_out_dev_close:

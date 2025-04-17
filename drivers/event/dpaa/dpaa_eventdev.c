@@ -14,7 +14,7 @@
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_debug.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_eal.h>
 #include <rte_lcore.h>
 #include <rte_log.h>
@@ -24,12 +24,13 @@
 #include <rte_memzone.h>
 #include <rte_pci.h>
 #include <rte_eventdev.h>
-#include <rte_eventdev_pmd_vdev.h>
+#include <eventdev_pmd_vdev.h>
 #include <rte_ethdev.h>
+#include <rte_event_crypto_adapter.h>
 #include <rte_event_eth_rx_adapter.h>
 #include <rte_event_eth_tx_adapter.h>
-#include <rte_cryptodev.h>
-#include <rte_dpaa_bus.h>
+#include <cryptodev_pmd.h>
+#include <bus_dpaa_driver.h>
 #include <rte_dpaa_logs.h>
 #include <rte_cycles.h>
 #include <rte_kvargs.h>
@@ -46,7 +47,7 @@
  * Eventqueue = Channel Instance
  * 1 Eventdev can have N Eventqueue
  */
-int dpaa_logtype_eventdev;
+RTE_LOG_REGISTER_DEFAULT(dpaa_logtype_eventdev, NOTICE);
 
 #define DISABLE_INTR_MODE "disable_intr"
 
@@ -99,7 +100,7 @@ dpaa_event_enqueue_burst(void *port, const struct rte_event ev[],
 		case RTE_EVENT_OP_RELEASE:
 			qman_dca_index(ev[i].impl_opaque, 0);
 			mbuf = DPAA_PER_LCORE_DQRR_MBUF(i);
-			mbuf->seqn = DPAA_INVALID_MBUF_SEQN;
+			*dpaa_seqn(mbuf) = DPAA_INVALID_MBUF_SEQN;
 			DPAA_PER_LCORE_DQRR_HELD &= ~(1 << i);
 			DPAA_PER_LCORE_DQRR_SIZE--;
 			break;
@@ -174,12 +175,12 @@ dpaa_event_dequeue_burst(void *port, struct rte_event ev[],
 	int ret;
 	u16 ch_id;
 	void *buffers[8];
-	u32 num_frames, i, irq = 0;
+	u32 num_frames, i;
 	uint64_t cur_ticks = 0, wait_time_ticks = 0;
 	struct dpaa_port *portal = (struct dpaa_port *)port;
 	struct rte_mbuf *mbuf;
 
-	if (unlikely(!RTE_PER_LCORE(dpaa_io))) {
+	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		/* Affine current thread context to a qman portal */
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
@@ -206,7 +207,7 @@ dpaa_event_dequeue_burst(void *port, struct rte_event ev[],
 		if (DPAA_PER_LCORE_DQRR_HELD & (1 << i)) {
 			qman_dca_index(i, 0);
 			mbuf = DPAA_PER_LCORE_DQRR_MBUF(i);
-			mbuf->seqn = DPAA_INVALID_MBUF_SEQN;
+			*dpaa_seqn(mbuf) = DPAA_INVALID_MBUF_SEQN;
 			DPAA_PER_LCORE_DQRR_HELD &= ~(1 << i);
 			DPAA_PER_LCORE_DQRR_SIZE--;
 		}
@@ -223,8 +224,6 @@ dpaa_event_dequeue_burst(void *port, struct rte_event ev[],
 	do {
 		/* Lets dequeue the frames */
 		num_frames = qman_portal_dequeue(ev, nb_events, buffers);
-		if (irq)
-			irq = 0;
 		if (num_frames)
 			break;
 		cur_ticks = rte_get_timer_cycles();
@@ -251,7 +250,7 @@ dpaa_event_dequeue_burst_intr(void *port, struct rte_event ev[],
 	struct dpaa_port *portal = (struct dpaa_port *)port;
 	struct rte_mbuf *mbuf;
 
-	if (unlikely(!RTE_PER_LCORE(dpaa_io))) {
+	if (unlikely(!DPAA_PER_LCORE_PORTAL)) {
 		/* Affine current thread context to a qman portal */
 		ret = rte_dpaa_portal_init((void *)0);
 		if (ret) {
@@ -278,7 +277,7 @@ dpaa_event_dequeue_burst_intr(void *port, struct rte_event ev[],
 		if (DPAA_PER_LCORE_DQRR_HELD & (1 << i)) {
 			qman_dca_index(i, 0);
 			mbuf = DPAA_PER_LCORE_DQRR_MBUF(i);
-			mbuf->seqn = DPAA_INVALID_MBUF_SEQN;
+			*dpaa_seqn(mbuf) = DPAA_INVALID_MBUF_SEQN;
 			DPAA_PER_LCORE_DQRR_HELD &= ~(1 << i);
 			DPAA_PER_LCORE_DQRR_SIZE--;
 		}
@@ -354,10 +353,15 @@ dpaa_event_dev_info_get(struct rte_eventdev *dev,
 	dev_info->max_num_events =
 		DPAA_EVENT_MAX_NUM_EVENTS;
 	dev_info->event_dev_cap =
+		RTE_EVENT_DEV_CAP_ATOMIC |
+		RTE_EVENT_DEV_CAP_PARALLEL |
 		RTE_EVENT_DEV_CAP_DISTRIBUTED_SCHED |
 		RTE_EVENT_DEV_CAP_BURST_MODE |
 		RTE_EVENT_DEV_CAP_MULTIPLE_QUEUE_PORT |
-		RTE_EVENT_DEV_CAP_NONSEQ_MODE;
+		RTE_EVENT_DEV_CAP_NONSEQ_MODE |
+		RTE_EVENT_DEV_CAP_CARRY_FLOW_ID |
+		RTE_EVENT_DEV_CAP_MAINTENANCE_FREE;
+	dev_info->max_profiles_per_port = 1;
 }
 
 static int
@@ -775,10 +779,10 @@ static int
 dpaa_eventdev_crypto_queue_add(const struct rte_eventdev *dev,
 		const struct rte_cryptodev *cryptodev,
 		int32_t rx_queue_id,
-		const struct rte_event *ev)
+		const struct rte_event_crypto_adapter_queue_conf *conf)
 {
 	struct dpaa_eventdev *priv = dev->data->dev_private;
-	uint8_t ev_qid = ev->queue_id;
+	uint8_t ev_qid = conf->ev.queue_id;
 	u16 ch_id = priv->evq_info[ev_qid].ch_id;
 	int ret;
 
@@ -786,10 +790,10 @@ dpaa_eventdev_crypto_queue_add(const struct rte_eventdev *dev,
 
 	if (rx_queue_id == -1)
 		return dpaa_eventdev_crypto_queue_add_all(dev,
-				cryptodev, ev);
+				cryptodev, &conf->ev);
 
 	ret = dpaa_sec_eventq_attach(cryptodev, rx_queue_id,
-			ch_id, ev);
+			ch_id, &conf->ev);
 	if (ret) {
 		DPAA_EVENTDEV_ERR(
 			"dpaa_sec_eventq_attach failed: ret: %d\n", ret);
@@ -926,7 +930,7 @@ dpaa_eventdev_txa_enqueue(void *port,
 	return nb_events;
 }
 
-static struct rte_eventdev_ops dpaa_eventdev_ops = {
+static struct eventdev_ops dpaa_eventdev_ops = {
 	.dev_infos_get    = dpaa_event_dev_info_get,
 	.dev_configure    = dpaa_event_dev_configure,
 	.dev_start        = dpaa_event_dev_start,
@@ -992,14 +996,14 @@ dpaa_event_check_flags(const char *params)
 }
 
 static int
-dpaa_event_dev_create(const char *name, const char *params)
+dpaa_event_dev_create(const char *name, const char *params, struct rte_vdev_device *vdev)
 {
 	struct rte_eventdev *eventdev;
 	struct dpaa_eventdev *priv;
 
 	eventdev = rte_event_pmd_vdev_init(name,
 					   sizeof(struct dpaa_eventdev),
-					   rte_socket_id());
+					   rte_socket_id(), vdev);
 	if (eventdev == NULL) {
 		DPAA_EVENTDEV_ERR("Failed to create eventdev vdev %s", name);
 		goto fail;
@@ -1023,14 +1027,16 @@ dpaa_event_dev_create(const char *name, const char *params)
 	eventdev->txa_enqueue = dpaa_eventdev_txa_enqueue;
 	eventdev->txa_enqueue_same_dest	= dpaa_eventdev_txa_enqueue_same_dest;
 
-	RTE_LOG(INFO, PMD, "%s eventdev added", name);
+	DPAA_EVENTDEV_INFO("%s eventdev added", name);
 
 	/* For secondary processes, the primary has done all the work */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
-		return 0;
+		goto done;
 
 	priv->max_event_queues = DPAA_EVENT_MAX_QUEUES;
 
+done:
+	event_dev_probing_finish(eventdev);
 	return 0;
 fail:
 	return -EFAULT;
@@ -1047,7 +1053,7 @@ dpaa_event_dev_probe(struct rte_vdev_device *vdev)
 
 	params = rte_vdev_device_args(vdev);
 
-	return dpaa_event_dev_create(name, params);
+	return dpaa_event_dev_create(name, params, vdev);
 }
 
 static int
@@ -1069,9 +1075,3 @@ static struct rte_vdev_driver vdev_eventdev_dpaa_pmd = {
 RTE_PMD_REGISTER_VDEV(EVENTDEV_NAME_DPAA_PMD, vdev_eventdev_dpaa_pmd);
 RTE_PMD_REGISTER_PARAM_STRING(EVENTDEV_NAME_DPAA_PMD,
 		DISABLE_INTR_MODE "=<int>");
-RTE_INIT(dpaa_event_init_log)
-{
-	dpaa_logtype_eventdev = rte_log_register("pmd.event.dpaa");
-	if (dpaa_logtype_eventdev >= 0)
-		rte_log_set_level(dpaa_logtype_eventdev, RTE_LOG_NOTICE);
-}

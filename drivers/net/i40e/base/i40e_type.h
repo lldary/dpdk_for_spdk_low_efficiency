@@ -236,6 +236,14 @@ enum i40e_queue_type {
 	I40E_QUEUE_TYPE_UNKNOWN
 };
 
+enum i40e_prt_mac_link_speed {
+	I40E_PRT_MAC_LINK_SPEED_100MB = 0,
+	I40E_PRT_MAC_LINK_SPEED_1GB,
+	I40E_PRT_MAC_LINK_SPEED_10GB,
+	I40E_PRT_MAC_LINK_SPEED_40GB,
+	I40E_PRT_MAC_LINK_SPEED_20GB
+};
+
 struct i40e_link_status {
 	enum i40e_aq_phy_type phy_type;
 	enum i40e_aq_link_speed link_speed;
@@ -329,12 +337,8 @@ struct i40e_phy_info {
 					     I40E_PHY_TYPE_OFFSET)
 #define I40E_CAP_PHY_TYPE_25GBASE_ACC BIT_ULL(I40E_PHY_TYPE_25GBASE_ACC + \
 					     I40E_PHY_TYPE_OFFSET)
-/* Offset for 2.5G/5G PHY Types value to bit number conversion */
-#define I40E_PHY_TYPE_OFFSET2 (-10)
-#define I40E_CAP_PHY_TYPE_2_5GBASE_T BIT_ULL(I40E_PHY_TYPE_2_5GBASE_T + \
-					     I40E_PHY_TYPE_OFFSET2)
-#define I40E_CAP_PHY_TYPE_5GBASE_T BIT_ULL(I40E_PHY_TYPE_5GBASE_T + \
-					     I40E_PHY_TYPE_OFFSET2)
+#define I40E_CAP_PHY_TYPE_2_5GBASE_T BIT_ULL(I40E_PHY_TYPE_2_5GBASE_T)
+#define I40E_CAP_PHY_TYPE_5GBASE_T BIT_ULL(I40E_PHY_TYPE_5GBASE_T)
 #define I40E_HW_CAP_MAX_GPIO			30
 #define I40E_HW_CAP_MDIO_PORT_MODE_MDIO		0
 #define I40E_HW_CAP_MDIO_PORT_MODE_I2C		1
@@ -425,6 +429,7 @@ struct i40e_hw_capabilities {
 	u32 enabled_tcmap;
 	u32 maxtc;
 	u64 wr_csr_prot;
+	bool dis_unused_ports;
 	bool apm_wol_support;
 	enum i40e_acpi_programming_method acpi_prog_method;
 	bool proxy_support;
@@ -745,6 +750,7 @@ struct i40e_hw {
 #define I40E_HW_FLAG_FW_LLDP_PERSISTENT     BIT_ULL(5)
 #define I40E_HW_FLAG_AQ_PHY_ACCESS_EXTENDED BIT_ULL(6)
 #define I40E_HW_FLAG_DROP_MODE		    BIT_ULL(7)
+#define I40E_HW_FLAG_X722_FEC_REQUEST_CAPABLE BIT_ULL(8)
 	u64 flags;
 
 	/* Used in set switch config AQ command */
@@ -811,7 +817,7 @@ union i40e_32byte_rx_desc {
 		__le64  rsvd2;
 	} read;
 	struct {
-		struct {
+		struct i40e_32b_rx_wb_qw0 {
 			struct {
 				union {
 					__le16 mirroring_status;
@@ -849,6 +855,9 @@ union i40e_32byte_rx_desc {
 			} hi_dword;
 		} qword3;
 	} wb;  /* writeback */
+	struct {
+		u64 qword[4];
+	} raw;
 };
 
 #define I40E_RXD_QW0_MIRROR_STATUS_SHIFT	8
@@ -960,7 +969,8 @@ enum i40e_rx_l2_ptype {
 	I40E_RX_PTYPE_GRENAT4_MAC_PAY3			= 58,
 	I40E_RX_PTYPE_GRENAT4_MACVLAN_IPV6_ICMP_PAY4	= 87,
 	I40E_RX_PTYPE_GRENAT6_MAC_PAY3			= 124,
-	I40E_RX_PTYPE_GRENAT6_MACVLAN_IPV6_ICMP_PAY4	= 153
+	I40E_RX_PTYPE_GRENAT6_MACVLAN_IPV6_ICMP_PAY4	= 153,
+	I40E_RX_PTYPE_PARSER_ABORTED			= 255
 };
 
 struct i40e_rx_ptype_decoded {
@@ -1552,6 +1562,9 @@ struct i40e_hw_port_stats {
 #define I40E_SR_FEATURE_CONFIGURATION_PTR	0x49
 #define I40E_SR_CONFIGURATION_METADATA_PTR	0x4D
 #define I40E_SR_IMMEDIATE_VALUES_PTR		0x4E
+#define I40E_SR_PRESERVATION_RULES_PTR		0x70
+#define I40E_X722_SR_5TH_FREE_PROVISION_AREA_PTR	0x71
+#define I40E_SR_6TH_FREE_PROVISION_AREA_PTR	0x71
 
 /* Auxiliary field, mask and shift definition for Shadow RAM and NVM Flash */
 #define I40E_SR_VPD_MODULE_MAX_SIZE		1024
@@ -1975,6 +1988,8 @@ struct i40e_metadata_segment {
 	struct i40e_ddp_version version;
 #define I40E_DDP_TRACKID_RDONLY		0
 #define I40E_DDP_TRACKID_INVALID	0xFFFFFFFF
+#define I40E_DDP_TRACKID_GRP_MSK	0x00FF0000
+#define I40E_DDP_TRACKID_GRP_COMP_ALL	0xFF
 	u32 track_id;
 	char name[I40E_DDP_NAME_SIZE];
 };

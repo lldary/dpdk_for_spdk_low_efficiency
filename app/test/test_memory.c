@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include <rte_eal.h>
+#include <rte_errno.h>
 #include <rte_memory.h>
 #include <rte_common.h>
 #include <rte_memzone.h>
@@ -24,6 +25,11 @@
  * - Try to read all memory; it should not segfault.
  */
 
+/*
+ * ASan complains about accessing unallocated memory.
+ * See: https://bugs.dpdk.org/show_bug.cgi?id=880
+ */
+__rte_no_asan
 static int
 check_mem(const struct rte_memseg_list *msl __rte_unused,
 		const struct rte_memseg *ms, void *arg __rte_unused)
@@ -53,7 +59,7 @@ check_seg_fds(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
 		/* ENOTSUP means segment is valid, but there is not support for
 		 * segment fd API (e.g. on FreeBSD).
 		 */
-		if (errno == ENOTSUP)
+		if (rte_errno == ENOTSUP)
 			return 1;
 		/* all other errors are treated as failures */
 		return -1;
@@ -62,7 +68,7 @@ check_seg_fds(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
 	/* we're able to get memseg fd - try getting its offset */
 	ret = rte_memseg_get_fd_offset_thread_unsafe(ms, &offset);
 	if (ret < 0) {
-		if (errno == ENOTSUP)
+		if (rte_errno == ENOTSUP)
 			return 1;
 		return -1;
 	}
@@ -104,4 +110,4 @@ test_memory(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(memory_autotest, test_memory);
+REGISTER_FAST_TEST(memory_autotest, false, true, test_memory);

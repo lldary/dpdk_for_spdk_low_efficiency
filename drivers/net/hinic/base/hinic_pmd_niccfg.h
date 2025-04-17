@@ -116,15 +116,6 @@ enum hinic_link_mode {
 #define HINIC_DEFAULT_RX_MODE	(HINIC_RX_MODE_UC | HINIC_RX_MODE_MC |	\
 				HINIC_RX_MODE_BC)
 
-#define HINIC_MAX_MTU_SIZE		(9600)
-#define HINIC_MIN_MTU_SIZE		(256)
-
-/* MIN_MTU + ETH_HLEN + CRC (256+14+4) */
-#define HINIC_MIN_FRAME_SIZE		274
-
-/* MAX_MTU + ETH_HLEN + CRC + VLAN(9600+14+4+4) */
-#define HINIC_MAX_JUMBO_FRAME_SIZE	(9622)
-
 #define HINIC_PORT_DISABLE		0x0
 #define HINIC_PORT_ENABLE		0x3
 
@@ -766,6 +757,15 @@ struct hinic_port_qfilter_info {
 	u32 key;
 };
 
+struct hinic_port_tcam_info {
+	struct hinic_mgmt_msg_head mgmt_msg_head;
+
+	u16 func_id;
+	u8 tcam_enable;
+	u8 rsvd1;
+	u32 rsvd2;
+};
+
 #define HINIC_MAX_TCAM_RULES_NUM   (10240)
 #define HINIC_TCAM_BLOCK_ENABLE      1
 #define HINIC_TCAM_BLOCK_DISABLE     0
@@ -900,8 +900,6 @@ int hinic_set_link_status_follow(void *hwdev,
 
 int hinic_get_link_mode(void *hwdev, u32 *supported, u32 *advertised);
 
-int hinic_set_xsfp_tx_status(void *hwdev, bool enable);
-
 int hinic_flush_qp_res(void *hwdev);
 
 int hinic_init_function_table(void *hwdev, u16 rx_buf_sz);
@@ -940,5 +938,7 @@ int hinic_alloc_tcam_block(void *hwdev, u8 block_type, u16 *index);
 int hinic_free_tcam_block(void *hwdev, u8 block_type, u16 *index);
 
 int hinic_flush_tcam_rule(void *hwdev);
+
+int hinic_set_fdir_tcam_rule_filter(void *hwdev, bool enable);
 
 #endif /* _HINIC_PMD_NICCFG_H_ */

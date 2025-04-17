@@ -7,8 +7,7 @@ Flow Bifurcation How-to Guide
 Flow Bifurcation is a mechanism which uses hardware capable Ethernet devices
 to split traffic between Linux user space and kernel space. Since it is a
 hardware assisted feature this approach can provide line rate processing
-capability. Other than :ref:`KNI <kni>`, the software is just required to
-enable device configuration, there is no need to take care of the packet
+capability. There is no need to take care of the packet
 movement during the traffic split. This can yield better performance with
 less CPU overhead.
 
@@ -44,10 +43,10 @@ module.
    Flow Bifurcation Overview
 
 
-Using Flow Bifurcation on Mellanox ConnectX
--------------------------------------------
+Using Flow Bifurcation on NVIDIA ConnectX
+-----------------------------------------
 
-The Mellanox devices are :ref:`natively bifurcated <bifurcated_driver>`,
+The NVIDIA devices are :ref:`natively bifurcated <bifurcated_driver>`,
 so there is no need to split into SR-IOV PF/VF
 in order to get the flow bifurcation mechanism.
 The full device is already shared with the kernel driver.
@@ -55,7 +54,8 @@ The full device is already shared with the kernel driver.
 The DPDK application can setup some flow steering rules,
 and let the rest go to the kernel stack.
 In order to define the filters strictly with flow rules,
-the :ref:`flow_isolated_mode` can be configured.
+the :ref:`flow_isolated_mode` must be configured,
+so there is no default rule routing traffic to userspace.
 
 There is no specific instructions to follow.
 The recommended reading is the :doc:`../prog_guide/rte_flow` guide.

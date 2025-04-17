@@ -11,8 +11,8 @@
 #include <pthread.h>
 
 #include <rte_atomic.h>
-#include <rte_dev.h>
-#include <rte_ethdev_driver.h>
+#include <dev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_devargs.h>
 #include <rte_flow.h>
 #include <rte_interrupts.h>
@@ -149,7 +149,7 @@ struct fs_priv {
 	/*
 	 * Set of sub_devices.
 	 * subs[0] is the preferred device
-	 * any other is just another slave
+	 * any other is just another sub device
 	 */
 	struct sub_device *subs;  /* shared between processes */
 	uint8_t subs_head; /* if head == tail, no subs */
@@ -166,7 +166,7 @@ struct fs_priv {
 	struct rte_ether_addr *mcast_addrs;
 	/* current capabilities */
 	struct rte_eth_dev_owner my_owner; /* Unique owner. */
-	struct rte_intr_handle intr_handle; /* Port interrupt handle. */
+	struct rte_intr_handle *intr_handle; /* Port interrupt handle. */
 	/*
 	 * Fail-safe state machine.
 	 * This level will be tracking state of the EAL and eth
@@ -236,6 +236,7 @@ int failsafe_eal_uninit(struct rte_eth_dev *dev);
 
 int failsafe_eth_dev_state_sync(struct rte_eth_dev *dev);
 void failsafe_eth_dev_unregister_callbacks(struct sub_device *sdev);
+int failsafe_eth_dev_close(struct rte_eth_dev *dev);
 void failsafe_dev_remove(struct rte_eth_dev *dev);
 void failsafe_stats_increment(struct rte_eth_stats *to,
 				struct rte_eth_stats *from);

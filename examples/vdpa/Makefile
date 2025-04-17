@@ -6,10 +6,15 @@ APP = vdpa
 
 # all source are stored in SRCS-y
 SRCS-y := main.c
+SRC-DEPS := build/commands.h
 CFLAGS += -DALLOW_EXPERIMENTAL_API
 
+PKGCONF ?= pkg-config
+
 # Build using pkg-config variables if possible
-ifeq ($(shell pkg-config --exists libdpdk && echo 0),0)
+ifneq ($(shell $(PKGCONF) --exists libdpdk && echo 0),0)
+$(error "no installation of DPDK found")
+endif
 
 all: shared
 .PHONY: shared static
@@ -18,17 +23,26 @@ shared: build/$(APP)-shared
 static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-PKGCONF ?= pkg-config
-
 PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
-CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
+CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk) -I build/
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
-LDFLAGS_STATIC = -Wl,-Bstatic $(shell $(PKGCONF) --static --libs libdpdk)
+LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
 
-build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
+build/commands.h: commands.list Makefile
+	dpdk-cmdline-gen.py -o $@ --context-name=main_ctx $<
+
+ifeq ($(MAKECMDGOALS),static)
+# check for broken pkg-config
+ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
+$(warning "pkg-config output list does not contain drivers between 'whole-archive'/'no-whole-archive' flags.")
+$(error "Cannot generate statically-linked binaries with this version of pkg-config")
+endif
+endif
+
+build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build $(SRC-DEPS)
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
-build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build
+build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build $(SRC-DEPS)
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
@@ -36,33 +50,5 @@ build:
 
 .PHONY: clean
 clean:
-	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared
+	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared build/*.h
 	test -d build && rmdir -p build || true
-
-else
-
-ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
-endif
-
-# Default target, detect a build directory, by looking for a path with a .config
-RTE_TARGET ?= $(notdir $(abspath $(dir $(firstword $(wildcard $(RTE_SDK)/*/.config)))))
-
-include $(RTE_SDK)/mk/rte.vars.mk
-
-ifneq ($(CONFIG_RTE_EXEC_ENV_LINUX),y)
-$(info This application can only operate in a linux environment, \
-please change the definition of the RTE_TARGET environment variable)
-all:
-else
-
-CFLAGS += -O2 -D_FILE_OFFSET_BITS=64
-CFLAGS += $(WERROR_FLAGS)
-CFLAGS += -D_GNU_SOURCE
-CFLAGS += -DALLOW_EXPERIMENTAL_API
-
-include $(RTE_SDK)/mk/rte.extapp.mk
-
-endif # linuxapp
-
-endif # pkg-config

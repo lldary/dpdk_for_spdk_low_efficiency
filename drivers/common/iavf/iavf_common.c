@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2021 Intel Corporation
  */
 
 #include "iavf_type.h"
@@ -27,6 +27,8 @@ enum iavf_status iavf_set_mac_type(struct iavf_hw *hw)
 			break;
 		case IAVF_DEV_ID_VF:
 		case IAVF_DEV_ID_VF_HV:
+			hw->mac.type = IAVF_MAC_XL710;
+			break;
 		case IAVF_DEV_ID_ADAPTIVE_VF:
 			hw->mac.type = IAVF_MAC_VF;
 			break;
@@ -975,6 +977,7 @@ void iavf_vf_parse_hw_config(struct iavf_hw *hw,
 	hw->dev_caps.num_msix_vectors_vf = msg->max_vectors;
 	hw->dev_caps.dcb = msg->vf_cap_flags &
 			   VIRTCHNL_VF_OFFLOAD_L2;
+	hw->dev_caps.max_mtu = msg->max_mtu;
 	for (i = 0; i < msg->num_vsis; i++) {
 		if (vsi_res->vsi_type == VIRTCHNL_VSI_SRIOV) {
 			iavf_memcpy(hw->mac.perm_addr,

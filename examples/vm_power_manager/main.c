@@ -31,13 +31,13 @@
 #include "vm_power_cli.h"
 #include "oob_monitor.h"
 #include "parse.h"
-#ifdef RTE_LIBRTE_IXGBE_PMD
+#ifdef RTE_NET_IXGBE
 #include <rte_pmd_ixgbe.h>
 #endif
-#ifdef RTE_LIBRTE_I40E_PMD
+#ifdef RTE_NET_I40E
 #include <rte_pmd_i40e.h>
 #endif
-#ifdef RTE_LIBRTE_BNXT_PMD
+#ifdef RTE_NET_BNXT
 #include <rte_pmd_bnxt.h>
 #endif
 
@@ -51,17 +51,10 @@
 static uint32_t enabled_port_mask;
 static volatile bool force_quit;
 
-/****************/
-static const struct rte_eth_conf port_conf_default = {
-	.rxmode = {
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
-	},
-};
-
 static inline int
 port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
-	struct rte_eth_conf port_conf = port_conf_default;
+	struct rte_eth_conf port_conf;
 	const uint16_t rx_rings = 1, tx_rings = 1;
 	int retval;
 	uint16_t q;
@@ -71,6 +64,8 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	if (!rte_eth_dev_is_valid_port(port))
 		return -1;
 
+	memset(&port_conf, 0, sizeof(struct rte_eth_conf));
+
 	retval = rte_eth_dev_info_get(port, &dev_info);
 	if (retval != 0) {
 		printf("Error during getting device (port %u) info: %s\n",
@@ -78,9 +73,9 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 	}
 
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 		port_conf.txmode.offloads |=
-			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 	/* Configure the Ethernet device. */
 	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
@@ -121,10 +116,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 	printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
-			(unsigned int)port,
-			addr.addr_bytes[0], addr.addr_bytes[1],
-			addr.addr_bytes[2], addr.addr_bytes[3],
-			addr.addr_bytes[4], addr.addr_bytes[5]);
+			(unsigned int)port, RTE_ETHER_ADDR_BYTES(&addr));
 
 	/* Enable RX in promiscuous mode for the Ethernet device. */
 	retval = rte_eth_promiscuous_enable(port);
@@ -144,10 +136,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -165,15 +154,14 @@ parse_args(int argc, char **argv)
 	static struct option lgopts[] = {
 		{ "mac-updating", no_argument, 0, 1},
 		{ "no-mac-updating", no_argument, 0, 0},
-		{ "core-list", optional_argument, 0, 'l'},
+		{ "core-branch-ratio", optional_argument, 0, 'b'},
 		{ "port-list", optional_argument, 0, 'p'},
-		{ "branch-ratio", optional_argument, 0, 'b'},
 		{NULL, 0, 0, 0}
 	};
 	argvopt = argv;
 	ci = get_core_info();
 
-	while ((opt = getopt_long(argc, argvopt, "l:p:q:T:b:",
+	while ((opt = getopt_long(argc, argvopt, "p:q:T:b:",
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
@@ -185,7 +173,8 @@ parse_args(int argc, char **argv)
 				return -1;
 			}
 			break;
-		case 'l':
+		case 'b':
+			branch_ratio = BRANCH_RATIO_THRESHOLD;
 			oob_enable = malloc(ci->core_count * sizeof(uint16_t));
 			if (oob_enable == NULL) {
 				printf("Error - Unable to allocate memory\n");
@@ -193,31 +182,37 @@ parse_args(int argc, char **argv)
 			}
 			cnt = parse_set(optarg, oob_enable, ci->core_count);
 			if (cnt < 0) {
-				printf("Invalid core-list - [%s]\n",
+				printf("Invalid core-list section in "
+				       "core-branch-ratio matrix - [%s]\n",
 						optarg);
 				free(oob_enable);
 				break;
 			}
+			cnt = parse_branch_ratio(optarg, &branch_ratio);
+			if (cnt < 0) {
+				printf("Invalid branch-ratio section in "
+				       "core-branch-ratio matrix - [%s]\n",
+						optarg);
+				free(oob_enable);
+				break;
+			}
+			if (branch_ratio <= 0.0 || branch_ratio > 100.0) {
+				printf("invalid branch ratio specified\n");
+				free(oob_enable);
+				return -1;
+			}
 			for (i = 0; i < ci->core_count; i++) {
 				if (oob_enable[i]) {
-					printf("***Using core %d\n", i);
+					printf("***Using core %d "
+					       "with branch ratio %f\n",
+					       i, branch_ratio);
 					ci->cd[i].oob_enabled = 1;
 					ci->cd[i].global_enabled_cpus = 1;
+					ci->cd[i].branch_ratio_threshold =
+								branch_ratio;
 				}
 			}
 			free(oob_enable);
-			break;
-		case 'b':
-			branch_ratio = 0.0;
-			if (strlen(optarg))
-				branch_ratio = atof(optarg);
-			if (branch_ratio <= 0.0) {
-				printf("invalid branch ratio specified\n");
-				return -1;
-			}
-			ci->branch_ratio_threshold = branch_ratio;
-			printf("***Setting branch ratio to %f\n",
-					branch_ratio);
 			break;
 		/* long options */
 		case 0:
@@ -244,6 +239,7 @@ check_all_ports_link_status(uint32_t port_mask)
 	uint16_t portid, count, all_ports_up, print_flag = 0;
 	struct rte_eth_link link;
 	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -267,19 +263,14 @@ check_all_ports_link_status(uint32_t port_mask)
 			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf("Port %d Link Up - speed %u "
-						"Mbps - %s\n", (uint16_t)portid,
-						(unsigned int)link.link_speed,
-				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex"));
-				else
-					printf("Port %d Link Down\n",
-						(uint16_t)portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text), &link);
+				printf("Port %d %s\n", portid,
+				       link_status_text);
 				continue;
 			}
 		       /* clear all_ports_up flag if any link down */
-			if (link.link_status == ETH_LINK_DOWN) {
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -395,20 +386,20 @@ main(int argc, char **argv)
 					"Cannot init port %"PRIu8 "\n",
 					portid);
 
-			for (w = 0; w < MAX_VFS; w++) {
+			for (w = 0; w < RTE_POWER_MAX_VFS; w++) {
 				eth.addr_bytes[5] = w + 0xf0;
 
 				ret = -ENOTSUP;
-#ifdef RTE_LIBRTE_IXGBE_PMD
+#ifdef RTE_NET_IXGBE
 				ret = rte_pmd_ixgbe_set_vf_mac_addr(portid,
 							w, &eth);
 #endif
-#ifdef RTE_LIBRTE_I40E_PMD
+#ifdef RTE_NET_I40E
 				if (ret == -ENOTSUP)
 					ret = rte_pmd_i40e_set_vf_mac_addr(
 							portid, w, &eth);
 #endif
-#ifdef RTE_LIBRTE_BNXT_PMD
+#ifdef RTE_NET_BNXT
 				if (ret == -ENOTSUP)
 					ret = rte_pmd_bnxt_set_vf_mac_addr(
 							portid, w, &eth);
@@ -468,6 +459,9 @@ main(int argc, char **argv)
 	rte_eal_mp_wait_lcore();
 
 	free(ci->cd);
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }

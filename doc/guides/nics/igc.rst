@@ -4,42 +4,27 @@
 IGC Poll Mode Driver
 ======================
 
-The IGC PMD (librte_pmd_igc) provides poll mode driver support for Foxville
-I225 Series Network Adapters.
+The IGC PMD (**librte_net_igc**) provides poll mode driver support for Foxville
+I225 and I226 Series Network Adapters.
 
-- For information about I225, please refer to:
-  `https://ark.intel.com/content/www/us/en/ark/products/series/184686/
-  intel-ethernet-controller-i225-series.html`
+- For information about I225, please refer to: `Intel® Ethernet Controller I225 Series
+  <https://ark.intel.com/content/www/us/en/ark/products/series/184686/intel-ethernet-controller-i225-series.html>`_.
+- For information about I226, please refer to: `Intel® Ethernet Controller I226 Series
+  <https://ark.intel.com/content/www/us/en/ark/products/series/210588/intel-ethernet-controller-i226-series.html>`_.
 
-Config File Options
-~~~~~~~~~~~~~~~~~~~
+Supported Chipsets and NICs
+---------------------------
 
-The following options can be modified in the ``config`` file.
-Please note that enabling debugging options may affect system performance.
-
-- ``CONFIG_RTE_LIBRTE_IGC_PMD`` (default ``y``)
-
-  Toggle compilation of the ``librte_pmd_igc`` driver.
-
-- ``CONFIG_RTE_LIBRTE_IGC_DEBUG_*`` (default ``n``)
-
-  Toggle display of generic debugging messages.
-
+- Foxville LM (I225 LM, I226 LM): Client 2.5G LAN vPro Corporate
+- Foxville V (I225 V, I226 V): Client 2.5G LAN Consumer
+- Foxville I (I225 I, I226 IM): Client 2.5G Industrial Temp
+- Foxville V (I225 K, I226 K): Client 2.5G LAN Consumer
 
 Driver compilation and testing
 ------------------------------
 
 Refer to the document :ref:`compiling and testing a PMD for a NIC <pmd_build_and_test>`
 for details.
-
-
-Supported Chipsets and NICs
----------------------------
-
-Foxville LM (I225 LM): Client 2.5G LAN vPro Corporate
-Foxville V (I225 V): Client 2.5G LAN Consumer
-Foxville I (I225 I): Client 2.5G Industrial Temp
-Foxville V (I225 K): Client 2.5G LAN Consumer
 
 
 Sample Application Notes
@@ -67,7 +52,7 @@ outer VLAN to 0x9100:
 
 .. code-block:: console
 
-   ./app/testpmd -l 4-8 -- -i
+   ./app/dpdk-testpmd -l 4-8 -- -i
    ...
 
    testpmd> vlan set filter on 0
@@ -94,7 +79,7 @@ Start ``testpmd``:
 
 .. code-block:: console
 
-   ./testpmd -l 4-8 -- i --rxq=4 --txq=4 --pkt-filter-mode=perfect --disable-rss
+   ./dpdk-testpmd -l 4-8 -- i --rxq=4 --txq=4 --pkt-filter-mode=perfect --disable-rss
 
 Add a rule to direct packet whose ``ether-type=0x801`` to queue 1:
 

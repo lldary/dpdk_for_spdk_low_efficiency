@@ -122,7 +122,7 @@ static inline uint32_t hashword(const uint32_t *k,
 				size_t length,
 				uint32_t initval) {
 	uint32_t a, b, c;
-	int index = 12;
+	int index = length - 1;
 
 	/* Set up the internal state */
 	a = 0xdeadbeef + (((uint32_t)length) << 2) + initval;
@@ -152,11 +152,9 @@ static inline uint32_t hashword(const uint32_t *k,
 		final(a, b, c);
 		/* Falls through. */
 	case 0:	    /* case 0: nothing left to add */
-		/* FALLTHROUGH */
 		break;
 	}
 	/*------------------------------------------------- report the result */
 	return c;
 }
-
 #endif /* _LOOKUP3_H_ */

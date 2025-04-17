@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2019-2021 Xilinx, Inc.
  * Copyright(c) 2017-2019 Solarflare Communications Inc.
  *
  * This software was jointly developed between OKTET Labs (under contract
@@ -9,6 +9,8 @@
 
 #ifndef _SFC_EF10_H
 #define _SFC_EF10_H
+
+#include "sfc_debug.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +21,15 @@ extern "C" {
 	(RTE_CACHE_LINE_SIZE / sizeof(efx_qword_t))
 
 #define SFC_EF10_EV_QCLEAR_MASK		(~(SFC_EF10_EV_PER_CACHE_LINE - 1))
+
+/*
+ * Use simple libefx-based implementation of the
+ * sfc_ef10_ev_qclear_cache_line() if SSE2 is not available
+ * since optimized implementation uses __m128i intrinsics.
+ */
+#ifndef __SSE2__
+#define SFC_EF10_EV_QCLEAR_USE_EFX
+#endif
 
 #if defined(SFC_EF10_EV_QCLEAR_USE_EFX)
 static inline void
@@ -38,8 +49,8 @@ sfc_ef10_ev_qclear_cache_line(void *ptr)
 static inline void
 sfc_ef10_ev_qclear_cache_line(void *ptr)
 {
-	const __m128i val = _mm_set1_epi64x(UINT64_MAX);
-	__m128i *addr = ptr;
+	const efsys_uint128_t val = _mm_set1_epi64x(UINT64_MAX);
+	efsys_uint128_t *addr = ptr;
 	unsigned int i;
 
 	RTE_BUILD_BUG_ON(sizeof(val) > RTE_CACHE_LINE_SIZE);
@@ -88,7 +99,7 @@ sfc_ef10_ev_present(const efx_qword_t ev)
 
 static inline void
 sfc_ef10_rx_qpush(volatile void *doorbell, unsigned int added,
-		  unsigned int ptr_mask)
+		  unsigned int ptr_mask, uint32_t *dbell_counter)
 {
 	efx_dword_t dword;
 
@@ -107,6 +118,7 @@ sfc_ef10_rx_qpush(volatile void *doorbell, unsigned int added,
 	 * operations that follow it (i.e. doorbell write).
 	 */
 	rte_write32(dword.ed_u32[0], doorbell);
+	(*dbell_counter)++;
 }
 
 static inline void
@@ -122,7 +134,8 @@ sfc_ef10_ev_qprime(volatile void *qprime, unsigned int read_ptr,
 }
 
 
-const uint32_t * sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps);
+const uint32_t *sfc_ef10_supported_ptypes_get(uint32_t tunnel_encaps,
+					      size_t *no_of_elements);
 
 
 #ifdef __cplusplus

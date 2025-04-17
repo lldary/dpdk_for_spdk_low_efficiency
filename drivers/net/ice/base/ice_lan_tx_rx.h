@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #ifndef _ICE_LAN_TX_RX_H_
@@ -175,6 +175,50 @@ struct ice_fltr_desc {
 			(0xFFFFFFFFULL << ICE_FXD_FLTR_QW1_FDID_S)
 #define ICE_FXD_FLTR_QW1_FDID_ZERO	0x0ULL
 
+/* definition for FD filter programming status descriptor WB format */
+#define ICE_FXD_FLTR_WB_QW0_BUKT_LEN_S	28
+#define ICE_FXD_FLTR_WB_QW0_BUKT_LEN_M	\
+			(0xFULL << ICE_FXD_FLTR_WB_QW0_BUKT_LEN_S)
+
+#define ICE_FXD_FLTR_WB_QW0_FLTR_STAT_S	32
+#define ICE_FXD_FLTR_WB_QW0_FLTR_STAT_M	\
+			(0xFFFFFFFFULL << ICE_FXD_FLTR_WB_QW0_FLTR_STAT_S)
+
+#define ICE_FXD_FLTR_WB_QW1_DD_S	0
+#define ICE_FXD_FLTR_WB_QW1_DD_M	(0x1ULL << ICE_FXD_FLTR_WB_QW1_DD_S)
+#define ICE_FXD_FLTR_WB_QW1_DD_YES	0x1ULL
+
+#define ICE_FXD_FLTR_WB_QW1_PROG_ID_S	1
+#define ICE_FXD_FLTR_WB_QW1_PROG_ID_M	\
+				(0x3ULL << ICE_FXD_FLTR_WB_QW1_PROG_ID_S)
+#define ICE_FXD_FLTR_WB_QW1_PROG_ADD	0x0ULL
+#define ICE_FXD_FLTR_WB_QW1_PROG_DEL	0x1ULL
+
+#define ICE_FXD_FLTR_WB_QW1_FAIL_S	4
+#define ICE_FXD_FLTR_WB_QW1_FAIL_M	(0x1ULL << ICE_FXD_FLTR_WB_QW1_FAIL_S)
+#define ICE_FXD_FLTR_WB_QW1_FAIL_YES	0x1ULL
+
+#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_S	5
+#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_M	\
+				(0x1ULL << ICE_FXD_FLTR_WB_QW1_FAIL_PROF_S)
+#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_YES	0x1ULL
+
+#define ICE_FXD_FLTR_WB_QW1_FLT_ADDR_S	8
+#define ICE_FXD_FLTR_WB_QW1_FLT_ADDR_M	\
+				(0x3FFFULL << ICE_FXD_FLTR_WB_QW1_FLT_ADDR_S)
+
+#define ICE_FXD_FLTR_WB_QW1_PKT_PROF_S	28
+#define ICE_FXD_FLTR_WB_QW1_PKT_PROF_M	\
+				(0x7FULL << ICE_FXD_FLTR_WB_QW1_PKT_PROF_S)
+
+#define ICE_FXD_FLTR_WB_QW1_BUKT_HASH_S	38
+#define ICE_FXD_FLTR_WB_QW1_BUKT_HASH_M	\
+				(0x3FFFFFF << ICE_FXD_FLTR_WB_QW1_BUKT_HASH_S)
+
+#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_M	\
+				(0x1ULL << ICE_FXD_FLTR_WB_QW1_FAIL_PROF_S)
+#define ICE_FXD_FLTR_WB_QW1_FAIL_PROF_YES	0x1ULL
+
 enum ice_rx_desc_status_bits {
 	/* Note: These are predefined bit offsets */
 	ICE_RX_DESC_STATUS_DD_S			= 0,
@@ -252,7 +296,6 @@ enum ice_rx_l2_ptype {
 };
 
 struct ice_rx_ptype_decoded {
-	u32 ptype:10;
 	u32 known:1;
 	u32 outer_ip:1;
 	u32 outer_ip_ver:2;
@@ -479,6 +522,46 @@ struct ice_32b_rx_flex_desc_nic {
 	} flex_ts;
 };
 
+/* Rx Flex Descriptor NIC Raw CSUM Profile
+ * RxDID Profile ID 9
+ * Flex-field 0: RSS hash lower 16-bits
+ * Flex-field 1: RSS hash upper 16-bits
+ * Flex-field 2: Flow ID lower 16-bits
+ * Flex-field 3: Raw CSUM
+ * Flex-field 4: reserved, VLAN ID taken from L2Tag
+ */
+struct ice_32b_rx_flex_desc_nic_raw_csum {
+	/* Qword 0 */
+	u8 rxdid;
+	u8 mir_id_umb_cast;
+	__le16 ptype_flexi_flags0;
+	__le16 pkt_len;
+	__le16 hdr_len_sph_flex_flags1;
+
+	/* Qword 1 */
+	__le16 status_error0;
+	__le16 l2tag1;
+	__le32 rss_hash;
+
+	/* Qword 2 */
+	__le16 status_error1; /* bit 11 Raw CSUM present */
+	u8 flexi_flags2;
+	u8 ts_low;
+	__le16 l2tag2_1st;
+	__le16 l2tag2_2nd;
+
+	/* Qword 3 */
+	__le16 flow_id;
+	__le16 raw_csum;
+	union {
+		struct {
+			__le16 rsvd;
+			__le16 flow_id_ipv6;
+		} flex;
+		__le32 ts_high;
+	} flex_ts;
+};
+
 /* Rx Flex Descriptor Switch Profile
  * RxDID Profile ID 3
  * Flex-field 0: Source VSI
@@ -665,12 +748,14 @@ enum ice_rxdid {
 	ICE_RXDID_FLEX_NIC		= 2,
 	ICE_RXDID_FLEX_NIC_2		= 6,
 	ICE_RXDID_HW			= 7,
+	ICE_RXDID_GSC			= 9,
 	ICE_RXDID_COMMS_GENERIC		= 16,
 	ICE_RXDID_COMMS_AUX_VLAN	= 17,
 	ICE_RXDID_COMMS_AUX_IPV4	= 18,
 	ICE_RXDID_COMMS_AUX_IPV6	= 19,
 	ICE_RXDID_COMMS_AUX_IPV6_FLOW	= 20,
 	ICE_RXDID_COMMS_AUX_TCP		= 21,
+	ICE_RXDID_COMMS_AUX_IP_OFFSET   = 25,
 	ICE_RXDID_LAST			= 63,
 };
 
@@ -835,6 +920,14 @@ enum ice_rx_flex_desc_exstat_bits {
 	ICE_RX_FLEX_DESC_EXSTAT_OVERSIZE_S = 3,
 };
 
+/* For ice_32b_rx_flex_desc.ts_low:
+ * [0]: Timestamp-low validity bit
+ * [1:7]: Timestamp-low value
+ */
+#define ICE_RX_FLEX_DESC_TS_L_VALID_S	0x01
+#define ICE_RX_FLEX_DESC_TS_L_VALID_M	ICE_RX_FLEX_DESC_TS_L_VALID_S
+#define ICE_RX_FLEX_DESC_TS_L_M		0xFE
+
 #define ICE_RXQ_CTX_SIZE_DWORDS		8
 #define ICE_RXQ_CTX_SZ			(ICE_RXQ_CTX_SIZE_DWORDS * sizeof(u32))
 #define ICE_TX_CMPLTNQ_CTX_SIZE_DWORDS	22
@@ -977,9 +1070,14 @@ enum ice_tx_desc_len_fields {
 struct ice_tx_ctx_desc {
 	__le32 tunneling_params;
 	__le16 l2tag2;
-	__le16 rsvd;
+	__le16 gsc;
 	__le64 qw1;
 };
+
+#define ICE_TX_GSC_DESC_START	0  /* 7 BITS */
+#define ICE_TX_GSC_DESC_OFFSET	7  /* 4 BITS */
+#define ICE_TX_GSC_DESC_TYPE	11 /* 2 BITS */
+#define ICE_TX_GSC_DESC_ENA	13 /* 1 BIT */
 
 #define ICE_TXD_CTX_QW1_DTYPE_S	0
 #define ICE_TXD_CTX_QW1_DTYPE_M	(0xFUL << ICE_TXD_CTX_QW1_DTYPE_S)
@@ -1091,7 +1189,8 @@ struct ice_tlan_ctx {
 	u8 drop_ena;
 	u8 cache_prof_idx;
 	u8 pkt_shaper_prof_idx;
-	u8 int_q_state;	/* width not needed - internal do not write */
+	u8 gsc_ena;
+	u8 int_q_state;	/* width not needed - internal - DO NOT WRITE!!! */
 };
 
 /* LAN Tx Completion Queue data */
@@ -1103,7 +1202,6 @@ struct ice_tx_cmpltnq {
 	u8 cmpl_type;
 };
 #pragma pack()
-
 
 /* LAN Tx Completion Queue Context */
 #pragma pack(1)
@@ -1173,8 +1271,7 @@ struct ice_tx_drbell_q_ctx {
 
 /* macro to make the table lines short */
 #define ICE_PTT(PTYPE, OUTER_IP, OUTER_IP_VER, OUTER_FRAG, T, TE, TEF, I, PL)\
-	{	PTYPE, \
-		1, \
+	{	1, \
 		ICE_RX_PTYPE_OUTER_##OUTER_IP, \
 		ICE_RX_PTYPE_OUTER_##OUTER_IP_VER, \
 		ICE_RX_PTYPE_##OUTER_FRAG, \
@@ -1184,18 +1281,18 @@ struct ice_tx_drbell_q_ctx {
 		ICE_RX_PTYPE_INNER_PROT_##I, \
 		ICE_RX_PTYPE_PAYLOAD_LAYER_##PL }
 
-#define ICE_PTT_UNUSED_ENTRY(PTYPE) { PTYPE, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+#define ICE_PTT_UNUSED_ENTRY(PTYPE) { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
 /* shorter macros makes the table fit but are terse */
 #define ICE_RX_PTYPE_NOF		ICE_RX_PTYPE_NOT_FRAG
 #define ICE_RX_PTYPE_FRG		ICE_RX_PTYPE_FRAG
 
-/* Lookup table mapping the HW PTYPE to the bit field for decoding */
-static const struct ice_rx_ptype_decoded ice_ptype_lkup[] = {
+/* Lookup table mapping the 10-bit HW PTYPE to the bit field for decoding */
+static const struct ice_rx_ptype_decoded ice_ptype_lkup[1024] = {
 	/* L2 Packet types */
 	ICE_PTT_UNUSED_ENTRY(0),
 	ICE_PTT(1, L2, NONE, NOF, NONE, NONE, NOF, NONE, PAY2),
-	ICE_PTT(2, L2, NONE, NOF, NONE, NONE, NOF, NONE, NONE),
+	ICE_PTT_UNUSED_ENTRY(2),
 	ICE_PTT_UNUSED_ENTRY(3),
 	ICE_PTT_UNUSED_ENTRY(4),
 	ICE_PTT_UNUSED_ENTRY(5),
@@ -1309,7 +1406,7 @@ static const struct ice_rx_ptype_decoded ice_ptype_lkup[] = {
 	/* Non Tunneled IPv6 */
 	ICE_PTT(88, IP, IPV6, FRG, NONE, NONE, NOF, NONE, PAY3),
 	ICE_PTT(89, IP, IPV6, NOF, NONE, NONE, NOF, NONE, PAY3),
-	ICE_PTT(90, IP, IPV6, NOF, NONE, NONE, NOF, UDP,  PAY3),
+	ICE_PTT(90, IP, IPV6, NOF, NONE, NONE, NOF, UDP,  PAY4),
 	ICE_PTT_UNUSED_ENTRY(91),
 	ICE_PTT(92, IP, IPV6, NOF, NONE, NONE, NOF, TCP,  PAY4),
 	ICE_PTT(93, IP, IPV6, NOF, NONE, NONE, NOF, SCTP, PAY4),

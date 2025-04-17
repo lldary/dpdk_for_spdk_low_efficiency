@@ -13,10 +13,11 @@ extern "C" {
 #endif
 
 #include <dpaa_rbtree.h>
+#include <rte_compat.h>
 #include <rte_eventdev.h>
 
 /* FQ lookups (turn this on for 64bit user-space) */
-#if (__WORDSIZE == 64)
+#ifdef RTE_ARCH_64
 #define CONFIG_FSL_QMAN_FQ_LOOKUP
 /* if FQ lookups are supported, this controls the number of initialised,
  * s/w-consumed FQs that can be supported at any one time.
@@ -1158,6 +1159,10 @@ typedef void (*qman_cb_mr)(struct qman_portal *qm, struct qman_fq *fq,
 /* This callback type is used when handling DCP ERNs */
 typedef void (*qman_cb_dc_ern)(struct qman_portal *qm,
 				const struct qm_mr_entry *msg);
+
+/* This callback function will be used to free mbufs of ERN */
+typedef uint16_t (*qman_cb_free_mbuf)(const struct qm_fd *fd);
+
 /*
  * s/w-visible states. Ie. tentatively scheduled + truly scheduled + active +
  * held-active + held-suspended are just "sched". Things like "retired" will not
@@ -1225,6 +1230,7 @@ struct qman_fq {
 
 	int q_fd;
 	u16 ch_id;
+	int8_t vsp_id;
 	u8 cgr_groupid;
 	u8 is_static:4;
 	u8 qp_initialized:4;
@@ -1247,6 +1253,9 @@ struct qman_fq {
 	void **qman_fq_lookup_table;
 	u32 key;
 #endif
+	u16 nb_desc;
+	u16 resv;
+	u64 offloads;
 };
 
 /*
@@ -1345,7 +1354,7 @@ __rte_internal
 int qman_irqsource_add(u32 bits);
 
 /**
- * qman_fq_portal_irqsource_add - samilar to qman_irqsource_add, but it
+ * qman_fq_portal_irqsource_add - similar to qman_irqsource_add, but it
  * takes portal (fq specific) as input rather than using the thread affined
  * portal.
  */
@@ -1408,7 +1417,7 @@ __rte_internal
 struct qm_dqrr_entry *qman_dequeue(struct qman_fq *fq);
 
 /**
- * qman_dqrr_consume - Consume the DQRR entriy after volatile dequeue
+ * qman_dqrr_consume - Consume the DQRR entry after volatile dequeue
  * @fq: Frame Queue on which the volatile dequeue command is issued
  * @dq: DQRR entry to consume. This is the one which is provided by the
  *    'qbman_dequeue' command.
@@ -1809,6 +1818,19 @@ int qman_enqueue_multi(struct qman_fq *fq, const struct qm_fd *fd, u32 *flags,
 		       int frames_to_send);
 
 /**
+ * qman_ern_poll_free - Polling on MR and calling a callback function to free
+ * mbufs when SW ERNs received.
+ */
+__rte_internal
+void qman_ern_poll_free(void);
+
+/**
+ * qman_ern_register_cb - Register a callback function to free buffers.
+ */
+__rte_internal
+void qman_ern_register_cb(qman_cb_free_mbuf cb);
+
+/**
  * qman_enqueue_multi_fq - Enqueue multiple frames to their respective frame
  * queues.
  * @fq[]: Array of frame queue objects to enqueue to
@@ -1876,6 +1898,7 @@ int qman_enqueue_orp(struct qman_fq *fq, const struct qm_fd *fd, u32 flags,
  * FQs than requested (though alignment will be as requested). If @partial is
  * zero, the return value will either be 'count' or negative.
  */
+__rte_internal
 int qman_alloc_fqid_range(u32 *result, u32 count, u32 align, int partial);
 static inline int qman_alloc_fqid(u32 *result)
 {
@@ -1995,7 +2018,7 @@ int qman_create_cgr_to_dcp(struct qman_cgr *cgr, u32 flags, u16 dcp_portal,
  * @cgr: the 'cgr' object to deregister
  *
  * "Unplugs" this CGR object from the portal affine to the cpu on which this API
- * is executed. This must be excuted on the same affine portal on which it was
+ * is executed. This must be executed on the same affine portal on which it was
  * created.
  */
 __rte_internal

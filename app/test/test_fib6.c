@@ -38,6 +38,7 @@ test_create_invalid(void)
 	struct rte_fib6_conf config;
 
 	config.max_routes = MAX_ROUTES;
+	config.rib_ext_sz = 0;
 	config.default_nh = 0;
 	config.type = RTE_FIB6_DUMMY;
 
@@ -63,7 +64,7 @@ test_create_invalid(void)
 		"Call succeeded with invalid parameters\n");
 	config.max_routes = MAX_ROUTES;
 
-	config.type = RTE_FIB6_TYPE_MAX;
+	config.type = RTE_FIB6_TRIE + 1;
 	fib = rte_fib6_create(__func__, SOCKET_ID_ANY, &config);
 	RTE_TEST_ASSERT(fib == NULL,
 		"Call succeeded with invalid parameters\n");
@@ -96,6 +97,7 @@ test_multiple_create(void)
 	struct rte_fib6_conf config;
 	int32_t i;
 
+	config.rib_ext_sz = 0;
 	config.default_nh = 0;
 	config.type = RTE_FIB6_DUMMY;
 
@@ -122,6 +124,7 @@ test_free_null(void)
 	struct rte_fib6_conf config;
 
 	config.max_routes = MAX_ROUTES;
+	config.rib_ext_sz = 0;
 	config.default_nh = 0;
 	config.type = RTE_FIB6_DUMMY;
 
@@ -149,6 +152,7 @@ test_add_del_invalid(void)
 	uint8_t depth = 24;
 
 	config.max_routes = MAX_ROUTES;
+	config.rib_ext_sz = 0;
 	config.default_nh = 0;
 	config.type = RTE_FIB6_DUMMY;
 
@@ -338,6 +342,7 @@ test_lookup(void)
 	int ret;
 
 	config.max_routes = MAX_ROUTES;
+	config.rib_ext_sz = 0;
 	config.default_nh = def_nh;
 	config.type = RTE_FIB6_DUMMY;
 
@@ -419,5 +424,5 @@ test_slow_fib6(void)
 	return unit_test_suite_runner(&fib6_slow_tests);
 }
 
-REGISTER_TEST_COMMAND(fib6_autotest, test_fib6);
-REGISTER_TEST_COMMAND(fib6_slow_autotest, test_slow_fib6);
+REGISTER_FAST_TEST(fib6_autotest, true, true, test_fib6);
+REGISTER_PERF_TEST(fib6_slow_autotest, test_slow_fib6);

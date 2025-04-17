@@ -12,17 +12,19 @@ enum policer_action {
 		DROP = 3,
 };
 
+/* Policy implemented as a static structure. 8< */
 enum policer_action policer_table[RTE_COLORS][RTE_COLORS] =
 {
 	{ GREEN, RED, RED},
 	{ DROP, YELLOW, RED},
 	{ DROP, DROP, RED}
 };
+/* >8 End of policy implemented as a static structure. */
 
 #if APP_MODE == APP_MODE_FWD
 
 #define FUNC_METER(m, p, time, pkt_len, pkt_color)	\
-({							\
+__extension__ ({					\
 	void *mp = m;					\
 	void *pp = p;					\
 	mp = mp;					\

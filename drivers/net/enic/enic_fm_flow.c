@@ -5,9 +5,12 @@
 #include <errno.h>
 #include <stdint.h>
 #include <rte_log.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_flow_driver.h>
 #include <rte_ether.h>
+#include <rte_geneve.h>
+#include <rte_hash.h>
+#include <rte_jhash.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_memzone.h>
@@ -20,9 +23,6 @@
 #define IP_DEFTTL  64   /* from RFC 1340. */
 #define IP6_VTC_FLOW 0x60000000
 
-/* Highest Item type supported by Flowman */
-#define FM_MAX_ITEM_TYPE RTE_FLOW_ITEM_TYPE_VXLAN
-
 /* Up to 1024 TCAM entries */
 #define FM_MAX_TCAM_TABLE_SIZE 1024
 
@@ -33,6 +33,18 @@
 #define FM_COUNTERS_EXPAND  100
 
 #define FM_INVALID_HANDLE 0
+
+/* Low priority used for implicit VF -> representor flow */
+#define FM_LOWEST_PRIORITY 100000
+
+/* High priority used for implicit representor -> VF flow */
+#define FM_HIGHEST_PRIORITY 0
+
+/* Tag used for implicit VF <-> representor flows */
+#define FM_VF_REP_TAG 1
+
+/* Max number of actions supported by VIC is 2K. Make hash table double that. */
+#define FM_MAX_ACTION_TABLE_SIZE 4096
 
 /*
  * Flow exact match tables (FET) in the VIC and rte_flow groups.
@@ -81,13 +93,21 @@ struct enic_fm_counter {
 	uint32_t handle;
 };
 
+struct enic_fm_action {
+	int ref;
+	uint64_t handle;
+	struct fm_action key;
+};
+
 /* rte_flow.fm */
 struct enic_fm_flow {
 	bool counter_valid;
 	uint64_t entry_handle;
-	uint64_t action_handle;
+	struct enic_fm_action  *action;
 	struct enic_fm_counter *counter;
 	struct enic_fm_fet *fet;
+	/* Auto-added steer action for hairpin flows (e.g. vnic->vnic) */
+	struct enic_fm_flow *hairpin_steer_flow;
 };
 
 struct enic_fm_jump_flow {
@@ -110,8 +130,20 @@ union enic_flowman_cmd_mem {
 	struct fm_action fm_action;
 };
 
+/*
+ * PF has a flowman instance, and VF representors share it with PF.
+ * PF allocates this structure and owns it. VF representors borrow
+ * the PF's structure during API calls (e.g. create, query).
+ */
 struct enic_flowman {
-	struct enic *enic;
+	struct enic *owner_enic; /* PF */
+	struct enic *user_enic;  /* API caller (PF or representor) */
+	/*
+	 * Representors and PF share the same underlying flowman.
+	 * Lock API calls to serialize accesses from them. Only used
+	 * when VF representors are present.
+	 */
+	rte_spinlock_t lock;
 	/* Command buffer */
 	struct {
 		union enic_flowman_cmd_mem *va;
@@ -132,6 +164,8 @@ struct enic_flowman {
 	 */
 	struct enic_fm_fet *default_eg_fet;
 	struct enic_fm_fet *default_ig_fet;
+	/* hash table for Action reuse */
+	struct rte_hash *action_hash;
 	/* Flows that jump to the default table above */
 	TAILQ_HEAD(jump_flow_list, enic_fm_jump_flow) jump_list;
 	/*
@@ -143,9 +177,23 @@ struct enic_flowman {
 	struct fm_action action;
 	struct fm_action action_tmp; /* enic_fm_reorder_action_op */
 	int action_op_count;
+	/* Tags used for representor flows */
+	uint8_t vf_rep_tag;
+	/* For auto-added steer action for hairpin */
+	int need_hairpin_steer;
+	uint64_t hairpin_steer_vnic_h;
 };
 
 static int enic_fm_tbl_free(struct enic_flowman *fm, uint64_t handle);
+/*
+ * API functions (create, destroy, validate, flush) call begin_fm()
+ * upon entering to save the caller enic (PF or VF representor) and
+ * lock. Upon exit, they call end_fm() to unlock.
+ */
+static struct enic_flowman *begin_fm(struct enic *enic);
+static void end_fm(struct enic_flowman *fm);
+/* Delete internal flows created for representor paths */
+static void delete_rep_flows(struct enic *enic);
 
 /*
  * Common arguments passed to copy_item functions. Use this structure
@@ -158,6 +206,7 @@ struct copy_item_args {
 	const struct rte_flow_item *item;
 	struct fm_tcam_match_entry *fm_tcam_entry;
 	uint8_t header_level;
+	struct rte_flow_error *error;
 };
 
 /* functions for copying items into flowman match */
@@ -185,6 +234,10 @@ static enic_copy_item_fn enic_fm_copy_item_tcp;
 static enic_copy_item_fn enic_fm_copy_item_udp;
 static enic_copy_item_fn enic_fm_copy_item_vlan;
 static enic_copy_item_fn enic_fm_copy_item_vxlan;
+static enic_copy_item_fn enic_fm_copy_item_gtp;
+static enic_copy_item_fn enic_fm_copy_item_geneve;
+static enic_copy_item_fn enic_fm_copy_item_geneve_opt;
+static enic_copy_item_fn enic_fm_copy_item_ecpri;
 
 /* Ingress actions */
 static const enum rte_flow_action_type enic_fm_supported_ig_actions[] = {
@@ -193,6 +246,7 @@ static const enum rte_flow_action_type enic_fm_supported_ig_actions[] = {
 	RTE_FLOW_ACTION_TYPE_FLAG,
 	RTE_FLOW_ACTION_TYPE_JUMP,
 	RTE_FLOW_ACTION_TYPE_MARK,
+	RTE_FLOW_ACTION_TYPE_OF_POP_VLAN,
 	RTE_FLOW_ACTION_TYPE_PORT_ID,
 	RTE_FLOW_ACTION_TYPE_PASSTHRU,
 	RTE_FLOW_ACTION_TYPE_QUEUE,
@@ -208,6 +262,10 @@ static const enum rte_flow_action_type enic_fm_supported_eg_actions[] = {
 	RTE_FLOW_ACTION_TYPE_COUNT,
 	RTE_FLOW_ACTION_TYPE_DROP,
 	RTE_FLOW_ACTION_TYPE_JUMP,
+	RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN,
+	RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP,
+	RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID,
+	RTE_FLOW_ACTION_TYPE_PORT_ID,
 	RTE_FLOW_ACTION_TYPE_PASSTHRU,
 	RTE_FLOW_ACTION_TYPE_VOID,
 	RTE_FLOW_ACTION_TYPE_VXLAN_ENCAP,
@@ -291,6 +349,59 @@ static const struct enic_fm_items enic_fm_items[] = {
 			       RTE_FLOW_ITEM_TYPE_END,
 		},
 	},
+	[RTE_FLOW_ITEM_TYPE_GTP] = {
+		.copy_item = enic_fm_copy_item_gtp,
+		.valid_start_item = 0,
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_UDP,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
+	[RTE_FLOW_ITEM_TYPE_GTPC] = {
+		.copy_item = enic_fm_copy_item_gtp,
+		.valid_start_item = 1,
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_UDP,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
+	[RTE_FLOW_ITEM_TYPE_GTPU] = {
+		.copy_item = enic_fm_copy_item_gtp,
+		.valid_start_item = 1,
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_UDP,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
+	[RTE_FLOW_ITEM_TYPE_GENEVE] = {
+		.copy_item = enic_fm_copy_item_geneve,
+		.valid_start_item = 1,
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_ETH,
+			       RTE_FLOW_ITEM_TYPE_IPV4,
+			       RTE_FLOW_ITEM_TYPE_IPV6,
+			       RTE_FLOW_ITEM_TYPE_UDP,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
+	[RTE_FLOW_ITEM_TYPE_GENEVE_OPT] = {
+		.copy_item = enic_fm_copy_item_geneve_opt,
+		.valid_start_item = 1,
+		/* Can match at most 1 option */
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_GENEVE,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
+	[RTE_FLOW_ITEM_TYPE_ECPRI] = {
+		.copy_item = enic_fm_copy_item_ecpri,
+		.valid_start_item = 1,
+		.prev_items = (const enum rte_flow_item_type[]) {
+			       RTE_FLOW_ITEM_TYPE_ETH,
+			       RTE_FLOW_ITEM_TYPE_UDP,
+			       RTE_FLOW_ITEM_TYPE_END,
+		},
+	},
 };
 
 static int
@@ -313,8 +424,8 @@ enic_fm_copy_item_eth(struct copy_item_args *arg)
 	fm_mask = &entry->ftm_mask.fk_hdrset[lvl];
 	fm_data->fk_header_select |= FKH_ETHER;
 	fm_mask->fk_header_select |= FKH_ETHER;
-	memcpy(&fm_data->l2.eth, spec, sizeof(*spec));
-	memcpy(&fm_mask->l2.eth, mask, sizeof(*mask));
+	memcpy(&fm_data->l2.eth, spec, sizeof(struct rte_ether_hdr));
+	memcpy(&fm_mask->l2.eth, mask, sizeof(struct rte_ether_hdr));
 	return 0;
 }
 
@@ -350,8 +461,11 @@ enic_fm_copy_item_vlan(struct copy_item_args *arg)
 	eth_mask = (void *)&fm_mask->l2.eth;
 	eth_val = (void *)&fm_data->l2.eth;
 
-	/* Outer TPID cannot be matched */
-	if (eth_mask->ether_type)
+	/*
+	 * Outer TPID cannot be matched. If protocol is 0, use what is
+	 * in the eth header.
+	 */
+	if (eth_mask->ether_type && mask->hdr.eth_proto)
 		return -ENOTSUP;
 
 	/*
@@ -359,12 +473,14 @@ enic_fm_copy_item_vlan(struct copy_item_args *arg)
 	 * L2, regardless of vlan stripping settings. So, the inner type
 	 * from vlan becomes the ether type of the eth header.
 	 */
-	eth_mask->ether_type = mask->inner_type;
-	eth_val->ether_type = spec->inner_type;
+	if (mask->hdr.eth_proto) {
+		eth_mask->ether_type = mask->hdr.eth_proto;
+		eth_val->ether_type = spec->hdr.eth_proto;
+	}
 	fm_data->fk_header_select |= FKH_ETHER | FKH_QTAG;
 	fm_mask->fk_header_select |= FKH_ETHER | FKH_QTAG;
-	fm_data->fk_vlan = rte_be_to_cpu_16(spec->tci);
-	fm_mask->fk_vlan = rte_be_to_cpu_16(mask->tci);
+	fm_data->fk_vlan = rte_be_to_cpu_16(spec->hdr.vlan_tci);
+	fm_mask->fk_vlan = rte_be_to_cpu_16(mask->hdr.vlan_tci);
 	return 0;
 }
 
@@ -419,8 +535,8 @@ enic_fm_copy_item_ipv6(struct copy_item_args *arg)
 
 	fm_data->fk_header_select |= FKH_IPV6;
 	fm_mask->fk_header_select |= FKH_IPV6;
-	memcpy(&fm_data->l3.ip6, spec, sizeof(*spec));
-	memcpy(&fm_mask->l3.ip6, mask, sizeof(*mask));
+	memcpy(&fm_data->l3.ip6, spec, sizeof(struct rte_ipv6_hdr));
+	memcpy(&fm_mask->l3.ip6, mask, sizeof(struct rte_ipv6_hdr));
 	return 0;
 }
 
@@ -569,6 +685,263 @@ enic_fm_copy_item_vxlan(struct copy_item_args *arg)
 	return 0;
 }
 
+static int
+enic_fm_copy_item_gtp(struct copy_item_args *arg)
+{
+	const struct rte_flow_item *item = arg->item;
+	const struct rte_flow_item_gtp *spec = item->spec;
+	const struct rte_flow_item_gtp *mask = item->mask;
+	struct fm_tcam_match_entry *entry = arg->fm_tcam_entry;
+	struct fm_header_set *fm_data, *fm_mask;
+	int off;
+	uint16_t udp_gtp_uc_port_be = 0;
+
+	ENICPMD_FUNC_TRACE();
+	/* Only 2 header levels (outer and inner) allowed */
+	if (arg->header_level > 0)
+		return -EINVAL;
+
+	fm_data = &entry->ftm_data.fk_hdrset[0];
+	fm_mask = &entry->ftm_mask.fk_hdrset[0];
+
+	switch (item->type) {
+	case RTE_FLOW_ITEM_TYPE_GTP:
+	{
+		/* For vanilla GTP, the UDP destination port must be specified
+		 * but value of the port is not enforced here.
+		 */
+		if (!(fm_data->fk_metadata & FKM_UDP) ||
+		    !(fm_data->fk_header_select & FKH_UDP) ||
+		    fm_data->l4.udp.fk_dest == 0)
+			return -EINVAL;
+		if (!(fm_mask->fk_metadata & FKM_UDP) ||
+		    !(fm_mask->fk_header_select & FKH_UDP) ||
+		    fm_mask->l4.udp.fk_dest != 0xFFFF)
+			return -EINVAL;
+		break;
+	}
+	case RTE_FLOW_ITEM_TYPE_GTPC:
+	{
+		udp_gtp_uc_port_be = rte_cpu_to_be_16(RTE_GTPC_UDP_PORT);
+		break;
+	}
+	case RTE_FLOW_ITEM_TYPE_GTPU:
+	{
+		udp_gtp_uc_port_be = rte_cpu_to_be_16(RTE_GTPU_UDP_PORT);
+		break;
+	}
+	default:
+		RTE_ASSERT(0);
+	}
+
+	/* The GTP-C or GTP-U UDP destination port must be matched. */
+	if (udp_gtp_uc_port_be) {
+		if (fm_data->fk_metadata & FKM_UDP &&
+		    fm_data->fk_header_select & FKH_UDP &&
+		    fm_data->l4.udp.fk_dest != udp_gtp_uc_port_be)
+			return -EINVAL;
+		if (fm_mask->fk_metadata & FKM_UDP &&
+		    fm_mask->fk_header_select & FKH_UDP &&
+		    fm_mask->l4.udp.fk_dest != 0xFFFF)
+			return -EINVAL;
+
+		/* In any case, add match for GTP-C GTP-U UDP dst port */
+		fm_data->fk_metadata |= FKM_UDP;
+		fm_data->fk_header_select |= FKH_UDP;
+		fm_data->l4.udp.fk_dest = udp_gtp_uc_port_be;
+		fm_mask->fk_metadata |= FKM_UDP;
+		fm_mask->fk_header_select |= FKH_UDP;
+		fm_mask->l4.udp.fk_dest = 0xFFFF;
+	}
+
+	/* NIC does not support GTP tunnels. No Items are allowed after this.
+	 * This prevents the specification of further items.
+	 */
+	arg->header_level = 0;
+
+	/* Match all if no spec */
+	if (!spec)
+		return 0;
+	if (!mask)
+		mask = &rte_flow_item_gtp_mask;
+
+	/*
+	 * Use the raw L4 buffer to match GTP as fm_header_set does not have
+	 * GTP header. UDP dst port must be specific. Using the raw buffer
+	 * does not affect such UDP item, since we skip UDP in the raw buffer.
+	 */
+	fm_data->fk_header_select |= FKH_L4RAW;
+	fm_mask->fk_header_select |= FKH_L4RAW;
+	off = sizeof(fm_data->l4.udp);
+	memcpy(&fm_data->l4.rawdata[off], spec, sizeof(*spec));
+	memcpy(&fm_mask->l4.rawdata[off], mask, sizeof(*mask));
+	return 0;
+}
+
+static int
+enic_fm_copy_item_geneve(struct copy_item_args *arg)
+{
+	const struct rte_flow_item *item = arg->item;
+	const struct rte_flow_item_geneve *spec = item->spec;
+	const struct rte_flow_item_geneve *mask = item->mask;
+	struct fm_tcam_match_entry *entry = arg->fm_tcam_entry;
+	struct fm_header_set *fm_data, *fm_mask;
+	int off;
+
+	ENICPMD_FUNC_TRACE();
+	/* Only 2 header levels (outer and inner) allowed */
+	if (arg->header_level > 0)
+		return -EINVAL;
+
+	fm_data = &entry->ftm_data.fk_hdrset[0];
+	fm_mask = &entry->ftm_mask.fk_hdrset[0];
+	fm_data->fk_metadata |= FKM_GENEVE;
+	fm_mask->fk_metadata |= FKM_GENEVE;
+	/* items from here on out are inner header items, except options */
+	arg->header_level = 1;
+
+	/* Match all if no spec */
+	if (!spec)
+		return 0;
+	if (!mask)
+		mask = &rte_flow_item_geneve_mask;
+
+	/*
+	 * Use the raw L4 buffer to match geneve as fm_header_set does
+	 * not have geneve header. A UDP item may precede the geneve
+	 * item. Using the raw buffer does not affect such UDP item,
+	 * since we skip UDP in the raw buffer.
+	 */
+	fm_data->fk_header_select |= FKH_L4RAW;
+	fm_mask->fk_header_select |= FKH_L4RAW;
+	off = sizeof(fm_data->l4.udp);
+	memcpy(&fm_data->l4.rawdata[off], spec, sizeof(struct rte_geneve_hdr));
+	memcpy(&fm_mask->l4.rawdata[off], mask, sizeof(struct rte_geneve_hdr));
+	return 0;
+}
+
+static int
+enic_fm_copy_item_geneve_opt(struct copy_item_args *arg)
+{
+	const struct rte_flow_item *item = arg->item;
+	const struct rte_flow_item_geneve_opt *spec = item->spec;
+	const struct rte_flow_item_geneve_opt *mask = item->mask;
+	struct fm_tcam_match_entry *entry = arg->fm_tcam_entry;
+	struct fm_header_set *fm_data, *fm_mask;
+	struct rte_geneve_hdr *geneve;
+	int off, len;
+
+	ENICPMD_FUNC_TRACE();
+	fm_data = &entry->ftm_data.fk_hdrset[0];
+	fm_mask = &entry->ftm_mask.fk_hdrset[0];
+	/* Match all if no spec */
+	if (!spec)
+		return 0;
+	if (!mask)
+		mask = &rte_flow_item_geneve_opt_mask;
+
+	if (spec->option_len > 0 &&
+	    (spec->data == NULL || mask->data == NULL)) {
+		return rte_flow_error_set(arg->error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ITEM,
+			NULL, "enic: geneve_opt unexpected null data");
+	}
+	/*
+	 * Geneve item must already be in the raw buffer. Append the
+	 * option pattern to it. There are two limitations.
+	 * (1) Can match only the 1st option, the first one following Geneve
+	 * (2) Geneve header must specify option length, as HW does not
+	 *     have "has Geneve option" flag.
+	 */
+	RTE_ASSERT((fm_data->fk_header_select & FKH_L4RAW) != 0);
+	RTE_ASSERT((fm_mask->fk_header_select & FKH_L4RAW) != 0);
+	off = sizeof(fm_data->l4.udp);
+	geneve = (struct rte_geneve_hdr *)&fm_data->l4.rawdata[off];
+	if (geneve->opt_len == 0) {
+		return rte_flow_error_set(arg->error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ITEM,
+			NULL, "enic: geneve_opt requires non-zero geneve option length");
+	}
+	geneve = (struct rte_geneve_hdr *)&fm_mask->l4.rawdata[off];
+	if (geneve->opt_len == 0) {
+		return rte_flow_error_set(arg->error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ITEM,
+			NULL, "enic: geneve_opt requires non-zero geneve option length mask");
+	}
+	off = sizeof(fm_data->l4.udp) + sizeof(struct rte_geneve_hdr);
+	if (off + (spec->option_len + 1) * 4 > FM_LAYER_SIZE) {
+		return rte_flow_error_set(arg->error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ITEM,
+			NULL, "enic: geneve_opt too large");
+	}
+	/* Copy option header */
+	memcpy(&fm_data->l4.rawdata[off], spec, 4);
+	memcpy(&fm_mask->l4.rawdata[off], mask, 4);
+	/* Copy option data */
+	if (spec->option_len > 0) {
+		off += 4;
+		len = spec->option_len * 4;
+		memcpy(&fm_data->l4.rawdata[off], spec->data, len);
+		memcpy(&fm_mask->l4.rawdata[off], mask->data, len);
+	}
+	return 0;
+}
+
+/* Match eCPRI combined message header */
+static int
+enic_fm_copy_item_ecpri(struct copy_item_args *arg)
+{
+	const struct rte_flow_item *item = arg->item;
+	const struct rte_flow_item_ecpri *spec = item->spec;
+	const struct rte_flow_item_ecpri *mask = item->mask;
+	struct fm_tcam_match_entry *entry = arg->fm_tcam_entry;
+	struct fm_header_set *fm_data, *fm_mask;
+	uint8_t *fm_data_to, *fm_mask_to;
+
+	ENICPMD_FUNC_TRACE();
+
+	/* Tunneling not supported- only matching on inner eCPRI fields. */
+	if (arg->header_level > 0)
+		return -EINVAL;
+
+	/* Need both spec and mask */
+	if (!spec || !mask)
+		return -EINVAL;
+
+	fm_data = &entry->ftm_data.fk_hdrset[0];
+	fm_mask = &entry->ftm_mask.fk_hdrset[0];
+
+	/* eCPRI can only follow L2/VLAN layer if ethernet type is 0xAEFE. */
+	if (!(fm_data->fk_metadata & FKM_UDP) &&
+	    (fm_mask->l2.eth.fk_ethtype != UINT16_MAX ||
+	    rte_cpu_to_be_16(fm_data->l2.eth.fk_ethtype) !=
+	    RTE_ETHER_TYPE_ECPRI))
+		return -EINVAL;
+
+	if (fm_data->fk_metadata & FKM_UDP) {
+		/* eCPRI on UDP */
+		fm_data->fk_header_select |= FKH_L4RAW;
+		fm_mask->fk_header_select |= FKH_L4RAW;
+		fm_data_to = &fm_data->l4.rawdata[sizeof(fm_data->l4.udp)];
+		fm_mask_to = &fm_mask->l4.rawdata[sizeof(fm_data->l4.udp)];
+	} else {
+		/* eCPRI directly after Etherent header */
+		fm_data->fk_header_select |= FKH_L3RAW;
+		fm_mask->fk_header_select |= FKH_L3RAW;
+		fm_data_to = &fm_data->l3.rawdata[0];
+		fm_mask_to = &fm_mask->l3.rawdata[0];
+	}
+
+	/*
+	 * Use the raw L3 or L4 buffer to match eCPRI since fm_header_set does
+	 * not have eCPRI header. Only 1st message header of PDU can be matched.
+	 * "C" * bit ignored.
+	 */
+	memcpy(fm_data_to, spec, sizeof(*spec));
+	memcpy(fm_mask_to, mask, sizeof(*mask));
+	return 0;
+}
+
 /*
  * Currently, raw pattern match is very limited. It is intended for matching
  * UDP tunnel header (e.g. vxlan or geneve).
@@ -624,6 +997,12 @@ enic_fm_copy_item_raw(struct copy_item_args *arg)
 }
 
 static int
+flowman_cmd(struct enic_flowman *fm, uint64_t *args, int nargs)
+{
+	return vnic_dev_flowman_cmd(fm->owner_enic->vdev, args, nargs);
+}
+
+static int
 enic_fet_alloc(struct enic_flowman *fm, uint8_t ingress,
 	       struct fm_key_template *key, int entries,
 	       struct enic_fm_fet **fet_out)
@@ -661,7 +1040,7 @@ enic_fet_alloc(struct enic_flowman *fm, uint8_t ingress,
 
 	args[0] = FM_EXACT_TABLE_ALLOC;
 	args[1] = fm->cmd.pa;
-	ret = vnic_dev_flowman_cmd(fm->enic->vdev, args, 2);
+	ret = flowman_cmd(fm, args, 2);
 	if (ret) {
 		ENICPMD_LOG(ERR, "cannot alloc exact match table: rc=%d", ret);
 		free(fet);
@@ -797,22 +1176,38 @@ enic_fm_copy_entry(struct enic_flowman *fm,
 
 		item_info = &enic_fm_items[item->type];
 
-		if (item->type > FM_MAX_ITEM_TYPE ||
+		if (item->type >= RTE_DIM(enic_fm_items) ||
 		    item_info->copy_item == NULL) {
 			return rte_flow_error_set(error, ENOTSUP,
 				RTE_FLOW_ERROR_TYPE_ITEM,
 				NULL, "enic: unsupported item");
 		}
-
+		/*
+		 * Check vNIC feature dependencies. Geneve item needs
+		 * Geneve offload feature
+		 */
+		if (item->type == RTE_FLOW_ITEM_TYPE_GENEVE &&
+		    !fm->user_enic->geneve) {
+			return rte_flow_error_set(error, ENOTSUP,
+				RTE_FLOW_ERROR_TYPE_ITEM,
+				NULL, "enic: geneve not supported");
+		}
 		/* check to see if item stacking is valid */
 		if (!fm_item_stacking_valid(prev_item, item_info,
 					    is_first_item))
 			goto stacking_error;
 
 		args.item = item;
+		args.error = error;
+		if (error)
+			error->type = RTE_FLOW_ERROR_TYPE_NONE;
 		ret = item_info->copy_item(&args);
-		if (ret)
+		if (ret) {
+			/* If copy_item set the error, return that */
+			if (error && error->type != RTE_FLOW_ERROR_TYPE_NONE)
+				return ret;
 			goto item_not_supported;
+		}
 		/* Going from outer to inner? Treat it as a new packet start */
 		if (prev_header_level != args.header_level) {
 			prev_item = RTE_FLOW_ITEM_TYPE_END;
@@ -870,6 +1265,20 @@ enic_fm_append_action_op(struct enic_flowman *fm,
 	return 0;
 }
 
+static struct fm_action_op *
+find_prev_action_op(struct enic_flowman *fm, uint32_t opcode)
+{
+	struct fm_action_op *op;
+	int i;
+
+	for (i = 0; i < fm->action_op_count; i++) {
+		op = &fm->action.fma_action_ops[i];
+		if (op->fa_op == opcode)
+			return op;
+	}
+	return NULL;
+}
+
 /* NIC requires that 1st steer appear before decap.
  * Correct example: steer, decap, steer, steer, ...
  */
@@ -885,7 +1294,8 @@ enic_fm_reorder_action_op(struct enic_flowman *fm)
 	steer = NULL;
 	decap = NULL;
 	while (op->fa_op != FMOP_END) {
-		if (!decap && op->fa_op == FMOP_DECAP_NOSTRIP)
+		if (!decap && (op->fa_op == FMOP_DECAP_NOSTRIP ||
+			       op->fa_op == FMOP_DECAP_STRIP))
 			decap = op;
 		else if (!steer && op->fa_op == FMOP_RQ_STEER)
 			steer = op;
@@ -925,6 +1335,17 @@ enic_fm_copy_vxlan_decap(struct enic_flowman *fm,
 	return enic_fm_append_action_op(fm, &fm_op, error);
 }
 
+/* Generate a reasonable source port number */
+static uint16_t
+gen_src_port(void)
+{
+	/* Min/max below are the default values in OVS-DPDK and Linux */
+	uint16_t p = rte_rand();
+	p = RTE_MAX(p, 32768);
+	p = RTE_MIN(p, 61000);
+	return rte_cpu_to_be_16(p);
+}
+
 /* VXLAN encap is done via flowman compound action */
 static int
 enic_fm_copy_vxlan_encap(struct enic_flowman *fm,
@@ -933,6 +1354,7 @@ enic_fm_copy_vxlan_encap(struct enic_flowman *fm,
 {
 	struct fm_action_op fm_op;
 	struct rte_ether_hdr *eth;
+	struct rte_udp_hdr *udp;
 	uint16_t *ethertype;
 	void *template;
 	uint8_t off;
@@ -954,7 +1376,7 @@ enic_fm_copy_vxlan_encap(struct enic_flowman *fm,
 	eth = (struct rte_ether_hdr *)template;
 	ethertype = &eth->ether_type;
 	append_template(&template, &off, item->spec,
-			sizeof(struct rte_flow_item_eth));
+			sizeof(struct rte_ether_hdr));
 	item++;
 	flow_item_skip_void(&item);
 	/* Optional VLAN */
@@ -963,7 +1385,7 @@ enic_fm_copy_vxlan_encap(struct enic_flowman *fm,
 
 		ENICPMD_LOG(DEBUG, "vxlan-encap: vlan");
 		spec = item->spec;
-		fm_op.encap.outer_vlan = rte_be_to_cpu_16(spec->tci);
+		fm_op.encap.outer_vlan = rte_be_to_cpu_16(spec->hdr.vlan_tci);
 		item++;
 		flow_item_skip_void(&item);
 	}
@@ -1031,8 +1453,17 @@ enic_fm_copy_vxlan_encap(struct enic_flowman *fm,
 		off + offsetof(struct rte_udp_hdr, dgram_len);
 	fm_op.encap.len2_delta =
 		sizeof(struct rte_udp_hdr) + sizeof(struct rte_vxlan_hdr);
+	udp = (struct rte_udp_hdr *)template;
 	append_template(&template, &off, item->spec,
 			sizeof(struct rte_udp_hdr));
+	/*
+	 * Firmware does not hash/fill source port yet. Generate a
+	 * random port, as there is *usually* one rte_flow for the
+	 * given inner packet stream (i.e. a single stream has one
+	 * random port).
+	 */
+	if (udp->src_port == 0)
+		udp->src_port = gen_src_port();
 	item++;
 	flow_item_skip_void(&item);
 
@@ -1069,11 +1500,103 @@ enic_fm_find_vnic(struct enic *enic, const struct rte_pci_addr *addr,
 	args[1] = bdf;
 	rc = vnic_dev_flowman_cmd(enic->vdev, args, 2);
 	if (rc != 0) {
-		ENICPMD_LOG(ERR, "allocating counters rc=%d", rc);
+		/* Expected to fail if BDF is not on the adapter */
+		ENICPMD_LOG(DEBUG, "cannot find vnic handle: rc=%d", rc);
 		return rc;
 	}
 	*handle = args[0];
 	ENICPMD_LOG(DEBUG, "found vnic: handle=0x%" PRIx64, *handle);
+	return 0;
+}
+
+/*
+ * Egress: target port should be either PF uplink or VF.
+ * Supported cases
+ * 1. VF egress -> PF uplink
+ *   PF may be this VF's PF, or another PF, as long as they are on the same VIC.
+ * 2. VF egress -> VF
+ *
+ * Unsupported cases
+ * 1. PF egress -> VF
+ *   App should be using representor to pass packets to VF
+ */
+static int
+vf_egress_port_id_action(struct enic_flowman *fm,
+			 struct rte_eth_dev *dst_dev,
+			 uint64_t dst_vnic_h,
+			 struct fm_action_op *fm_op,
+			 struct rte_flow_error *error)
+{
+	struct enic *src_enic, *dst_enic;
+	struct enic_vf_representor *vf;
+	uint8_t uif;
+	int ret;
+
+	ENICPMD_FUNC_TRACE();
+	src_enic = fm->user_enic;
+	dst_enic = pmd_priv(dst_dev);
+	if (!rte_eth_dev_is_repr(src_enic->rte_dev)) {
+		return rte_flow_error_set(error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ACTION,
+			NULL, "source port is not VF representor");
+	}
+
+	/* VF -> PF uplink. dst is not VF representor */
+	if (!rte_eth_dev_is_repr(dst_dev)) {
+		/* PF is the VF's PF? Then nothing to do */
+		vf = VF_ENIC_TO_VF_REP(src_enic);
+		if (vf->pf == dst_enic) {
+			ENICPMD_LOG(DEBUG, "destination port is VF's PF");
+			return 0;
+		}
+		/* If not, steer to the remote PF's uplink */
+		uif = dst_enic->fm_vnic_uif;
+		ENICPMD_LOG(DEBUG, "steer to uplink %u", uif);
+		memset(fm_op, 0, sizeof(*fm_op));
+		fm_op->fa_op = FMOP_SET_EGPORT;
+		fm_op->set_egport.egport = uif;
+		ret = enic_fm_append_action_op(fm, fm_op, error);
+		return ret;
+	}
+
+	/* VF -> VF loopback. Hairpin and steer to vnic */
+	memset(fm_op, 0, sizeof(*fm_op));
+	fm_op->fa_op = FMOP_EG_HAIRPIN;
+	ret = enic_fm_append_action_op(fm, fm_op, error);
+	if (ret)
+		return ret;
+	ENICPMD_LOG(DEBUG, "egress hairpin");
+	fm->hairpin_steer_vnic_h = dst_vnic_h;
+	fm->need_hairpin_steer = 1;
+	return 0;
+}
+
+static int
+enic_fm_check_transfer_dst(struct enic *enic, uint16_t dst_port_id,
+			   struct rte_eth_dev **dst_dev,
+			   struct rte_flow_error *error)
+{
+	struct rte_eth_dev *dev;
+
+	ENICPMD_LOG(DEBUG, "port id %u", dst_port_id);
+	if (!rte_eth_dev_is_valid_port(dst_port_id)) {
+		return rte_flow_error_set(error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ACTION,
+			NULL, "invalid port_id");
+	}
+	dev = &rte_eth_devices[dst_port_id];
+	if (!dev_is_enic(dev)) {
+		return rte_flow_error_set(error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ACTION,
+			NULL, "port_id is not enic");
+	}
+	if (enic->switch_domain_id != pmd_priv(dev)->switch_domain_id) {
+		return rte_flow_error_set(error, EINVAL,
+			RTE_FLOW_ERROR_TYPE_ACTION,
+			NULL, "destination and source ports are not in the same switch domain");
+	}
+
+	*dst_dev = dev;
 	return 0;
 }
 
@@ -1090,21 +1613,30 @@ enic_fm_copy_action(struct enic_flowman *fm,
 		PASSTHRU = 1 << 2,
 		COUNT = 1 << 3,
 		ENCAP = 1 << 4,
+		PUSH_VLAN = 1 << 5,
+		PORT_ID = 1 << 6,
 	};
 	struct fm_tcam_match_entry *fmt;
 	struct fm_action_op fm_op;
+	bool need_ovlan_action;
 	struct enic *enic;
 	uint32_t overlap;
 	uint64_t vnic_h;
+	uint16_t ovlan;
 	bool first_rq;
+	bool steer;
 	int ret;
 
 	ENICPMD_FUNC_TRACE();
 	fmt = &fm->tcam_entry;
+	need_ovlan_action = false;
+	ovlan = 0;
 	first_rq = true;
-	enic = fm->enic;
+	steer = false;
+	enic = fm->user_enic;
 	overlap = 0;
-	vnic_h = 0; /* 0 = current vNIC */
+	vnic_h = enic->fm_vnic_handle;
+
 	for (; actions->type != RTE_FLOW_ACTION_TYPE_END; actions++) {
 		switch (actions->type) {
 		case RTE_FLOW_ACTION_TYPE_VOID:
@@ -1140,6 +1672,8 @@ enic_fm_copy_action(struct enic_flowman *fm,
 			const struct rte_flow_action_mark *mark =
 				actions->conf;
 
+			if (enic->use_noscatter_vec_rx_handler)
+				goto unsupported;
 			if (mark->id >= ENIC_MAGIC_FILTER_ID - 1)
 				return rte_flow_error_set(error, EINVAL,
 					RTE_FLOW_ERROR_TYPE_ACTION,
@@ -1153,6 +1687,8 @@ enic_fm_copy_action(struct enic_flowman *fm,
 			break;
 		}
 		case RTE_FLOW_ACTION_TYPE_FLAG: {
+			if (enic->use_noscatter_vec_rx_handler)
+				goto unsupported;
 			/* ENIC_MAGIC_FILTER_ID is reserved for flagging */
 			memset(&fm_op, 0, sizeof(fm_op));
 			fm_op.fa_op = FMOP_MARK;
@@ -1185,6 +1721,7 @@ enic_fm_copy_action(struct enic_flowman *fm,
 				return ret;
 			ENICPMD_LOG(DEBUG, "create QUEUE action rq: %u",
 				    fm_op.rq_steer.rq_index);
+			steer = true;
 			break;
 		}
 		case RTE_FLOW_ACTION_TYPE_DROP: {
@@ -1251,36 +1788,39 @@ enic_fm_copy_action(struct enic_flowman *fm,
 				return ret;
 			ENICPMD_LOG(DEBUG, "create QUEUE action rq: %u",
 				    fm_op.rq_steer.rq_index);
+			steer = true;
 			break;
 		}
 		case RTE_FLOW_ACTION_TYPE_PORT_ID: {
 			const struct rte_flow_action_port_id *port;
-			struct rte_pci_device *pdev;
-			struct rte_eth_dev *dev;
+			struct rte_eth_dev *dev = NULL;
 
+			if (!ingress && (overlap & PORT_ID)) {
+				ENICPMD_LOG(DEBUG, "cannot have multiple egress PORT_ID actions");
+				goto unsupported;
+			}
 			port = actions->conf;
 			if (port->original) {
-				vnic_h = 0; /* This port */
+				vnic_h = enic->fm_vnic_handle; /* This port */
 				break;
 			}
-			ENICPMD_LOG(DEBUG, "port id %u", port->id);
-			if (!rte_eth_dev_is_valid_port(port->id)) {
-				return rte_flow_error_set(error, EINVAL,
-					RTE_FLOW_ERROR_TYPE_ACTION,
-					NULL, "invalid port_id");
-			}
-			dev = &rte_eth_devices[port->id];
-			if (!dev_is_enic(dev)) {
-				return rte_flow_error_set(error, EINVAL,
-					RTE_FLOW_ERROR_TYPE_ACTION,
-					NULL, "port_id is not enic");
-			}
-			pdev = RTE_ETH_DEV_TO_PCI(dev);
-			if (enic_fm_find_vnic(enic, &pdev->addr, &vnic_h)) {
-				return rte_flow_error_set(error, EINVAL,
-					RTE_FLOW_ERROR_TYPE_ACTION,
-					NULL, "port_id is not vnic");
-			}
+			ret = enic_fm_check_transfer_dst(enic, port->id, &dev,
+							 error);
+			if (ret)
+				return ret;
+			vnic_h = pmd_priv(dev)->fm_vnic_handle;
+			overlap |= PORT_ID;
+			/*
+			 * Ingress. Nothing more to do. We add an implicit
+			 * steer at the end if needed.
+			 */
+			if (ingress)
+				break;
+			/* Egress */
+			ret = vf_egress_port_id_action(fm, dev, vnic_h, &fm_op,
+				error);
+			if (ret)
+				return ret;
 			break;
 		}
 		case RTE_FLOW_ACTION_TYPE_VXLAN_DECAP: {
@@ -1307,13 +1847,141 @@ enic_fm_copy_action(struct enic_flowman *fm,
 				return ret;
 			break;
 		}
+		case RTE_FLOW_ACTION_TYPE_OF_POP_VLAN: {
+			struct fm_action_op *decap;
+
+			/*
+			 * If decap-nostrip appears before pop vlan, this pop
+			 * applies to the inner packet vlan. Turn it into
+			 * decap-strip.
+			 */
+			decap = find_prev_action_op(fm, FMOP_DECAP_NOSTRIP);
+			if (decap) {
+				ENICPMD_LOG(DEBUG, "pop-vlan inner: decap-nostrip => decap-strip");
+				decap->fa_op = FMOP_DECAP_STRIP;
+				break;
+			}
+			memset(&fm_op, 0, sizeof(fm_op));
+			fm_op.fa_op = FMOP_POP_VLAN;
+			ret = enic_fm_append_action_op(fm, &fm_op, error);
+			if (ret)
+				return ret;
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN: {
+			const struct rte_flow_action_of_push_vlan *vlan;
+
+			if (overlap & PASSTHRU)
+				goto unsupported;
+			vlan = actions->conf;
+			if (vlan->ethertype != RTE_BE16(RTE_ETHER_TYPE_VLAN)) {
+				return rte_flow_error_set(error, EINVAL,
+					RTE_FLOW_ERROR_TYPE_ACTION,
+					NULL, "unexpected push_vlan ethertype");
+			}
+			overlap |= PUSH_VLAN;
+			need_ovlan_action = true;
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP: {
+			const struct rte_flow_action_of_set_vlan_pcp *pcp;
+
+			pcp = actions->conf;
+			if (pcp->vlan_pcp > 7) {
+				return rte_flow_error_set(error, EINVAL,
+					RTE_FLOW_ERROR_TYPE_ACTION,
+					NULL, "invalid vlan_pcp");
+			}
+			need_ovlan_action = true;
+			ovlan |= ((uint16_t)pcp->vlan_pcp) << 13;
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID: {
+			const struct rte_flow_action_of_set_vlan_vid *vid;
+
+			vid = actions->conf;
+			need_ovlan_action = true;
+			ovlan |= rte_be_to_cpu_16(vid->vlan_vid);
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_PORT_REPRESENTOR: {
+			const struct rte_flow_action_ethdev *ethdev;
+			struct rte_eth_dev *dev = NULL;
+
+			ethdev = actions->conf;
+			ret = enic_fm_check_transfer_dst(enic, ethdev->port_id,
+							 &dev, error);
+			if (ret)
+				return ret;
+			vnic_h = pmd_priv(dev)->fm_vnic_handle;
+			overlap |= PORT_ID;
+			/*
+			 * Action PORT_REPRESENTOR implies ingress destination.
+			 * Noting to do. We add an implicit stree at the
+			 * end if needed.
+			 */
+			ingress = 1;
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_REPRESENTED_PORT: {
+			const struct rte_flow_action_ethdev *ethdev;
+			struct rte_eth_dev *dev = NULL;
+
+			if (overlap & PORT_ID) {
+				ENICPMD_LOG(DEBUG, "cannot have multiple egress PORT_ID actions");
+				goto unsupported;
+			}
+			ethdev = actions->conf;
+			ret = enic_fm_check_transfer_dst(enic, ethdev->port_id,
+							 &dev, error);
+			if (ret)
+				return ret;
+			vnic_h = pmd_priv(dev)->fm_vnic_handle;
+			overlap |= PORT_ID;
+			/* Action REPRESENTED_PORT: always egress destination */
+			ingress = 0;
+			ret = vf_egress_port_id_action(fm, dev, vnic_h, &fm_op,
+				error);
+			if (ret)
+				return ret;
+			break;
+		}
 		default:
 			goto unsupported;
 		}
 	}
 
-	if (!(overlap & (FATE | PASSTHRU | COUNT)))
+	if (!(overlap & (FATE | PASSTHRU | COUNT | PORT_ID)))
 		goto unsupported;
+	/* Egress from VF: need implicit WQ match */
+	if (rte_eth_dev_is_repr(enic->rte_dev) && !ingress) {
+		fmt->ftm_data.fk_wq_id = 0;
+		fmt->ftm_mask.fk_wq_id = 0xffff;
+		fmt->ftm_data.fk_wq_vnic = enic->fm_vnic_handle;
+		ENICPMD_LOG(DEBUG, "add implicit wq id match for vf %d",
+			    VF_ENIC_TO_VF_REP(enic)->vf_id);
+	}
+	if (need_ovlan_action) {
+		memset(&fm_op, 0, sizeof(fm_op));
+		fm_op.fa_op = FMOP_SET_OVLAN;
+		fm_op.ovlan.vlan = ovlan;
+		ret = enic_fm_append_action_op(fm, &fm_op, error);
+		if (ret)
+			return ret;
+	}
+	/* Add steer op for PORT_ID without QUEUE */
+	if ((overlap & PORT_ID) && !steer && ingress) {
+		memset(&fm_op, 0, sizeof(fm_op));
+		/* Always to queue 0 for now as generic RSS is not available */
+		fm_op.fa_op = FMOP_RQ_STEER;
+		fm_op.rq_steer.rq_index = 0;
+		fm_op.rq_steer.vnic_handle = vnic_h;
+		ret = enic_fm_append_action_op(fm, &fm_op, error);
+		if (ret)
+			return ret;
+		ENICPMD_LOG(DEBUG, "add implicit steer op");
+	}
+	/* Add required END */
 	memset(&fm_op, 0, sizeof(fm_op));
 	fm_op.fa_op = FMOP_END;
 	ret = enic_fm_append_action_op(fm, &fm_op, error);
@@ -1360,6 +2028,13 @@ enic_fm_dump_tcam_actions(const struct fm_action *fm_action)
 		[FMOP_ENCAP] = "encap",
 		[FMOP_SET_OVLAN] = "set_ovlan",
 		[FMOP_DECAP_NOSTRIP] = "decap_nostrip",
+		[FMOP_DECAP_STRIP] = "decap_strip",
+		[FMOP_POP_VLAN] = "pop_vlan",
+		[FMOP_SET_EGPORT] = "set_egport",
+		[FMOP_RQ_STEER_ONLY] = "rq_steer_only",
+		[FMOP_SET_ENCAP_VLAN] = "set_encap_vlan",
+		[FMOP_EMIT] = "emit",
+		[FMOP_MODIFY] = "modify",
 	};
 	const struct fm_action_op *op = &fm_action->fma_action_ops[0];
 	char buf[128], *bp = buf;
@@ -1385,7 +2060,7 @@ enic_fm_dump_tcam_actions(const struct fm_action *fm_action)
 	/* Remove trailing comma */
 	if (buf[0])
 		*(bp - 1) = '\0';
-	ENICPMD_LOG(DEBUG, "       Acions: %s", buf);
+	ENICPMD_LOG(DEBUG, "       Actions: %s", buf);
 }
 
 static int
@@ -1494,9 +2169,10 @@ enic_fm_dump_tcam_match(const struct fm_tcam_match_entry *match,
 	memset(buf, 0, sizeof(buf));
 	__enic_fm_dump_tcam_match(&match->ftm_mask.fk_hdrset[0],
 				  buf, sizeof(buf));
-	ENICPMD_LOG(DEBUG, " TCAM %s Outer: %s %scounter",
+	ENICPMD_LOG(DEBUG, " TCAM %s Outer: %s %scounter position %u",
 		    (ingress) ? "IG" : "EG", buf,
-		    (match->ftm_flags & FMEF_COUNTER) ? "" : "no ");
+		    (match->ftm_flags & FMEF_COUNTER) ? "" : "no ",
+		    match->ftm_position);
 	memset(buf, 0, sizeof(buf));
 	__enic_fm_dump_tcam_match(&match->ftm_mask.fk_hdrset[1],
 				  buf, sizeof(buf));
@@ -1543,13 +2219,13 @@ enic_fm_flow_parse(struct enic_flowman *fm,
 	}
 
 	if (attrs) {
-		if (attrs->priority) {
+		if (attrs->group != FM_TCAM_RTE_GROUP && attrs->priority) {
 			rte_flow_error_set(error, ENOTSUP,
 					   RTE_FLOW_ERROR_TYPE_ATTR_PRIORITY,
 					   NULL,
-					   "priorities are not supported");
+					   "priorities are not supported for non-default (0) groups");
 			return -rte_errno;
-		} else if (attrs->transfer) {
+		} else if (!fm->owner_enic->switchdev_mode && attrs->transfer) {
 			rte_flow_error_set(error, ENOTSUP,
 					   RTE_FLOW_ERROR_TYPE_ATTR_TRANSFER,
 					   NULL,
@@ -1606,12 +2282,10 @@ enic_fm_more_counters(struct enic_flowman *fm)
 {
 	struct enic_fm_counter *new_stack;
 	struct enic_fm_counter *ctrs;
-	struct enic *enic;
 	int i, rc;
 	uint64_t args[2];
 
 	ENICPMD_FUNC_TRACE();
-	enic = fm->enic;
 	new_stack = rte_realloc(fm->counter_stack, (fm->counters_alloced +
 				FM_COUNTERS_EXPAND) *
 				sizeof(struct enic_fm_counter), 0);
@@ -1623,7 +2297,7 @@ enic_fm_more_counters(struct enic_flowman *fm)
 
 	args[0] = FM_COUNTER_BRK;
 	args[1] = fm->counters_alloced + FM_COUNTERS_EXPAND;
-	rc = vnic_dev_flowman_cmd(enic->vdev, args, 2);
+	rc = flowman_cmd(fm, args, 2);
 	if (rc != 0) {
 		ENICPMD_LOG(ERR, "cannot alloc counters rc=%d", rc);
 		return rc;
@@ -1643,16 +2317,14 @@ enic_fm_more_counters(struct enic_flowman *fm)
 static int
 enic_fm_counter_zero(struct enic_flowman *fm, struct enic_fm_counter *c)
 {
-	struct enic *enic;
 	uint64_t args[3];
 	int ret;
 
 	ENICPMD_FUNC_TRACE();
-	enic = fm->enic;
 	args[0] = FM_COUNTER_QUERY;
 	args[1] = c->handle;
 	args[2] = 1; /* clear */
-	ret = vnic_dev_flowman_cmd(enic->vdev, args, 3);
+	ret = flowman_cmd(fm, args, 3);
 	if (ret) {
 		ENICPMD_LOG(ERR, "counter init: rc=%d handle=0x%x",
 			    ret, c->handle);
@@ -1684,19 +2356,26 @@ enic_fm_counter_alloc(struct enic_flowman *fm, struct rte_flow_error *error,
 }
 
 static int
-enic_fm_action_free(struct enic_flowman *fm, uint64_t handle)
+enic_fm_action_free(struct enic_flowman *fm, struct enic_fm_action *ah)
 {
 	uint64_t args[2];
-	int rc;
+	int ret = 0;
 
 	ENICPMD_FUNC_TRACE();
-	args[0] = FM_ACTION_FREE;
-	args[1] = handle;
-	rc = vnic_dev_flowman_cmd(fm->enic->vdev, args, 2);
-	if (rc)
-		ENICPMD_LOG(ERR, "cannot free action: rc=%d handle=0x%" PRIx64,
-			    rc, handle);
-	return rc;
+	RTE_ASSERT(ah->ref > 0);
+	ah->ref--;
+	if (ah->ref == 0) {
+		args[0] = FM_ACTION_FREE;
+		args[1] = ah->handle;
+		ret = flowman_cmd(fm, args, 2);
+		if (ret)
+			/* This is a "should never happen" error. */
+			ENICPMD_LOG(ERR, "freeing action rc=%d handle=0x%"
+				    PRIx64, ret, ah->handle);
+		rte_hash_del_key(fm->action_hash, (const void *)&ah->key);
+		free(ah);
+	}
+	return ret;
 }
 
 static int
@@ -1708,7 +2387,7 @@ enic_fm_entry_free(struct enic_flowman *fm, uint64_t handle)
 	ENICPMD_FUNC_TRACE();
 	args[0] = FM_MATCH_ENTRY_REMOVE;
 	args[1] = handle;
-	rc = vnic_dev_flowman_cmd(fm->enic->vdev, args, 2);
+	rc = flowman_cmd(fm, args, 2);
 	if (rc)
 		ENICPMD_LOG(ERR, "cannot free match entry: rc=%d"
 			    " handle=0x%" PRIx64, rc, handle);
@@ -1772,9 +2451,9 @@ __enic_fm_flow_free(struct enic_flowman *fm, struct enic_fm_flow *fm_flow)
 		enic_fm_entry_free(fm, fm_flow->entry_handle);
 		fm_flow->entry_handle = FM_INVALID_HANDLE;
 	}
-	if (fm_flow->action_handle != FM_INVALID_HANDLE) {
-		enic_fm_action_free(fm, fm_flow->action_handle);
-		fm_flow->action_handle = FM_INVALID_HANDLE;
+	if (fm_flow->action != NULL) {
+		enic_fm_action_free(fm, fm_flow->action);
+		fm_flow->action = NULL;
 	}
 	enic_fm_counter_free(fm, fm_flow);
 	if (fm_flow->fet) {
@@ -1786,9 +2465,15 @@ __enic_fm_flow_free(struct enic_flowman *fm, struct enic_fm_flow *fm_flow)
 static void
 enic_fm_flow_free(struct enic_flowman *fm, struct rte_flow *flow)
 {
+	struct enic_fm_flow *steer = flow->fm->hairpin_steer_flow;
+
 	if (flow->fm->fet && flow->fm->fet->default_key)
 		remove_jump_flow(fm, flow);
 	__enic_fm_flow_free(fm, flow->fm);
+	if (steer) {
+		__enic_fm_flow_free(fm, steer);
+		free(steer);
+	}
 	free(flow->fm);
 	free(flow);
 }
@@ -1812,7 +2497,7 @@ enic_fm_add_tcam_entry(struct enic_flowman *fm,
 	args[0] = FM_TCAM_ENTRY_INSTALL;
 	args[1] = ingress ? fm->ig_tcam_hndl : fm->eg_tcam_hndl;
 	args[2] = fm->cmd.pa;
-	ret = vnic_dev_flowman_cmd(fm->enic->vdev, args, 3);
+	ret = flowman_cmd(fm, args, 3);
 	if (ret != 0) {
 		ENICPMD_LOG(ERR, "cannot add %s TCAM entry: rc=%d",
 			    ingress ? "ingress" : "egress", ret);
@@ -1862,7 +2547,7 @@ enic_fm_add_exact_entry(struct enic_flowman *fm,
 	args[0] = FM_EXACT_ENTRY_INSTALL;
 	args[1] = fet->handle;
 	args[2] = fm->cmd.pa;
-	ret = vnic_dev_flowman_cmd(fm->enic->vdev, args, 3);
+	ret = flowman_cmd(fm, args, 3);
 	if (ret != 0) {
 		ENICPMD_LOG(ERR, "cannot add %s exact entry: group=%u",
 			    fet->ingress ? "ingress" : "egress", fet->group);
@@ -1878,6 +2563,75 @@ enic_fm_add_exact_entry(struct enic_flowman *fm,
 	return 0;
 }
 
+static int
+enic_action_handle_get(struct enic_flowman *fm, struct fm_action *action_in,
+		       struct rte_flow_error *error,
+		       struct enic_fm_action **ah_o)
+{
+	struct enic_fm_action *ah;
+	struct fm_action *fma;
+	uint64_t args[2];
+	int ret = 0;
+
+	ret = rte_hash_lookup_data(fm->action_hash, action_in,
+				   (void **)&ah);
+	if (ret < 0 && ret != -ENOENT)
+		return rte_flow_error_set(error, -ret,
+				   RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+				   NULL, "enic: rte_hash_lookup(action)");
+
+	if (ret == -ENOENT) {
+		/* Allocate a new action on the NIC. */
+		fma = &fm->cmd.va->fm_action;
+		memcpy(fma, action_in, sizeof(*fma));
+
+		ah = calloc(1, sizeof(*ah));
+		if (ah == NULL)
+			return rte_flow_error_set(error, ENOMEM,
+					   RTE_FLOW_ERROR_TYPE_HANDLE,
+					   NULL, "enic: calloc(fm-action)");
+		memcpy(&ah->key, action_in, sizeof(struct fm_action));
+		args[0] = FM_ACTION_ALLOC;
+		args[1] = fm->cmd.pa;
+		ret = flowman_cmd(fm, args, 2);
+		if (ret != 0) {
+			rte_flow_error_set(error, -ret,
+					   RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+					   NULL, "enic: devcmd(action-alloc)");
+			goto error_with_ah;
+		}
+		ah->handle = args[0];
+		ret = rte_hash_add_key_data(fm->action_hash,
+					    (const void *)action_in,
+					    (void *)ah);
+		if (ret != 0) {
+			rte_flow_error_set(error, -ret,
+					   RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+					   NULL,
+					   "enic: rte_hash_add_key_data(actn)");
+			goto error_with_action_handle;
+		}
+		ENICPMD_LOG(DEBUG, "action allocated: handle=0x%" PRIx64,
+			    ah->handle);
+	}
+
+	/* Action handle struct is valid, increment reference count. */
+	ah->ref++;
+	*ah_o = ah;
+	return 0;
+error_with_action_handle:
+	args[0] = FM_ACTION_FREE;
+	args[1] = ah->handle;
+	ret = flowman_cmd(fm, args, 2);
+	if (ret != 0)
+		rte_flow_error_set(error, -ret,
+				   RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+				   NULL, "enic: devcmd(action-free)");
+error_with_ah:
+	free(ah);
+	return ret;
+}
+
 /* Push match-action to the NIC. */
 static int
 __enic_fm_flow_add_entry(struct enic_flowman *fm,
@@ -1889,29 +2643,18 @@ __enic_fm_flow_add_entry(struct enic_flowman *fm,
 			 struct rte_flow_error *error)
 {
 	struct enic_fm_counter *ctr;
-	struct fm_action *fma;
-	uint64_t action_h;
+	struct enic_fm_action *ah = NULL;
 	uint64_t entry_h;
-	uint64_t args[3];
 	int ret;
 
 	ENICPMD_FUNC_TRACE();
-	/* Allocate action. */
-	fma = &fm->cmd.va->fm_action;
-	memcpy(fma, action_in, sizeof(*fma));
-	args[0] = FM_ACTION_ALLOC;
-	args[1] = fm->cmd.pa;
-	ret = vnic_dev_flowman_cmd(fm->enic->vdev, args, 2);
-	if (ret != 0) {
-		ENICPMD_LOG(ERR, "allocating TCAM table action rc=%d", ret);
-		rte_flow_error_set(error, ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
-			NULL, "enic: devcmd(action-alloc)");
+
+	/* Get or create an action handle. */
+	ret = enic_action_handle_get(fm, action_in, error, &ah);
+	if (ret)
 		return ret;
-	}
-	action_h = args[0];
-	fm_flow->action_handle = action_h;
-	match_in->ftm_action = action_h;
-	ENICPMD_LOG(DEBUG, "action allocated: handle=0x%" PRIx64, action_h);
+	match_in->ftm_action = ah->handle;
+	fm_flow->action = ah;
 
 	/* Allocate counter if requested. */
 	if (match_in->ftm_flags & FMEF_COUNTER) {
@@ -1973,6 +2716,7 @@ enic_fm_flow_add_entry(struct enic_flowman *fm,
 	struct rte_flow *flow;
 
 	ENICPMD_FUNC_TRACE();
+	match_in->ftm_position = attrs->priority;
 	enic_fm_dump_tcam_entry(match_in, action_in, attrs->ingress);
 	flow = calloc(1, sizeof(*flow));
 	fm_flow = calloc(1, sizeof(*fm_flow));
@@ -1984,7 +2728,7 @@ enic_fm_flow_add_entry(struct enic_flowman *fm,
 		return NULL;
 	}
 	flow->fm = fm_flow;
-	fm_flow->action_handle = FM_INVALID_HANDLE;
+	fm_flow->action = NULL;
 	fm_flow->entry_handle = FM_INVALID_HANDLE;
 	if (__enic_fm_flow_add_entry(fm, fm_flow, match_in, action_in,
 				     attrs->group, attrs->ingress, error)) {
@@ -2039,11 +2783,71 @@ convert_jump_flows(struct enic_flowman *fm, struct enic_fm_fet *fet,
 	}
 }
 
+static int
+add_hairpin_steer(struct enic_flowman *fm, struct rte_flow *flow,
+		  struct rte_flow_error *error)
+{
+	struct fm_tcam_match_entry *fm_tcam_entry;
+	struct enic_fm_flow *fm_flow;
+	struct fm_action *fm_action;
+	struct fm_action_op fm_op;
+	int ret;
+
+	ENICPMD_FUNC_TRACE();
+	fm_flow = calloc(1, sizeof(*fm_flow));
+	if (fm_flow == NULL) {
+		rte_flow_error_set(error, ENOMEM, RTE_FLOW_ERROR_TYPE_HANDLE,
+			NULL, "enic: cannot allocate rte_flow");
+		return -ENOMEM;
+	}
+	/* Original egress hairpin flow */
+	fm_tcam_entry = &fm->tcam_entry;
+	fm_action = &fm->action;
+	/* Use the match pattern of the egress flow as is, without counters */
+	fm_tcam_entry->ftm_flags &= ~FMEF_COUNTER;
+	/* The only action is steer to vnic */
+	fm->action_op_count = 0;
+	memset(fm_action, 0, sizeof(*fm_action));
+	memset(&fm_op, 0, sizeof(fm_op));
+	/* Always to queue 0 for now */
+	fm_op.fa_op = FMOP_RQ_STEER;
+	fm_op.rq_steer.rq_index = 0;
+	fm_op.rq_steer.vnic_handle = fm->hairpin_steer_vnic_h;
+	ret = enic_fm_append_action_op(fm, &fm_op, error);
+	if (ret)
+		goto error_with_flow;
+	ENICPMD_LOG(DEBUG, "add steer op");
+	/* Add required END */
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_END;
+	ret = enic_fm_append_action_op(fm, &fm_op, error);
+	if (ret)
+		goto error_with_flow;
+	/* Add the ingress flow */
+	fm_flow->action = NULL;
+	fm_flow->entry_handle = FM_INVALID_HANDLE;
+	ret = __enic_fm_flow_add_entry(fm, fm_flow, fm_tcam_entry, fm_action,
+				       FM_TCAM_RTE_GROUP, 1 /* ingress */, error);
+	if (ret) {
+		ENICPMD_LOG(ERR, "cannot add hairpin-steer flow");
+		goto error_with_flow;
+	}
+	/* The new flow is now the egress flow's paired flow */
+	flow->fm->hairpin_steer_flow = fm_flow;
+	return 0;
+
+error_with_flow:
+	free(fm_flow);
+	return ret;
+}
+
 static void
 enic_fm_open_scratch(struct enic_flowman *fm)
 {
 	fm->action_op_count = 0;
 	fm->fet = NULL;
+	fm->need_hairpin_steer = 0;
+	fm->hairpin_steer_vnic_h = 0;
 	memset(&fm->tcam_entry, 0, sizeof(fm->tcam_entry));
 	memset(&fm->action, 0, sizeof(fm->action));
 }
@@ -2071,7 +2875,7 @@ enic_fm_flow_validate(struct rte_eth_dev *dev,
 	int ret;
 
 	ENICPMD_FUNC_TRACE();
-	fm = pmd_priv(dev)->fm;
+	fm = begin_fm(pmd_priv(dev));
 	if (fm == NULL)
 		return -ENOTSUP;
 	enic_fm_open_scratch(fm);
@@ -2083,6 +2887,7 @@ enic_fm_flow_validate(struct rte_eth_dev *dev,
 					attrs->ingress);
 	}
 	enic_fm_close_scratch(fm);
+	end_fm(fm);
 	return ret;
 }
 
@@ -2093,33 +2898,38 @@ enic_fm_flow_query_count(struct rte_eth_dev *dev,
 {
 	struct rte_flow_query_count *query;
 	struct enic_fm_flow *fm_flow;
-	struct enic *enic;
+	struct enic_flowman *fm;
 	uint64_t args[3];
 	int rc;
 
 	ENICPMD_FUNC_TRACE();
-	enic = pmd_priv(dev);
+	fm = begin_fm(pmd_priv(dev));
 	query = data;
 	fm_flow = flow->fm;
-	if (!fm_flow->counter_valid)
-		return rte_flow_error_set(error, ENOTSUP,
+	if (!fm_flow->counter_valid) {
+		rc = rte_flow_error_set(error, ENOTSUP,
 			RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
 			"enic: flow does not have counter");
+		goto exit;
+	}
 
 	args[0] = FM_COUNTER_QUERY;
 	args[1] = fm_flow->counter->handle;
 	args[2] = query->reset;
-	rc = vnic_dev_flowman_cmd(enic->vdev, args, 3);
+	rc = flowman_cmd(fm, args, 3);
 	if (rc) {
 		ENICPMD_LOG(ERR, "cannot query counter: rc=%d handle=0x%x",
 			    rc, fm_flow->counter->handle);
-		return rc;
+		goto exit;
 	}
 	query->hits_set = 1;
 	query->hits = args[0];
 	query->bytes_set = 1;
 	query->bytes = args[1];
-	return 0;
+	rc = 0;
+exit:
+	end_fm(fm);
+	return rc;
 }
 
 static int
@@ -2168,7 +2978,7 @@ enic_fm_flow_create(struct rte_eth_dev *dev,
 
 	ENICPMD_FUNC_TRACE();
 	enic = pmd_priv(dev);
-	fm = enic->fm;
+	fm = begin_fm(enic);
 	if (fm == NULL) {
 		rte_flow_error_set(error, ENOTSUP,
 			RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
@@ -2185,6 +2995,15 @@ enic_fm_flow_create(struct rte_eth_dev *dev,
 	flow = enic_fm_flow_add_entry(fm, fm_tcam_entry, fm_action,
 				      attrs, error);
 	if (flow) {
+		/* Add ingress rule that pairs with hairpin rule */
+		if (fm->need_hairpin_steer) {
+			ret = add_hairpin_steer(fm, flow, error);
+			if (ret) {
+				enic_fm_flow_free(fm, flow);
+				flow = NULL;
+				goto error_with_scratch;
+			}
+		}
 		LIST_INSERT_HEAD(&enic->flows, flow, next);
 		fet = flow->fm->fet;
 		if (fet && fet->default_key) {
@@ -2206,6 +3025,7 @@ enic_fm_flow_create(struct rte_eth_dev *dev,
 
 error_with_scratch:
 	enic_fm_close_scratch(fm);
+	end_fm(fm);
 	return flow;
 }
 
@@ -2214,12 +3034,15 @@ enic_fm_flow_destroy(struct rte_eth_dev *dev, struct rte_flow *flow,
 		     __rte_unused struct rte_flow_error *error)
 {
 	struct enic *enic = pmd_priv(dev);
+	struct enic_flowman *fm;
 
 	ENICPMD_FUNC_TRACE();
-	if (enic->fm == NULL)
+	fm = begin_fm(enic);
+	if (fm == NULL)
 		return 0;
 	LIST_REMOVE(flow, next);
-	enic_fm_flow_free(enic->fm, flow);
+	enic_fm_flow_free(fm, flow);
+	end_fm(fm);
 	return 0;
 }
 
@@ -2227,19 +3050,27 @@ static int
 enic_fm_flow_flush(struct rte_eth_dev *dev,
 		   __rte_unused struct rte_flow_error *error)
 {
+	LIST_HEAD(enic_flows, rte_flow) internal;
 	struct enic_fm_flow *fm_flow;
 	struct enic_flowman *fm;
 	struct rte_flow *flow;
 	struct enic *enic = pmd_priv(dev);
 
 	ENICPMD_FUNC_TRACE();
-	if (enic->fm == NULL)
+
+	fm = begin_fm(enic);
+	if (fm == NULL)
 		return 0;
-	fm = enic->fm;
+	/* Destroy all non-internal flows */
+	LIST_INIT(&internal);
 	while (!LIST_EMPTY(&enic->flows)) {
 		flow = LIST_FIRST(&enic->flows);
 		fm_flow = flow->fm;
 		LIST_REMOVE(flow, next);
+		if (flow->internal) {
+			LIST_INSERT_HEAD(&internal, flow, next);
+			continue;
+		}
 		/*
 		 * If tables are null, then vNIC is closing, and the firmware
 		 * has already cleaned up flowman state. So do not try to free
@@ -2247,11 +3078,17 @@ enic_fm_flow_flush(struct rte_eth_dev *dev,
 		 */
 		if (fm->ig_tcam_hndl == FM_INVALID_HANDLE) {
 			fm_flow->entry_handle = FM_INVALID_HANDLE;
-			fm_flow->action_handle = FM_INVALID_HANDLE;
+			fm_flow->action = NULL;
 			fm_flow->fet = NULL;
 		}
 		enic_fm_flow_free(fm, flow);
 	}
+	while (!LIST_EMPTY(&internal)) {
+		flow = LIST_FIRST(&internal);
+		LIST_REMOVE(flow, next);
+		LIST_INSERT_HEAD(&enic->flows, flow, next);
+	}
+	end_fm(fm);
 	return 0;
 }
 
@@ -2263,7 +3100,7 @@ enic_fm_tbl_free(struct enic_flowman *fm, uint64_t handle)
 
 	args[0] = FM_MATCH_TABLE_FREE;
 	args[1] = handle;
-	rc = vnic_dev_flowman_cmd(fm->enic->vdev, args, 2);
+	rc = flowman_cmd(fm, args, 2);
 	if (rc)
 		ENICPMD_LOG(ERR, "cannot free table: rc=%d handle=0x%" PRIx64,
 			    rc, handle);
@@ -2275,19 +3112,17 @@ enic_fm_tcam_tbl_alloc(struct enic_flowman *fm, uint32_t direction,
 			uint32_t max_entries, uint64_t *handle)
 {
 	struct fm_tcam_match_table *tcam_tbl;
-	struct enic *enic;
 	uint64_t args[2];
 	int rc;
 
 	ENICPMD_FUNC_TRACE();
-	enic = fm->enic;
 	tcam_tbl = &fm->cmd.va->fm_tcam_match_table;
 	tcam_tbl->ftt_direction = direction;
 	tcam_tbl->ftt_stage = FM_STAGE_LAST;
 	tcam_tbl->ftt_max_entries = max_entries;
 	args[0] = FM_TCAM_TABLE_ALLOC;
 	args[1] = fm->cmd.pa;
-	rc = vnic_dev_flowman_cmd(enic->vdev, args, 2);
+	rc = flowman_cmd(fm, args, 2);
 	if (rc) {
 		ENICPMD_LOG(ERR, "cannot alloc %s TCAM table: rc=%d",
 			    (direction == FM_INGRESS) ? "IG" : "EG", rc);
@@ -2296,6 +3131,31 @@ enic_fm_tcam_tbl_alloc(struct enic_flowman *fm, uint32_t direction,
 	*handle = args[0];
 	ENICPMD_LOG(DEBUG, "%s TCAM table allocated, handle=0x%" PRIx64,
 		    (direction == FM_INGRESS) ? "IG" : "EG", *handle);
+	return 0;
+}
+
+static int
+enic_fm_init_actions(struct enic_flowman *fm)
+{
+	struct rte_hash *a_hash;
+	char name[RTE_HASH_NAMESIZE];
+	struct rte_hash_parameters params = {
+		.entries = FM_MAX_ACTION_TABLE_SIZE,
+		.key_len = sizeof(struct fm_action),
+		.hash_func = rte_jhash,
+		.hash_func_init_val = 0,
+		.socket_id = rte_socket_id(),
+	};
+
+	ENICPMD_FUNC_TRACE();
+	snprintf((char *)name, sizeof(name), "fm-ah-%s",
+		 fm->owner_enic->bdf_name);
+	params.name = name;
+
+	a_hash = rte_hash_create(&params);
+	if (a_hash == NULL)
+		return -rte_errno;
+	fm->action_hash = a_hash;
 	return 0;
 }
 
@@ -2310,14 +3170,12 @@ enic_fm_init_counters(struct enic_flowman *fm)
 static void
 enic_fm_free_all_counters(struct enic_flowman *fm)
 {
-	struct enic *enic;
 	uint64_t args[2];
 	int rc;
 
-	enic = fm->enic;
 	args[0] = FM_COUNTER_BRK;
 	args[1] = 0;
-	rc = vnic_dev_flowman_cmd(enic->vdev, args, 2);
+	rc = flowman_cmd(fm, args, 2);
 	if (rc != 0)
 		ENICPMD_LOG(ERR, "cannot free counters: rc=%d", rc);
 	rte_free(fm->counter_stack);
@@ -2359,6 +3217,7 @@ enic_fm_free_tcam_tables(struct enic_flowman *fm)
 int
 enic_fm_init(struct enic *enic)
 {
+	const struct rte_pci_addr *addr;
 	struct enic_flowman *fm;
 	uint8_t name[RTE_MEMZONE_NAMESIZE];
 	int rc;
@@ -2366,12 +3225,30 @@ enic_fm_init(struct enic *enic)
 	if (enic->flow_filter_mode != FILTER_FLOWMAN)
 		return 0;
 	ENICPMD_FUNC_TRACE();
+	/* Get vnic handle and save for port-id action */
+	if (rte_eth_dev_is_repr(enic->rte_dev))
+		addr = &VF_ENIC_TO_VF_REP(enic)->bdf;
+	else
+		addr = &RTE_ETH_DEV_TO_PCI(enic->rte_dev)->addr;
+	rc = enic_fm_find_vnic(enic, addr, &enic->fm_vnic_handle);
+	if (rc) {
+		ENICPMD_LOG(ERR, "cannot find vnic handle for %x:%x:%x",
+			    addr->bus, addr->devid, addr->function);
+		return rc;
+	}
+	/* Save UIF for egport action */
+	enic->fm_vnic_uif = vnic_dev_uif(enic->vdev);
+	ENICPMD_LOG(DEBUG, "uif %u", enic->fm_vnic_uif);
+	/* Nothing else to do for representor. It will share the PF flowman */
+	if (rte_eth_dev_is_repr(enic->rte_dev))
+		return 0;
 	fm = calloc(1, sizeof(*fm));
 	if (fm == NULL) {
 		ENICPMD_LOG(ERR, "cannot alloc flowman struct");
 		return -ENOMEM;
 	}
-	fm->enic = enic;
+	fm->owner_enic = enic;
+	rte_spinlock_init(&fm->lock);
 	TAILQ_INIT(&fm->fet_list);
 	TAILQ_INIT(&fm->jump_list);
 	/* Allocate host memory for flowman commands */
@@ -2395,6 +3272,12 @@ enic_fm_init(struct enic *enic)
 		ENICPMD_LOG(ERR, "cannot alloc counters");
 		goto error_tables;
 	}
+	/* set up action handle hash */
+	rc = enic_fm_init_actions(fm);
+	if (rc) {
+		ENICPMD_LOG(ERR, "cannot create action hash, error:%d", rc);
+		goto error_counters;
+	}
 	/*
 	 * One default exact match table for each direction. We hold onto
 	 * it until close.
@@ -2402,7 +3285,7 @@ enic_fm_init(struct enic *enic)
 	rc = enic_fet_alloc(fm, 1, NULL, 128, &fm->default_ig_fet);
 	if (rc) {
 		ENICPMD_LOG(ERR, "cannot alloc default IG exact match table");
-		goto error_counters;
+		goto error_actions;
 	}
 	fm->default_ig_fet->ref = 1;
 	rc = enic_fet_alloc(fm, 0, NULL, 128, &fm->default_eg_fet);
@@ -2411,11 +3294,14 @@ enic_fm_init(struct enic *enic)
 		goto error_ig_fet;
 	}
 	fm->default_eg_fet->ref = 1;
+	fm->vf_rep_tag = FM_VF_REP_TAG;
 	enic->fm = fm;
 	return 0;
 
 error_ig_fet:
 	enic_fet_free(fm, fm->default_ig_fet);
+error_actions:
+	rte_hash_free(fm->action_hash);
 error_counters:
 	enic_fm_free_all_counters(fm);
 error_tables:
@@ -2434,10 +3320,15 @@ enic_fm_destroy(struct enic *enic)
 	struct enic_flowman *fm;
 	struct enic_fm_fet *fet;
 
+	ENICPMD_FUNC_TRACE();
+	if (rte_eth_dev_is_repr(enic->rte_dev)) {
+		delete_rep_flows(enic);
+		return;
+	}
 	if (enic->fm == NULL)
 		return;
-	ENICPMD_FUNC_TRACE();
 	fm = enic->fm;
+	enic_fm_flow_flush(enic->rte_dev, NULL);
 	enic_fet_free(fm, fm->default_eg_fet);
 	enic_fet_free(fm, fm->default_ig_fet);
 	/* Free all exact match tables still open */
@@ -2447,11 +3338,64 @@ enic_fm_destroy(struct enic *enic)
 	}
 	enic_fm_free_tcam_tables(fm);
 	enic_fm_free_all_counters(fm);
+	rte_hash_free(fm->action_hash);
 	enic_free_consistent(enic, sizeof(union enic_flowman_cmd_mem),
 		fm->cmd.va, fm->cmd.pa);
 	fm->cmd.va = NULL;
 	free(fm);
 	enic->fm = NULL;
+}
+
+int
+enic_fm_allocate_switch_domain(struct enic *pf)
+{
+	const struct rte_pci_addr *cur_a, *prev_a;
+	struct rte_eth_dev *dev;
+	struct enic *cur, *prev;
+	uint16_t domain_id;
+	uint64_t vnic_h;
+	uint16_t pid;
+	int ret;
+
+	ENICPMD_FUNC_TRACE();
+	if (rte_eth_dev_is_repr(pf->rte_dev))
+		return -EINVAL;
+	cur = pf;
+	cur_a = &RTE_ETH_DEV_TO_PCI(cur->rte_dev)->addr;
+	/* Go through ports and find another PF that is on the same adapter */
+	RTE_ETH_FOREACH_DEV(pid) {
+		dev = &rte_eth_devices[pid];
+		if (!dev_is_enic(dev))
+			continue;
+		if (rte_eth_dev_is_repr(dev))
+			continue;
+		if (dev == cur->rte_dev)
+			continue;
+		/* dev is another PF. Is it on the same adapter? */
+		prev = pmd_priv(dev);
+		prev_a = &RTE_ETH_DEV_TO_PCI(dev)->addr;
+		if (!enic_fm_find_vnic(cur, prev_a, &vnic_h)) {
+			ENICPMD_LOG(DEBUG, "Port %u (PF BDF %x:%x:%x) and port %u (PF BDF %x:%x:%x domain %u) are on the same VIC",
+				cur->rte_dev->data->port_id,
+				cur_a->bus, cur_a->devid, cur_a->function,
+				dev->data->port_id,
+				prev_a->bus, prev_a->devid, prev_a->function,
+				prev->switch_domain_id);
+			cur->switch_domain_id = prev->switch_domain_id;
+			return 0;
+		}
+	}
+	ret = rte_eth_switch_domain_alloc(&domain_id);
+	if (ret) {
+		ENICPMD_LOG(WARNING, "failed to allocate switch domain for device %d",
+			    ret);
+	}
+	cur->switch_domain_id = domain_id;
+	ENICPMD_LOG(DEBUG, "Port %u (PF BDF %x:%x:%x) is the 1st PF on the VIC. Allocated switch domain id %u",
+		    cur->rte_dev->data->port_id,
+		    cur_a->bus, cur_a->devid, cur_a->function,
+		    domain_id);
+	return ret;
 }
 
 const struct rte_flow_ops enic_fm_flow_ops = {
@@ -2461,3 +3405,237 @@ const struct rte_flow_ops enic_fm_flow_ops = {
 	.flush = enic_fm_flow_flush,
 	.query = enic_fm_flow_query,
 };
+
+/* Add a high priority flow that loops representor packets to VF */
+int
+enic_fm_add_rep2vf_flow(struct enic_vf_representor *vf)
+{
+	struct fm_tcam_match_entry *fm_tcam_entry;
+	struct rte_flow *flow0, *flow1;
+	struct fm_action *fm_action;
+	struct rte_flow_error error;
+	struct rte_flow_attr attrs;
+	struct fm_action_op fm_op;
+	struct enic_flowman *fm;
+	struct enic *pf;
+	uint8_t tag;
+
+	pf = vf->pf;
+	fm = pf->fm;
+	tag = fm->vf_rep_tag;
+	enic_fm_open_scratch(fm);
+	fm_tcam_entry = &fm->tcam_entry;
+	fm_action = &fm->action;
+	/* Egress rule: match WQ ID and tag+hairpin */
+	fm_tcam_entry->ftm_data.fk_wq_id = vf->pf_wq_idx;
+	fm_tcam_entry->ftm_mask.fk_wq_id = 0xffff;
+	fm_tcam_entry->ftm_flags |= FMEF_COUNTER;
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_TAG;
+	fm_op.tag.tag = tag;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_EG_HAIRPIN;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_END;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	attrs.group = 0;
+	attrs.ingress = 0;
+	attrs.egress = 1;
+	attrs.priority = FM_HIGHEST_PRIORITY;
+	flow0 = enic_fm_flow_add_entry(fm, fm_tcam_entry, fm_action,
+				       &attrs, &error);
+	enic_fm_close_scratch(fm);
+	if (flow0 == NULL) {
+		ENICPMD_LOG(ERR, "Cannot create flow 0 for representor->VF");
+		return -EINVAL;
+	}
+	LIST_INSERT_HEAD(&pf->flows, flow0, next);
+	/* Make this flow internal, so the user app cannot delete it */
+	flow0->internal = 1;
+	ENICPMD_LOG(DEBUG, "representor->VF %d flow created: wq %d -> tag %d hairpin",
+		    vf->vf_id, vf->pf_wq_idx, tag);
+
+	/* Ingress: steer hairpinned to VF RQ 0 */
+	enic_fm_open_scratch(fm);
+	fm_tcam_entry->ftm_flags |= FMEF_COUNTER;
+	fm_tcam_entry->ftm_data.fk_hdrset[0].fk_metadata |= FKM_EG_HAIRPINNED;
+	fm_tcam_entry->ftm_mask.fk_hdrset[0].fk_metadata |= FKM_EG_HAIRPINNED;
+	fm_tcam_entry->ftm_data.fk_packet_tag = tag;
+	fm_tcam_entry->ftm_mask.fk_packet_tag = 0xff;
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_RQ_STEER;
+	fm_op.rq_steer.rq_index = 0;
+	fm_op.rq_steer.vnic_handle = vf->enic.fm_vnic_handle;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_END;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	attrs.group = 0;
+	attrs.ingress = 1;
+	attrs.egress = 0;
+	attrs.priority = FM_HIGHEST_PRIORITY;
+	flow1 = enic_fm_flow_add_entry(fm, fm_tcam_entry, fm_action,
+				       &attrs, &error);
+	enic_fm_close_scratch(fm);
+	if (flow1 == NULL) {
+		ENICPMD_LOG(ERR, "Cannot create flow 1 for representor->VF");
+		enic_fm_flow_destroy(pf->rte_dev, flow0, &error);
+		return -EINVAL;
+	}
+	LIST_INSERT_HEAD(&pf->flows, flow1, next);
+	flow1->internal = 1;
+	ENICPMD_LOG(DEBUG, "representor->VF %d flow created: tag %d hairpinned -> VF RQ %d",
+		    vf->vf_id, tag, fm_op.rq_steer.rq_index);
+	vf->rep2vf_flow[0] = flow0;
+	vf->rep2vf_flow[1] = flow1;
+	/* Done with this tag, use a different one next time */
+	fm->vf_rep_tag++;
+	return 0;
+}
+
+/*
+ * Add a low priority flow that matches all packets from VF and loops them
+ * back to the representor.
+ */
+int
+enic_fm_add_vf2rep_flow(struct enic_vf_representor *vf)
+{
+	struct fm_tcam_match_entry *fm_tcam_entry;
+	struct rte_flow *flow0, *flow1;
+	struct fm_action *fm_action;
+	struct rte_flow_error error;
+	struct rte_flow_attr attrs;
+	struct fm_action_op fm_op;
+	struct enic_flowman *fm;
+	struct enic *pf;
+	uint8_t tag;
+
+	pf = vf->pf;
+	fm = pf->fm;
+	tag = fm->vf_rep_tag;
+	enic_fm_open_scratch(fm);
+	fm_tcam_entry = &fm->tcam_entry;
+	fm_action = &fm->action;
+	/* Egress rule: match-any and tag+hairpin */
+	fm_tcam_entry->ftm_data.fk_wq_id = 0;
+	fm_tcam_entry->ftm_mask.fk_wq_id = 0xffff;
+	fm_tcam_entry->ftm_data.fk_wq_vnic = vf->enic.fm_vnic_handle;
+	fm_tcam_entry->ftm_flags |= FMEF_COUNTER;
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_TAG;
+	fm_op.tag.tag = tag;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_EG_HAIRPIN;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_END;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	attrs.group = 0;
+	attrs.ingress = 0;
+	attrs.egress = 1;
+	attrs.priority = FM_LOWEST_PRIORITY;
+	flow0 = enic_fm_flow_add_entry(fm, fm_tcam_entry, fm_action,
+				       &attrs, &error);
+	enic_fm_close_scratch(fm);
+	if (flow0 == NULL) {
+		ENICPMD_LOG(ERR, "Cannot create flow 0 for VF->representor");
+		return -EINVAL;
+	}
+	LIST_INSERT_HEAD(&pf->flows, flow0, next);
+	/* Make this flow internal, so the user app cannot delete it */
+	flow0->internal = 1;
+	ENICPMD_LOG(DEBUG, "VF %d->representor flow created: wq %d (low prio) -> tag %d hairpin",
+		    vf->vf_id, fm_tcam_entry->ftm_data.fk_wq_id, tag);
+
+	/* Ingress: steer hairpinned to VF rep RQ */
+	enic_fm_open_scratch(fm);
+	fm_tcam_entry->ftm_flags |= FMEF_COUNTER;
+	fm_tcam_entry->ftm_data.fk_hdrset[0].fk_metadata |= FKM_EG_HAIRPINNED;
+	fm_tcam_entry->ftm_mask.fk_hdrset[0].fk_metadata |= FKM_EG_HAIRPINNED;
+	fm_tcam_entry->ftm_data.fk_packet_tag = tag;
+	fm_tcam_entry->ftm_mask.fk_packet_tag = 0xff;
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_RQ_STEER;
+	fm_op.rq_steer.rq_index = vf->pf_rq_sop_idx;
+	fm_op.rq_steer.vnic_handle = pf->fm_vnic_handle;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	memset(&fm_op, 0, sizeof(fm_op));
+	fm_op.fa_op = FMOP_END;
+	enic_fm_append_action_op(fm, &fm_op, &error);
+	attrs.group = 0;
+	attrs.ingress = 1;
+	attrs.egress = 0;
+	attrs.priority = FM_HIGHEST_PRIORITY;
+	flow1 = enic_fm_flow_add_entry(fm, fm_tcam_entry, fm_action,
+				       &attrs, &error);
+	enic_fm_close_scratch(fm);
+	if (flow1 == NULL) {
+		ENICPMD_LOG(ERR, "Cannot create flow 1 for VF->representor");
+		enic_fm_flow_destroy(pf->rte_dev, flow0, &error);
+		return -EINVAL;
+	}
+	LIST_INSERT_HEAD(&pf->flows, flow1, next);
+	flow1->internal = 1;
+	ENICPMD_LOG(DEBUG, "VF %d->representor flow created: tag %d hairpinned -> PF RQ %d",
+		    vf->vf_id, tag, vf->pf_rq_sop_idx);
+	vf->vf2rep_flow[0] = flow0;
+	vf->vf2rep_flow[1] = flow1;
+	/* Done with this tag, use a different one next time */
+	fm->vf_rep_tag++;
+	return 0;
+}
+
+/* Destroy representor flows created by enic_fm_add_{rep2vf,vf2rep}_flow */
+static void
+delete_rep_flows(struct enic *enic)
+{
+	struct enic_vf_representor *vf;
+	struct rte_flow_error error;
+	struct rte_eth_dev *dev;
+	uint32_t i;
+
+	RTE_ASSERT(rte_eth_dev_is_repr(enic->rte_dev));
+	vf = VF_ENIC_TO_VF_REP(enic);
+	dev = vf->pf->rte_dev;
+	for (i = 0; i < ARRAY_SIZE(vf->vf2rep_flow); i++) {
+		if (vf->vf2rep_flow[i])
+			enic_fm_flow_destroy(dev, vf->vf2rep_flow[i], &error);
+	}
+	for (i = 0; i < ARRAY_SIZE(vf->rep2vf_flow); i++) {
+		if (vf->rep2vf_flow[i])
+			enic_fm_flow_destroy(dev, vf->rep2vf_flow[i], &error);
+	}
+}
+
+static struct enic_flowman *
+begin_fm(struct enic *enic)
+{
+	struct enic_vf_representor *vf;
+	struct enic_flowman *fm;
+
+	/* Representor uses PF flowman */
+	if (rte_eth_dev_is_repr(enic->rte_dev)) {
+		vf = VF_ENIC_TO_VF_REP(enic);
+		fm = vf->pf->fm;
+	} else {
+		fm = enic->fm;
+	}
+	/* Save the API caller and lock if representors exist */
+	if (fm) {
+		if (fm->owner_enic->switchdev_mode)
+			rte_spinlock_lock(&fm->lock);
+		fm->user_enic = enic;
+	}
+	return fm;
+}
+
+static void
+end_fm(struct enic_flowman *fm)
+{
+	fm->user_enic = NULL;
+	if (fm->owner_enic->switchdev_mode)
+		rte_spinlock_unlock(&fm->lock);
+}

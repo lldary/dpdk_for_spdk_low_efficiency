@@ -4,6 +4,8 @@
  * Copyright 2017 Cavium, Inc.
  */
 
+#include <stdlib.h>
+
 #include "pipeline_common.h"
 
 static __rte_always_inline int
@@ -16,6 +18,7 @@ worker_generic(void *arg)
 	uint8_t port_id = data->port_id;
 	size_t sent = 0, received = 0;
 	unsigned int lcore_id = rte_lcore_id();
+	uint16_t nb_rx = 0, nb_tx = 0;
 
 	while (!fdata->done) {
 
@@ -27,8 +30,7 @@ worker_generic(void *arg)
 			continue;
 		}
 
-		const uint16_t nb_rx = rte_event_dequeue_burst(dev_id, port_id,
-				&ev, 1, 0);
+		nb_rx = rte_event_dequeue_burst(dev_id, port_id, &ev, 1, 0);
 
 		if (nb_rx == 0) {
 			rte_pause();
@@ -47,11 +49,14 @@ worker_generic(void *arg)
 
 		work();
 
-		while (rte_event_enqueue_burst(dev_id, port_id, &ev, 1) != 1)
-			rte_pause();
+		do {
+			nb_tx = rte_event_enqueue_burst(dev_id, port_id, &ev,
+							1);
+		} while (!nb_tx && !fdata->done);
 		sent++;
 	}
 
+	worker_cleanup(dev_id, port_id, &ev, nb_tx, nb_rx);
 	if (!cdata.quiet)
 		printf("  worker %u thread done. RX=%zu TX=%zu\n",
 				rte_lcore_id(), received, sent);
@@ -69,10 +74,9 @@ worker_generic_burst(void *arg)
 	uint8_t port_id = data->port_id;
 	size_t sent = 0, received = 0;
 	unsigned int lcore_id = rte_lcore_id();
+	uint16_t i, nb_rx = 0, nb_tx = 0;
 
 	while (!fdata->done) {
-		uint16_t i;
-
 		if (fdata->cap.scheduler)
 			fdata->cap.scheduler(lcore_id);
 
@@ -81,8 +85,8 @@ worker_generic_burst(void *arg)
 			continue;
 		}
 
-		const uint16_t nb_rx = rte_event_dequeue_burst(dev_id, port_id,
-				events, RTE_DIM(events), 0);
+		nb_rx = rte_event_dequeue_burst(dev_id, port_id, events,
+						RTE_DIM(events), 0);
 
 		if (nb_rx == 0) {
 			rte_pause();
@@ -103,14 +107,15 @@ worker_generic_burst(void *arg)
 
 			work();
 		}
-		uint16_t nb_tx = rte_event_enqueue_burst(dev_id, port_id,
-				events, nb_rx);
+		nb_tx = rte_event_enqueue_burst(dev_id, port_id, events, nb_rx);
 		while (nb_tx < nb_rx && !fdata->done)
 			nb_tx += rte_event_enqueue_burst(dev_id, port_id,
 							events + nb_tx,
 							nb_rx - nb_tx);
 		sent += nb_tx;
 	}
+
+	worker_cleanup(dev_id, port_id, events, nb_tx, nb_rx);
 
 	if (!cdata.quiet)
 		printf("  worker %u thread done. RX=%zu TX=%zu\n",
@@ -129,6 +134,7 @@ setup_eventdev_generic(struct worker_data *worker_data)
 	struct rte_event_dev_config config = {
 			.nb_event_queues = nb_queues,
 			.nb_event_ports = nb_ports,
+			.nb_single_link_event_port_queues = 1,
 			.nb_events_limit  = 4096,
 			.nb_event_queue_flows = 1024,
 			.nb_event_port_dequeue_depth = 128,
@@ -138,12 +144,13 @@ setup_eventdev_generic(struct worker_data *worker_data)
 			.dequeue_depth = cdata.worker_cq_depth,
 			.enqueue_depth = 64,
 			.new_event_threshold = 4096,
+			.event_port_cfg = RTE_EVENT_PORT_CFG_HINT_WORKER,
 	};
 	struct rte_event_queue_conf wkr_q_conf = {
 			.schedule_type = cdata.queue_type,
 			.priority = RTE_EVENT_DEV_PRIORITY_NORMAL,
 			.nb_atomic_flows = 1024,
-		.nb_atomic_order_sequences = 1024,
+			.nb_atomic_order_sequences = 1024,
 	};
 	struct rte_event_queue_conf tx_q_conf = {
 			.priority = RTE_EVENT_DEV_PRIORITY_HIGHEST,
@@ -167,7 +174,8 @@ setup_eventdev_generic(struct worker_data *worker_data)
 	disable_implicit_release = (dev_info.event_dev_cap &
 			RTE_EVENT_DEV_CAP_IMPLICIT_RELEASE_DISABLE);
 
-	wkr_p_conf.disable_implicit_release = disable_implicit_release;
+	wkr_p_conf.event_port_cfg = disable_implicit_release ?
+		RTE_EVENT_PORT_CFG_DISABLE_IMPL_REL : 0;
 
 	if (dev_info.max_num_events < config.nb_events_limit)
 		config.nb_events_limit = dev_info.max_num_events;
@@ -281,14 +289,13 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 	struct rte_eth_rxconf rx_conf;
 	static const struct rte_eth_conf port_conf_default = {
 		.rxmode = {
-			.mq_mode = ETH_MQ_RX_RSS,
-			.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+			.mq_mode = RTE_ETH_MQ_RX_RSS,
 		},
 		.rx_adv_conf = {
 			.rss_conf = {
-				.rss_hf = ETH_RSS_IP |
-					  ETH_RSS_TCP |
-					  ETH_RSS_UDP,
+				.rss_hf = RTE_ETH_RSS_IP |
+					  RTE_ETH_RSS_TCP |
+					  RTE_ETH_RSS_UDP,
 			}
 		}
 	};
@@ -310,12 +317,12 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 	}
 
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 		port_conf.txmode.offloads |=
-			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
-	if (dev_info.rx_offload_capa & DEV_RX_OFFLOAD_RSS_HASH)
-		port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_RSS_HASH;
+	if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_RSS_HASH)
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_RSS_HASH;
 
 	rx_conf = dev_info.default_rxconf;
 	rx_conf.offloads = port_conf.rxmode.offloads;
@@ -366,10 +373,7 @@ port_init(uint8_t port, struct rte_mempool *mbuf_pool)
 
 	printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			" %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
-			(unsigned int)port,
-			addr.addr_bytes[0], addr.addr_bytes[1],
-			addr.addr_bytes[2], addr.addr_bytes[3],
-			addr.addr_bytes[4], addr.addr_bytes[5]);
+			(unsigned int)port, RTE_ETHER_ADDR_BYTES(&addr));
 
 	/* Enable RX in promiscuous mode for the Ethernet device. */
 	retval = rte_eth_promiscuous_enable(port);
@@ -417,6 +421,7 @@ init_adapters(uint16_t nb_ports)
 		.dequeue_depth = cdata.worker_cq_depth,
 		.enqueue_depth = 64,
 		.new_event_threshold = 4096,
+		.event_port_cfg = RTE_EVENT_PORT_CFG_HINT_PRODUCER,
 	};
 
 	if (adptr_p_conf.new_event_threshold > dev_info.max_num_events)

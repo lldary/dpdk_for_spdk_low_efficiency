@@ -9,10 +9,6 @@
 
 #include <rte_compat.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /* Status field in FD is updated on Rx side by FMAN with following information.
  * Refer to field description in FM BG.
  */
@@ -81,6 +77,8 @@ __rte_internal
 void fman_if_enable_rx(struct fman_if *p);
 __rte_internal
 void fman_if_disable_rx(struct fman_if *p);
+__rte_internal
+int fman_if_get_rx_status(struct fman_if *p);
 
 /* Enable/disable loopback on specific interfaces */
 __rte_internal
@@ -111,6 +109,7 @@ __rte_internal
 int fman_if_set_fc_quanta(struct fman_if *fm_if, u16 pause_quanta);
 
 /* Set default error fqid on specific interface */
+__rte_internal
 void fman_if_set_err_fqid(struct fman_if *fm_if, uint32_t err_fqid);
 
 /* Get IC transfer params */
@@ -138,6 +137,7 @@ __rte_internal
 void fman_if_set_sg(struct fman_if *fm_if, int enable);
 
 /* Get interface Max Frame length (MTU) */
+__rte_internal
 uint16_t fman_if_get_maxfrm(struct fman_if *fm_if);
 
 /* Set interface  Max Frame length (MTU) */
@@ -150,6 +150,10 @@ void fman_if_set_dnia(struct fman_if *fm_if, uint32_t nia);
 /* discard error packets on rx */
 __rte_internal
 void fman_if_discard_rx_errors(struct fman_if *fm_if);
+
+__rte_internal
+void fman_if_receive_rx_errors(struct fman_if *fm_if,
+	unsigned int err_eq);
 
 __rte_internal
 void fman_if_set_mcast_filter_table(struct fman_if *p);

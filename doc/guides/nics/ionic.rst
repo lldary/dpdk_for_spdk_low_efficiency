@@ -1,21 +1,22 @@
-..  SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
-    Copyright(c) 2018-2019 Pensando Systems, Inc. All rights reserved.
+..  SPDX-License-Identifier: BSD-3-Clause
+    Copyright 2018-2022 Advanced Micro Devices, Inc.
 
 IONIC Driver
 ============
 
-The ionic driver provides support for Pensando server adapters.
+The ionic driver provides support for AMD Pensando server adapters.
 It currently supports the below models:
 
-- `Naples DSC-25 <https://pensando.io/assets/documents/Naples-25_ProductBrief_10-2019.pdf>`_
-- `Naples DSC-100 <https://pensando.io/assets/documents/Naples_100_ProductBrief-10-2019.pdf>`_
+- DSC-25 dual-port 25G Distributed Services Card `(pdf) <https://pensandoio.secure.force.com/DownloadFile?id=a0L4T000004IKurUAG>`__
+- DSC-100 dual-port 100G Distributed Services Card `(pdf) <https://pensandoio.secure.force.com/DownloadFile?id=a0L4T000004IKuwUAG>`__
+- DSC-200 dual-port 200G Distributed Services Card `(pdf) <https://www.amd.com/system/files/documents/pensando-dsc-200-product-brief.pdf>`__
 
-Please visit https://pensando.io for more information.
+Please visit the AMD Pensando web site at https://www.amd.com/en/accelerators/pensando for more information.
 
 Identifying the Adapter
 -----------------------
 
-To find if one or more Pensando PCI Ethernet devices are installed
+To determine if one or more AMD Pensando DSC Ethernet devices are installed
 on the host, check for the PCI devices:
 
    .. code-block:: console
@@ -24,18 +25,28 @@ on the host, check for the PCI devices:
       b5:00.0 Ethernet controller: Device 1dd8:1002
       b6:00.0 Ethernet controller: Device 1dd8:1002
 
-Pre-Installation Configuration
-------------------------------
+Firmware Support
+----------------
 
-The following options can be modified in the ``config`` file.
+The ionic PMD requires firmware which supports 16 segment transmit SGLs.
+This support was added prior to version 1.0. For help upgrading older versions,
+please contact AMD Pensando support.
 
-- ``CONFIG_RTE_LIBRTE_IONIC_PMD`` (default ``y``)
+Runtime Configuration
+---------------------
 
-  Toggle compilation of ionic PMD.
+- ``Queue in CMB support`` (default ``0``)
+
+  Queue memory can be allocated from the Controller Memory Buffer (CMB) using
+  the ``ionic_cmb`` ``devargs`` parameter.
+
+  For example::
+
+    -a 0000:b5:00.0,ionic_cmb=1
 
 Building DPDK
 -------------
 
-The ionic PMD driver supports UIO and VFIO, please refer to the
+The ionic PMD supports UIO and VFIO. Please refer to the
 :ref:`DPDK documentation that comes with the DPDK suite <linux_gsg>`
 for instructions on how to build DPDK.

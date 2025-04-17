@@ -53,9 +53,9 @@ See the DPDK Getting Started Guides for more information on these options.
 	One lcore is needed for process admin, tests are run on all other cores.
 	To run tests on two lcores, three lcores must be passed to the tool.
 
-*   ``-w <PCI>``
+*   ``-a <PCI>``
 
-	Add a PCI device in white list.
+	Add a PCI device in allow list.
 
 *   ``--vdev <driver><id>``
 
@@ -84,7 +84,12 @@ Application Options
 
  ``--operation [comp/decomp/comp_and_decomp]``: perform test on compression, decompression or both operations
 
+ ``--algo [null/deflate/lzs/lz4]`` : perform test on algorithm null (DMA), deflate, lzs or lz4 (default: deflate)
+
  ``--huffman-enc [fixed/dynamic/default]``: Huffman encoding (default: dynamic)
+
+ ``--lz4-flags N``: flags for LZ4,
+ see `LZ4 Frame Descriptor <https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md#frame-descriptor>`_ (default: no flags)
 
  ``--compress-level N``: compression level, which could be a single value, list or range (default: range between 1 and 9)
 
@@ -97,18 +102,6 @@ Application Options
  ``-h``: prints this help
 
 
-Compiling the Tool
-------------------
-
-**Step 1: PMD setting**
-
-The ``dpdk-test-compress-perf`` tool depends on compression device drivers PMD which
-can be disabled by default in the build configuration file ``common_base``.
-The compression device drivers PMD which should be tested can be enabled by setting e.g.::
-
-   CONFIG_RTE_LIBRTE_PMD_ISAL=y
-
-
 Running the Tool
 ----------------
 
@@ -116,5 +109,5 @@ The tool has a number of command line options. Here is the sample command line:
 
 .. code-block:: console
 
-   ./build/app/dpdk-test-compress-perf  -l 4 -- --driver-name compress_qat --input-file test.txt --seg-sz 8192
+   ./<build_dir>/app/dpdk-test-compress-perf  -l 4 -- --driver-name compress_qat --input-file test.txt --seg-sz 8192
     --compress-level 1:1:9 --num-iter 10 --extended-input-sz 1048576  --max-num-sgl-segs 16 --huffman-enc fixed

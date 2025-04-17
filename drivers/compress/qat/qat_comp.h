@@ -5,7 +5,7 @@
 #ifndef _QAT_COMP_H_
 #define _QAT_COMP_H_
 
-#ifdef RTE_LIBRTE_COMPRESSDEV
+#ifdef RTE_LIB_COMPRESSDEV
 
 #include <rte_compressdev.h>
 #include <rte_compressdev_pmd.h>
@@ -28,14 +28,16 @@
 #define QAT_MIN_OUT_BUF_SIZE 46
 
 /* maximum size of the state registers */
-#define QAT_STATE_REGISTERS_MAX_SIZE 64
+#define QAT_STATE_REGISTERS_MAX_SIZE 256 /* 64 bytes for GEN1-3, 256 for GEN4 */
 
 /* decompressor context size */
 #define QAT_INFLATE_CONTEXT_SIZE_GEN1 36864
 #define QAT_INFLATE_CONTEXT_SIZE_GEN2 34032
 #define QAT_INFLATE_CONTEXT_SIZE_GEN3 34032
-#define QAT_INFLATE_CONTEXT_SIZE RTE_MAX(RTE_MAX(QAT_INFLATE_CONTEXT_SIZE_GEN1,\
-		QAT_INFLATE_CONTEXT_SIZE_GEN2), QAT_INFLATE_CONTEXT_SIZE_GEN3)
+#define QAT_INFLATE_CONTEXT_SIZE_GEN4 36864
+#define QAT_INFLATE_CONTEXT_SIZE RTE_MAX(RTE_MAX(RTE_MAX(\
+		QAT_INFLATE_CONTEXT_SIZE_GEN1, QAT_INFLATE_CONTEXT_SIZE_GEN2), \
+		QAT_INFLATE_CONTEXT_SIZE_GEN3), QAT_INFLATE_CONTEXT_SIZE_GEN4)
 
 enum qat_comp_request_type {
 	QAT_COMP_REQUEST_FIXED_COMP_STATELESS,
@@ -138,6 +140,9 @@ qat_comp_stream_create(struct rte_compressdev *dev,
 
 int
 qat_comp_stream_free(struct rte_compressdev *dev, void *stream);
+
+uint16_t
+qat_enqueue_comp_op_burst(void *qp, void **ops, uint16_t nb_ops);
 
 #endif
 #endif

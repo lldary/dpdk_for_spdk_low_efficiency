@@ -37,8 +37,6 @@ test_reciprocal_division_perf(void)
 	struct rte_reciprocal reci_u32 = {0};
 	struct rte_reciprocal_u64 reci_u64 = {0};
 
-	rte_srand(rte_rdtsc());
-
 	printf("Validating unsigned 32bit division.\n");
 	for (i = 0; i < MAX_ITERATIONS; i++) {
 		/* Change divisor every DIVIDE_ITER iterations. */
@@ -71,10 +69,12 @@ test_reciprocal_division_perf(void)
 			tot_cyc_n);
 	printf("Total number of cycles reciprocal division : %"PRIu64"\n",
 			tot_cyc_r);
-	printf("Cycles per division(normal) : %3.2f\n",
-			((double)tot_cyc_n)/i);
-	printf("Cycles per division(reciprocal) : %3.2f\n\n",
-			((double)tot_cyc_r)/i);
+	if (i != 0) {
+		printf("Cycles per division(normal) : %3.2f\n",
+				((double)tot_cyc_n)/i);
+		printf("Cycles per division(reciprocal) : %3.2f\n\n",
+				((double)tot_cyc_r)/i);
+	}
 
 	tot_cyc_n = 0;
 	tot_cyc_r = 0;
@@ -111,11 +111,12 @@ test_reciprocal_division_perf(void)
 			tot_cyc_n);
 	printf("Total number of cycles reciprocal division : %"PRIu64"\n",
 			tot_cyc_r);
-	printf("Cycles per division(normal) : %3.2f\n",
-			((double)tot_cyc_n)/i);
-	printf("Cycles per division(reciprocal) : %3.2f\n\n",
-			((double)tot_cyc_r)/i);
-
+	if (i != 0) {
+		printf("Cycles per division(normal) : %3.2f\n",
+				((double)tot_cyc_n)/i);
+		printf("Cycles per division(reciprocal) : %3.2f\n\n",
+				((double)tot_cyc_r)/i);
+	}
 	tot_cyc_n = 0;
 	tot_cyc_r = 0;
 
@@ -152,10 +153,12 @@ test_reciprocal_division_perf(void)
 			tot_cyc_n);
 	printf("Total number of cycles reciprocal division : %"PRIu64"\n",
 			tot_cyc_r);
-	printf("Cycles per division(normal) : %3.2f\n",
-			((double)tot_cyc_n)/i);
-	printf("Cycles per division(reciprocal) : %3.2f\n\n",
-			((double)tot_cyc_r)/i);
+	if (i != 0) {
+		printf("Cycles per division(normal) : %3.2f\n",
+				((double)tot_cyc_n)/i);
+		printf("Cycles per division(reciprocal) : %3.2f\n\n",
+				((double)tot_cyc_r)/i);
+	}
 
 	tot_cyc_n = 0;
 	tot_cyc_r = 0;
@@ -190,12 +193,14 @@ test_reciprocal_division_perf(void)
 			tot_cyc_n);
 	printf("Total number of cycles reciprocal division : %"PRIu64"\n",
 			tot_cyc_r);
-	printf("Cycles per division(normal) : %3.2f\n",
-			((double)tot_cyc_n)/i);
-	printf("Cycles per division(reciprocal) : %3.2f\n",
-			((double)tot_cyc_r)/i);
+	if (i != 0) {
+		printf("Cycles per division(normal) : %3.2f\n",
+				((double)tot_cyc_n)/i);
+		printf("Cycles per division(reciprocal) : %3.2f\n",
+				((double)tot_cyc_r)/i);
+	}
 
 	return result;
 }
 
-REGISTER_TEST_COMMAND(reciprocal_division_perf, test_reciprocal_division_perf);
+REGISTER_PERF_TEST(reciprocal_division_perf, test_reciprocal_division_perf);

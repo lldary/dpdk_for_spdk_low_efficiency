@@ -7,6 +7,7 @@
 
 #include <rte_ethdev.h>
 #include <rte_ethdev_core.h>
+#include <ethdev_driver.h>
 
 #include "base/hinic_compat.h"
 #include "base/hinic_pmd_cfg.h"
@@ -30,6 +31,22 @@
 
 #define HINIC_UINT32_BIT_SIZE      (CHAR_BIT * sizeof(uint32_t))
 #define HINIC_VFTA_SIZE            (4096 / HINIC_UINT32_BIT_SIZE)
+
+#define HINIC_MAX_MTU_SIZE              9600
+#define HINIC_MIN_MTU_SIZE              256
+
+#define HINIC_ETH_OVERHEAD \
+	(RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN + RTE_VLAN_HLEN * 2)
+
+#define HINIC_MIN_FRAME_SIZE        (HINIC_MIN_MTU_SIZE + HINIC_ETH_OVERHEAD)
+#define HINIC_MAX_JUMBO_FRAME_SIZE  (HINIC_MAX_MTU_SIZE + HINIC_ETH_OVERHEAD)
+
+#define HINIC_MTU_TO_PKTLEN(mtu)    ((mtu) + HINIC_ETH_OVERHEAD)
+
+#define HINIC_PKTLEN_TO_MTU(pktlen) ((pktlen) - HINIC_ETH_OVERHEAD)
+
+/* The max frame size with default MTU */
+#define HINIC_ETH_MAX_LEN           (RTE_ETHER_MTU + HINIC_ETH_OVERHEAD)
 
 enum hinic_dev_status {
 	HINIC_DEV_INIT,
@@ -153,7 +170,7 @@ struct tag_tcam_key_mem {
 		/*
 		 * tunnel packet, mask must be 0xff, spec value is 1;
 		 * normal packet, mask must be 0, spec value is 0;
-		 * if tunnal packet, ucode use
+		 * if tunnel packet, ucode use
 		 * sip/dip/protocol/src_port/dst_dport from inner packet
 		 */
 		u32 tunnel_flag:8;
@@ -329,7 +346,8 @@ struct hinic_nic_dev {
 	unsigned int flags;
 	struct nic_service_cap nic_cap;
 	u32 rx_mode_status;	/* promisc or allmulticast */
-	unsigned long dev_status;
+	pthread_mutex_t rx_mode_mutex;
+	u32 dev_status;
 
 	char proc_dev_name[HINIC_DEV_NAME_LEN];
 	/* PF0->COS4, PF1->COS5, PF2->COS6, PF3->COS7,

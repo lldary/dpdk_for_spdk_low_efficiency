@@ -13,3 +13,7 @@ Baseband Device Drivers
     turbo_sw
     fpga_lte_fec
     fpga_5gnr_fec
+    acc100
+    vrb1
+    vrb2
+    la12xx

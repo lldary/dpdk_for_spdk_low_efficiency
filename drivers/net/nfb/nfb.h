@@ -12,6 +12,11 @@
 #include <netcope/rxmac.h>
 #include <netcope/txmac.h>
 
+extern int nfb_logtype;
+#define NFB_LOG(level, fmt, args...) \
+	rte_log(RTE_LOG_ ## level, nfb_logtype, "%s(): " fmt "\n", \
+		__func__, ## args)
+
 #include "nfb_rx.h"
 #include "nfb_tx.h"
 
@@ -36,22 +41,13 @@
 
 #define RTE_NFB_DRIVER_NAME net_nfb
 
-/* Device arguments */
-#define TIMESTAMP_ARG  "timestamp"
-static const char * const VALID_KEYS[] = {TIMESTAMP_ARG, NULL};
 
 struct pmd_internals {
 	uint16_t         max_rxmac;
 	uint16_t         max_txmac;
 	struct nc_rxmac *rxmac[RTE_MAX_NC_RXMAC];
 	struct nc_txmac *txmac[RTE_MAX_NC_TXMAC];
-
-	char             nfb_dev[PATH_MAX];
 	struct nfb_device *nfb;
-	/* Place to remember if filter was promiscuous or filtering by table,
-	 * when disabling allmulticast
-	 */
-	enum nc_rxmac_mac_filter rx_filter_original;
 };
 
 #endif /* _NFB_H_ */

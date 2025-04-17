@@ -3,7 +3,7 @@
  */
 
 #include <stdint.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 
 #include "base/i40e_prototype.h"
@@ -11,130 +11,18 @@
 #include "i40e_ethdev.h"
 #include "i40e_rxtx.h"
 #include "i40e_rxtx_vec_common.h"
+#include "i40e_rxtx_common_avx.h"
 
-#include <x86intrin.h>
+#include <rte_vect.h>
 
 #ifndef __INTEL_COMPILER
 #pragma GCC diagnostic ignored "-Wcast-qual"
 #endif
 
-static inline void
+static __rte_always_inline void
 i40e_rxq_rearm(struct i40e_rx_queue *rxq)
 {
-	int i;
-	uint16_t rx_id;
-	volatile union i40e_rx_desc *rxdp;
-	struct i40e_rx_entry *rxep = &rxq->sw_ring[rxq->rxrearm_start];
-
-	rxdp = rxq->rx_ring + rxq->rxrearm_start;
-
-	/* Pull 'n' more MBUFs into the software ring */
-	if (rte_mempool_get_bulk(rxq->mp,
-				 (void *)rxep,
-				 RTE_I40E_RXQ_REARM_THRESH) < 0) {
-		if (rxq->rxrearm_nb + RTE_I40E_RXQ_REARM_THRESH >=
-		    rxq->nb_rx_desc) {
-			__m128i dma_addr0;
-			dma_addr0 = _mm_setzero_si128();
-			for (i = 0; i < RTE_I40E_DESCS_PER_LOOP; i++) {
-				rxep[i].mbuf = &rxq->fake_mbuf;
-				_mm_store_si128((__m128i *)&rxdp[i].read,
-						dma_addr0);
-			}
-		}
-		rte_eth_devices[rxq->port_id].data->rx_mbuf_alloc_failed +=
-			RTE_I40E_RXQ_REARM_THRESH;
-		return;
-	}
-
-#ifndef RTE_LIBRTE_I40E_16BYTE_RX_DESC
-	struct rte_mbuf *mb0, *mb1;
-	__m128i dma_addr0, dma_addr1;
-	__m128i hdr_room = _mm_set_epi64x(RTE_PKTMBUF_HEADROOM,
-			RTE_PKTMBUF_HEADROOM);
-	/* Initialize the mbufs in vector, process 2 mbufs in one loop */
-	for (i = 0; i < RTE_I40E_RXQ_REARM_THRESH; i += 2, rxep += 2) {
-		__m128i vaddr0, vaddr1;
-
-		mb0 = rxep[0].mbuf;
-		mb1 = rxep[1].mbuf;
-
-		/* load buf_addr(lo 64bit) and buf_physaddr(hi 64bit) */
-		RTE_BUILD_BUG_ON(offsetof(struct rte_mbuf, buf_physaddr) !=
-				offsetof(struct rte_mbuf, buf_addr) + 8);
-		vaddr0 = _mm_loadu_si128((__m128i *)&mb0->buf_addr);
-		vaddr1 = _mm_loadu_si128((__m128i *)&mb1->buf_addr);
-
-		/* convert pa to dma_addr hdr/data */
-		dma_addr0 = _mm_unpackhi_epi64(vaddr0, vaddr0);
-		dma_addr1 = _mm_unpackhi_epi64(vaddr1, vaddr1);
-
-		/* add headroom to pa values */
-		dma_addr0 = _mm_add_epi64(dma_addr0, hdr_room);
-		dma_addr1 = _mm_add_epi64(dma_addr1, hdr_room);
-
-		/* flush desc with pa dma_addr */
-		_mm_store_si128((__m128i *)&rxdp++->read, dma_addr0);
-		_mm_store_si128((__m128i *)&rxdp++->read, dma_addr1);
-	}
-#else
-	struct rte_mbuf *mb0, *mb1, *mb2, *mb3;
-	__m256i dma_addr0_1, dma_addr2_3;
-	__m256i hdr_room = _mm256_set1_epi64x(RTE_PKTMBUF_HEADROOM);
-	/* Initialize the mbufs in vector, process 4 mbufs in one loop */
-	for (i = 0; i < RTE_I40E_RXQ_REARM_THRESH;
-			i += 4, rxep += 4, rxdp += 4) {
-		__m128i vaddr0, vaddr1, vaddr2, vaddr3;
-		__m256i vaddr0_1, vaddr2_3;
-
-		mb0 = rxep[0].mbuf;
-		mb1 = rxep[1].mbuf;
-		mb2 = rxep[2].mbuf;
-		mb3 = rxep[3].mbuf;
-
-		/* load buf_addr(lo 64bit) and buf_physaddr(hi 64bit) */
-		RTE_BUILD_BUG_ON(offsetof(struct rte_mbuf, buf_physaddr) !=
-				offsetof(struct rte_mbuf, buf_addr) + 8);
-		vaddr0 = _mm_loadu_si128((__m128i *)&mb0->buf_addr);
-		vaddr1 = _mm_loadu_si128((__m128i *)&mb1->buf_addr);
-		vaddr2 = _mm_loadu_si128((__m128i *)&mb2->buf_addr);
-		vaddr3 = _mm_loadu_si128((__m128i *)&mb3->buf_addr);
-
-		/*
-		 * merge 0 & 1, by casting 0 to 256-bit and inserting 1
-		 * into the high lanes. Similarly for 2 & 3
-		 */
-		vaddr0_1 = _mm256_inserti128_si256(
-				_mm256_castsi128_si256(vaddr0), vaddr1, 1);
-		vaddr2_3 = _mm256_inserti128_si256(
-				_mm256_castsi128_si256(vaddr2), vaddr3, 1);
-
-		/* convert pa to dma_addr hdr/data */
-		dma_addr0_1 = _mm256_unpackhi_epi64(vaddr0_1, vaddr0_1);
-		dma_addr2_3 = _mm256_unpackhi_epi64(vaddr2_3, vaddr2_3);
-
-		/* add headroom to pa values */
-		dma_addr0_1 = _mm256_add_epi64(dma_addr0_1, hdr_room);
-		dma_addr2_3 = _mm256_add_epi64(dma_addr2_3, hdr_room);
-
-		/* flush desc with pa dma_addr */
-		_mm256_store_si256((__m256i *)&rxdp->read, dma_addr0_1);
-		_mm256_store_si256((__m256i *)&(rxdp + 2)->read, dma_addr2_3);
-	}
-
-#endif
-
-	rxq->rxrearm_start += RTE_I40E_RXQ_REARM_THRESH;
-	if (rxq->rxrearm_start >= rxq->nb_rx_desc)
-		rxq->rxrearm_start = 0;
-
-	rxq->rxrearm_nb -= RTE_I40E_RXQ_REARM_THRESH;
-
-	rx_id = (uint16_t)((rxq->rxrearm_start == 0) ?
-			     (rxq->nb_rx_desc - 1) : (rxq->rxrearm_start - 1));
-
-	/* Update the tail pointer on the NIC */
-	I40E_PCI_REG_WRITE(rxq->qrx_tail, rx_id);
+	return i40e_rxq_rearm_common(rxq, false);
 }
 
 #ifndef RTE_LIBRTE_I40E_16BYTE_RX_DESC
@@ -191,7 +79,7 @@ desc_fdir_processing_32b(volatile union i40e_rx_desc *rxdp,
 	 * - Position that bit correctly based on packet number
 	 * - OR in the resulting bit to mbuf_flags
 	 */
-	RTE_BUILD_BUG_ON(PKT_RX_FDIR_ID != (1 << 13));
+	RTE_BUILD_BUG_ON(RTE_MBUF_F_RX_FDIR_ID != (1 << 13));
 	__m256i mbuf_flag_mask = _mm256_set_epi32(0, 0, 0, 1 << 13,
 						  0, 0, 0, 1 << 13);
 	__m256i desc_flag_bit =  _mm256_and_si256(mbuf_flag_mask, fdir_mask);
@@ -321,8 +209,8 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 	 * destination
 	 */
 	const __m256i vlan_flags_shuf = _mm256_set_epi32(
-			0, 0, PKT_RX_VLAN | PKT_RX_VLAN_STRIPPED, 0,
-			0, 0, PKT_RX_VLAN | PKT_RX_VLAN_STRIPPED, 0);
+			0, 0, RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED, 0,
+			0, 0, RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED, 0);
 	/*
 	 * data to be shuffled by result of flag mask, shifted down 11.
 	 * If RSS/FDIR bits are set, shuffle moves appropriate flags in
@@ -330,11 +218,11 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 	 */
 	const __m256i rss_flags_shuf = _mm256_set_epi8(
 			0, 0, 0, 0, 0, 0, 0, 0,
-			PKT_RX_RSS_HASH | PKT_RX_FDIR, PKT_RX_RSS_HASH, 0, 0,
-			0, 0, PKT_RX_FDIR, 0, /* end up 128-bits */
+			RTE_MBUF_F_RX_RSS_HASH | RTE_MBUF_F_RX_FDIR, RTE_MBUF_F_RX_RSS_HASH, 0, 0,
+			0, 0, RTE_MBUF_F_RX_FDIR, 0, /* end up 128-bits */
 			0, 0, 0, 0, 0, 0, 0, 0,
-			PKT_RX_RSS_HASH | PKT_RX_FDIR, PKT_RX_RSS_HASH, 0, 0,
-			0, 0, PKT_RX_FDIR, 0);
+			RTE_MBUF_F_RX_RSS_HASH | RTE_MBUF_F_RX_FDIR, RTE_MBUF_F_RX_RSS_HASH, 0, 0,
+			0, 0, RTE_MBUF_F_RX_FDIR, 0);
 
 	/*
 	 * data to be shuffled by the result of the flags mask shifted by 22
@@ -342,29 +230,37 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 	 */
 	const __m256i l3_l4_flags_shuf = _mm256_set_epi8(0, 0, 0, 0, 0, 0, 0, 0,
 			/* shift right 1 bit to make sure it not exceed 255 */
-			(PKT_RX_EIP_CKSUM_BAD | PKT_RX_L4_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_EIP_CKSUM_BAD | PKT_RX_L4_CKSUM_BAD) >> 1,
-			(PKT_RX_EIP_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_EIP_CKSUM_BAD) >> 1,
-			(PKT_RX_L4_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_BAD) >> 1,
-			PKT_RX_IP_CKSUM_BAD >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD  |
+			 RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD  |
+			 RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_GOOD |
+			 RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_GOOD |
+			 RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_BAD  | RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_BAD  | RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_GOOD | RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_GOOD | RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
 			/* second 128-bits */
 			0, 0, 0, 0, 0, 0, 0, 0,
-			(PKT_RX_EIP_CKSUM_BAD | PKT_RX_L4_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_EIP_CKSUM_BAD | PKT_RX_L4_CKSUM_BAD) >> 1,
-			(PKT_RX_EIP_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_EIP_CKSUM_BAD) >> 1,
-			(PKT_RX_L4_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD) >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_BAD) >> 1,
-			PKT_RX_IP_CKSUM_BAD >> 1,
-			(PKT_RX_IP_CKSUM_GOOD | PKT_RX_L4_CKSUM_GOOD) >> 1);
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD  |
+			 RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_BAD  |
+			 RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_GOOD |
+			 RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_GOOD |
+			 RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_BAD  | RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_BAD  | RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_GOOD | RTE_MBUF_F_RX_IP_CKSUM_BAD) >> 1,
+			(RTE_MBUF_F_RX_L4_CKSUM_GOOD | RTE_MBUF_F_RX_IP_CKSUM_GOOD) >> 1);
 
 	const __m256i cksum_mask = _mm256_set1_epi32(
-			PKT_RX_IP_CKSUM_GOOD | PKT_RX_IP_CKSUM_BAD |
-			PKT_RX_L4_CKSUM_GOOD | PKT_RX_L4_CKSUM_BAD |
-			PKT_RX_EIP_CKSUM_BAD);
+			RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_IP_CKSUM_BAD |
+			RTE_MBUF_F_RX_L4_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_BAD |
+			RTE_MBUF_F_RX_OUTER_IP_CKSUM_BAD);
 
 	RTE_SET_USED(avx_aligned); /* for 32B descriptors we don't use this */
 
@@ -380,46 +276,30 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 				_mm256_loadu_si256((void *)&sw_ring[i + 4]));
 #endif
 
-		__m256i raw_desc0_1, raw_desc2_3, raw_desc4_5, raw_desc6_7;
-#ifdef RTE_LIBRTE_I40E_16BYTE_RX_DESC
-		/* for AVX we need alignment otherwise loads are not atomic */
-		if (avx_aligned) {
-			/* load in descriptors, 2 at a time, in reverse order */
-			raw_desc6_7 = _mm256_load_si256((void *)(rxdp + 6));
-			rte_compiler_barrier();
-			raw_desc4_5 = _mm256_load_si256((void *)(rxdp + 4));
-			rte_compiler_barrier();
-			raw_desc2_3 = _mm256_load_si256((void *)(rxdp + 2));
-			rte_compiler_barrier();
-			raw_desc0_1 = _mm256_load_si256((void *)(rxdp + 0));
-		} else
-#endif
-		do {
-			const __m128i raw_desc7 = _mm_load_si128((void *)(rxdp + 7));
-			rte_compiler_barrier();
-			const __m128i raw_desc6 = _mm_load_si128((void *)(rxdp + 6));
-			rte_compiler_barrier();
-			const __m128i raw_desc5 = _mm_load_si128((void *)(rxdp + 5));
-			rte_compiler_barrier();
-			const __m128i raw_desc4 = _mm_load_si128((void *)(rxdp + 4));
-			rte_compiler_barrier();
-			const __m128i raw_desc3 = _mm_load_si128((void *)(rxdp + 3));
-			rte_compiler_barrier();
-			const __m128i raw_desc2 = _mm_load_si128((void *)(rxdp + 2));
-			rte_compiler_barrier();
-			const __m128i raw_desc1 = _mm_load_si128((void *)(rxdp + 1));
-			rte_compiler_barrier();
-			const __m128i raw_desc0 = _mm_load_si128((void *)(rxdp + 0));
+		const __m128i raw_desc7 = _mm_load_si128((void *)(rxdp + 7));
+		rte_compiler_barrier();
+		const __m128i raw_desc6 = _mm_load_si128((void *)(rxdp + 6));
+		rte_compiler_barrier();
+		const __m128i raw_desc5 = _mm_load_si128((void *)(rxdp + 5));
+		rte_compiler_barrier();
+		const __m128i raw_desc4 = _mm_load_si128((void *)(rxdp + 4));
+		rte_compiler_barrier();
+		const __m128i raw_desc3 = _mm_load_si128((void *)(rxdp + 3));
+		rte_compiler_barrier();
+		const __m128i raw_desc2 = _mm_load_si128((void *)(rxdp + 2));
+		rte_compiler_barrier();
+		const __m128i raw_desc1 = _mm_load_si128((void *)(rxdp + 1));
+		rte_compiler_barrier();
+		const __m128i raw_desc0 = _mm_load_si128((void *)(rxdp + 0));
 
-			raw_desc6_7 = _mm256_inserti128_si256(
-					_mm256_castsi128_si256(raw_desc6), raw_desc7, 1);
-			raw_desc4_5 = _mm256_inserti128_si256(
-					_mm256_castsi128_si256(raw_desc4), raw_desc5, 1);
-			raw_desc2_3 = _mm256_inserti128_si256(
-					_mm256_castsi128_si256(raw_desc2), raw_desc3, 1);
-			raw_desc0_1 = _mm256_inserti128_si256(
-					_mm256_castsi128_si256(raw_desc0), raw_desc1, 1);
-		} while (0);
+		const __m256i raw_desc6_7 = _mm256_inserti128_si256(
+				_mm256_castsi128_si256(raw_desc6), raw_desc7, 1);
+		const __m256i raw_desc4_5 = _mm256_inserti128_si256(
+				_mm256_castsi128_si256(raw_desc4), raw_desc5, 1);
+		const __m256i raw_desc2_3 = _mm256_inserti128_si256(
+				_mm256_castsi128_si256(raw_desc2), raw_desc3, 1);
+		const __m256i raw_desc0_1 = _mm256_inserti128_si256(
+				_mm256_castsi128_si256(raw_desc0), raw_desc1, 1);
 
 		if (split_packet) {
 			int j;
@@ -547,7 +427,7 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 			 * order (hi->lo): [1, 3, 5, 7, 0, 2, 4, 6]
 			 * Then OR FDIR flags to mbuf_flags on FDIR ID hit.
 			 */
-			RTE_BUILD_BUG_ON(PKT_RX_FDIR_ID != (1 << 13));
+			RTE_BUILD_BUG_ON(RTE_MBUF_F_RX_FDIR_ID != (1 << 13));
 			const __m256i pkt_fdir_bit = _mm256_set1_epi32(1 << 13);
 			const __m256i fdir_mask = _mm256_cmpeq_epi32(fdir, fdir_id);
 			__m256i fdir_bits = _mm256_and_si256(fdir_mask, pkt_fdir_bit);
@@ -709,9 +589,9 @@ _recv_raw_pkts_vec_avx2(struct i40e_rx_queue *rxq, struct rte_mbuf **rx_pkts,
 		status0_7 = _mm256_packs_epi32(status0_7,
 				_mm256_setzero_si256());
 
-		uint64_t burst = __builtin_popcountll(_mm_cvtsi128_si64(
+		uint64_t burst = rte_popcount64(_mm_cvtsi128_si64(
 				_mm256_extracti128_si256(status0_7, 1)));
-		burst += __builtin_popcountll(_mm_cvtsi128_si64(
+		burst += rte_popcount64(_mm_cvtsi128_si64(
 				_mm256_castsi256_si128(status0_7)));
 		received += burst;
 		if (burst != RTE_I40E_DESCS_PER_LOOP_AVX)
@@ -814,7 +694,7 @@ vtx1(volatile struct i40e_tx_desc *txdp,
 			((uint64_t)pkt->data_len << I40E_TXD_QW1_TX_BUF_SZ_SHIFT));
 
 	__m128i descriptor = _mm_set_epi64x(high_qw,
-				pkt->buf_physaddr + pkt->data_off);
+				pkt->buf_iova + pkt->data_off);
 	_mm_store_si128((__m128i *)txdp, descriptor);
 }
 
@@ -843,11 +723,11 @@ vtx(volatile struct i40e_tx_desc *txdp,
 				((uint64_t)pkt[0]->data_len << I40E_TXD_QW1_TX_BUF_SZ_SHIFT);
 
 		__m256i desc2_3 = _mm256_set_epi64x(
-				hi_qw3, pkt[3]->buf_physaddr + pkt[3]->data_off,
-				hi_qw2, pkt[2]->buf_physaddr + pkt[2]->data_off);
+				hi_qw3, pkt[3]->buf_iova + pkt[3]->data_off,
+				hi_qw2, pkt[2]->buf_iova + pkt[2]->data_off);
 		__m256i desc0_1 = _mm256_set_epi64x(
-				hi_qw1, pkt[1]->buf_physaddr + pkt[1]->data_off,
-				hi_qw0, pkt[0]->buf_physaddr + pkt[0]->data_off);
+				hi_qw1, pkt[1]->buf_iova + pkt[1]->data_off,
+				hi_qw0, pkt[0]->buf_iova + pkt[0]->data_off);
 		_mm256_store_si256((void *)(txdp + 2), desc2_3);
 		_mm256_store_si256((void *)txdp, desc0_1);
 	}
@@ -869,9 +749,6 @@ i40e_xmit_fixed_burst_vec_avx2(void *tx_queue, struct rte_mbuf **tx_pkts,
 	uint16_t n, nb_commit, tx_id;
 	uint64_t flags = I40E_TD_CMD;
 	uint64_t rs = I40E_TX_DESC_CMD_RS | I40E_TD_CMD;
-
-	/* cross rx_thresh boundary is not allowed */
-	nb_pkts = RTE_MIN(nb_pkts, txq->tx_rs_thresh);
 
 	if (txq->nb_tx_free < txq->tx_free_thresh)
 		i40e_tx_free_bufs(txq);
@@ -921,7 +798,7 @@ i40e_xmit_fixed_burst_vec_avx2(void *tx_queue, struct rte_mbuf **tx_pkts,
 
 	txq->tx_tail = tx_id;
 
-	I40E_PCI_REG_WRITE(txq->qtx_tail, txq->tx_tail);
+	I40E_PCI_REG_WC_WRITE(txq->qtx_tail, txq->tx_tail);
 
 	return nb_pkts;
 }
@@ -936,6 +813,7 @@ i40e_xmit_pkts_vec_avx2(void *tx_queue, struct rte_mbuf **tx_pkts,
 	while (nb_pkts) {
 		uint16_t ret, num;
 
+		/* cross rs_thresh boundary is not allowed */
 		num = (uint16_t)RTE_MIN(nb_pkts, txq->tx_rs_thresh);
 		ret = i40e_xmit_fixed_burst_vec_avx2(tx_queue, &tx_pkts[nb_tx],
 						num);

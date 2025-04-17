@@ -1,35 +1,35 @@
 ..  SPDX-License-Identifier: BSD-3-Clause
     Copyright 2019 Mellanox Technologies, Ltd
 
-Mellanox BlueField Board Support Package
-========================================
+NVIDIA BlueField Board Support Package
+======================================
 
-This document has information about steps to setup Mellanox BlueField platform
-and common offload HW drivers of **Mellanox BlueField** family SoC.
+.. note::
 
+   NVIDIA acquired Mellanox Technologies in 2020.
+   The DPDK documentation and code might still include instances
+   of or references to Mellanox trademarks (like BlueField and ConnectX)
+   that are now NVIDIA trademarks.
 
-Supported BlueField family SoCs
--------------------------------
-
-- `BlueField <http://www.mellanox.com/page/products_dyn?product_family=256&mtag=soc_overview>`_
+This document has information about steps to setup NVIDIA BlueField platform
+and common offload HW drivers of **NVIDIA BlueField** family SoC.
 
 
 Supported BlueField Platforms
 -----------------------------
 
-- `BlueField SmartNIC <http://www.mellanox.com/page/products_dyn?product_family=275&mtag=bluefield_smart_nic>`_
-- `BlueField Reference Platforms <http://www.mellanox.com/page/products_dyn?product_family=286&mtag=bluefield_platforms>`_
-- `BlueField Controller Card <http://www.mellanox.com/page/products_dyn?product_family=288&mtag=bluefield_controller_card>`_
+- `BlueField-2 <https://docs.nvidia.com/networking/display/BlueField2DPUENUG/Introduction>`_
+- `BlueField-3 <https://docs.nvidia.com/networking/display/BlueField3DPU/Introduction>`_
 
 
 Common Offload HW Drivers
 -------------------------
 
-1. **NIC Driver**
+#. **NIC Driver**
 
-   See :doc:`../nics/mlx5` for Mellanox mlx5 NIC driver information.
+   See :doc:`../nics/mlx5` for NVIDIA mlx5 NIC driver information.
 
-2. **Cryptodev Driver**
+#. **Cryptodev Driver**
 
    This is based on the crypto extension support of armv8. See
    :doc:`../cryptodevs/armv8` for armv8 crypto driver information.
@@ -42,10 +42,10 @@ Common Offload HW Drivers
 Steps To Setup Platform
 -----------------------
 
-Toolchains, OS and drivers can be downloaded and installed individually from the
-Web. But it is recommended to follow instructions at
-`Mellanox BlueField Software Website
-<http://www.mellanox.com/page/products_dyn?product_family=279&mtag=bluefield_software>`_.
+Toolchains, OS and drivers can be downloaded and installed individually
+from the web, but it is recommended to follow instructions at:
+
+- `NVIDIA BlueField Software Website <https://docs.nvidia.com/networking/category/dpuos>`_
 
 
 Compile DPDK
@@ -57,23 +57,12 @@ an x86 based platform.
 Native Compilation
 ~~~~~~~~~~~~~~~~~~
 
-Refer to :doc:`../nics/mlx5` for prerequisites. Either Mellanox OFED/EN or
+Refer to :doc:`../nics/mlx5` for prerequisites. Either NVIDIA MLNX_OFED/EN or
 rdma-core library with corresponding kernel drivers is required.
 
-make build
-^^^^^^^^^^
-
 .. code-block:: console
 
-        make config T=arm64-bluefield-linux-gcc
-        make -j
-
-meson build
-^^^^^^^^^^^
-
-.. code-block:: console
-
-        meson build
+        meson setup build
         ninja -C build
 
 Cross Compilation
@@ -88,12 +77,11 @@ required:
    - libnl-3
    - libnl-route-3
 
-Such header files and libraries can be cross-compiled and installed on to the
-cross toolchain directory like depicted in
-:ref:`arm_cross_build_getting_the_prerequisite_library`, but those can also be
-simply copied from the filesystem of a working BlueField platform. The following
-script can be run on a BlueField platform in order to create a supplementary
-tarball for the cross toolchain.
+Such header files and libraries can be cross-compiled and installed
+in the cross toolchain environment.
+They can also be simply copied from the filesystem of a working BlueField platform.
+The following script can be run on a BlueField platform in order to create
+a supplementary tarball for the cross toolchain.
 
 .. code-block:: console
 
@@ -126,18 +114,7 @@ Then, untar the tarball at the cross toolchain directory on the x86 host.
         cd $(dirname $(which aarch64-linux-gnu-gcc))/..
         tar xf aarch64-linux-gnu-mlx.tar
 
-make build
-^^^^^^^^^^
-
 .. code-block:: console
 
-        make config T=arm64-bluefield-linux-gcc
-        make -j CROSS=aarch64-linux-gnu- CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_EAL_IGB_UIO=n
-
-meson build
-^^^^^^^^^^^
-
-.. code-block:: console
-
-        meson build --cross-file config/arm/arm64_bluefield_linux_gcc
+        meson setup build --cross-file config/arm/arm64_bluefield_linux_gcc
         ninja -C build

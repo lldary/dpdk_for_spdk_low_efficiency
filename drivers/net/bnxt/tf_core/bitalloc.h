@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2019-2020 Broadcom
+ * Copyright(c) 2019-2023 Broadcom
  * All rights reserved.
  */
 
@@ -7,6 +7,7 @@
 #define _BITALLOC_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* Bitalloc works on uint32_t as its word size */
 typedef uint32_t bitalloc_word_t;
@@ -59,18 +60,23 @@ struct bitalloc {
 #define BA_NO_ENTRY_FOUND   -1
 
 /**
- * Initializates the bitallocator
+ * Initializes the bitallocator
  *
  * Returns 0 on success, -1 on failure.  Size is arbitrary up to
  * BITALLOC_MAX_SIZE
  */
-int ba_init(struct bitalloc *pool, int size);
+int ba_init(struct bitalloc *pool, int size, bool free);
 
 /**
  * Returns -1 on failure, or index of allocated entry
  */
 int ba_alloc(struct bitalloc *pool);
 int ba_alloc_index(struct bitalloc *pool, int index);
+
+/**
+ * Returns -1 on failure, or index of allocated entry
+ */
+int ba_alloc_reverse(struct bitalloc *pool);
 
 /**
  * Query a particular index in a pool to check if its in use.
@@ -115,5 +121,4 @@ int ba_free_count(struct bitalloc *pool);
  * Returns the pool's in use count
  */
 int ba_inuse_count(struct bitalloc *pool);
-
 #endif /* _BITALLOC_H_ */

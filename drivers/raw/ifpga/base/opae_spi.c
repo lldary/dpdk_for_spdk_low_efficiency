@@ -239,6 +239,18 @@ int spi_command(struct altera_spi_device *dev, unsigned int chip_select,
 	return 0;
 }
 
+int spi_write(struct altera_spi_device *dev, unsigned int chip_select,
+		unsigned int wlen, void *wdata)
+{
+	return spi_command(dev, chip_select, wlen, wdata, 0, NULL);
+}
+
+int spi_read(struct altera_spi_device *dev, unsigned int chip_select,
+		unsigned int rlen, void *rdata)
+{
+	return spi_command(dev, chip_select, 0, NULL, rlen, rdata);
+}
+
 struct altera_spi_device *altera_spi_alloc(void *base, int type)
 {
 	struct altera_spi_device *spi_dev =
@@ -285,11 +297,15 @@ void altera_spi_init(struct altera_spi_device *spi_dev)
 			spi_dev->num_chipselect,
 			spi_dev->spi_param.clock_phase);
 
+	if (spi_dev->mutex)
+		pthread_mutex_lock(spi_dev->mutex);
 	/* clear */
 	spi_reg_write(spi_dev, ALTERA_SPI_CONTROL, 0);
 	spi_reg_write(spi_dev, ALTERA_SPI_STATUS, 0);
 	/* flush rxdata */
 	spi_flush_rx(spi_dev);
+	if (spi_dev->mutex)
+		pthread_mutex_unlock(spi_dev->mutex);
 }
 
 void altera_spi_release(struct altera_spi_device *dev)

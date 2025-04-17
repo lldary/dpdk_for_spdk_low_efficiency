@@ -310,15 +310,15 @@ static int cons_parse_ethertype_filter(const struct rte_flow_attr *attr,
 	 * Mask bits of destination MAC address must be full
 	 * of 1 or full of 0.
 	 */
-	if (!rte_is_zero_ether_addr(&eth_mask->src) ||
-	    (!rte_is_zero_ether_addr(&eth_mask->dst) &&
-	     !rte_is_broadcast_ether_addr(&eth_mask->dst))) {
+	if (!rte_is_zero_ether_addr(&eth_mask->hdr.src_addr) ||
+	    (!rte_is_zero_ether_addr(&eth_mask->hdr.dst_addr) &&
+	     !rte_is_broadcast_ether_addr(&eth_mask->hdr.dst_addr))) {
 		rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM,
 				item, "Invalid ether address mask");
 		return -rte_errno;
 	}
 
-	if ((eth_mask->type & UINT16_MAX) != UINT16_MAX) {
+	if ((eth_mask->hdr.ether_type & UINT16_MAX) != UINT16_MAX) {
 		rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM,
 				item, "Invalid ethertype mask");
 		return -rte_errno;
@@ -328,13 +328,13 @@ static int cons_parse_ethertype_filter(const struct rte_flow_attr *attr,
 	 * If mask bits of destination MAC address
 	 * are full of 1, set RTE_ETHTYPE_FLAGS_MAC.
 	 */
-	if (rte_is_broadcast_ether_addr(&eth_mask->dst)) {
-		filter->mac_addr = eth_spec->dst;
+	if (rte_is_broadcast_ether_addr(&eth_mask->hdr.dst_addr)) {
+		filter->mac_addr = eth_spec->hdr.dst_addr;
 		filter->flags |= RTE_ETHTYPE_FLAGS_MAC;
 	} else {
 		filter->flags &= ~RTE_ETHTYPE_FLAGS_MAC;
 	}
-	filter->ether_type = rte_be_to_cpu_16(eth_spec->type);
+	filter->ether_type = rte_be_to_cpu_16(eth_spec->hdr.ether_type);
 
 	/* Check if the next non-void item is END. */
 	item = next_no_void_pattern(pattern, item);
@@ -694,6 +694,7 @@ static int hinic_ntuple_item_check_end(const struct rte_flow_item *item,
 			item, "Not supported by ntuple filter");
 		return -rte_errno;
 	}
+
 	return 0;
 }
 
@@ -733,7 +734,7 @@ static int hinic_check_ntuple_item_ele(const struct rte_flow_item *item,
  * END
  * other members in mask and spec should set to 0x00.
  * item->last should be NULL.
- * Please aware there's an asumption for all the parsers.
+ * Please be aware there's an assumption for all the parsers.
  * rte_flow_item is using big endian, rte_flow_attr and
  * rte_flow_action are using CPU order.
  * Because the pattern is used to describe the packets,
@@ -1629,7 +1630,7 @@ step_next:
 
 /**
  * Check if the flow rule is supported by nic.
- * It only checkes the format. Don't guarantee the rule can be programmed into
+ * It only checks the format. Don't guarantee the rule can be programmed into
  * the HW. Because there can be no enough room for the rule.
  */
 static int hinic_flow_validate(struct rte_eth_dev *dev,
@@ -1899,6 +1900,8 @@ static int hinic_set_vrrp_tcam(struct hinic_nic_dev *nic_dev)
 void hinic_free_fdir_filter(struct hinic_nic_dev *nic_dev)
 {
 	(void)hinic_set_fdir_filter(nic_dev->hwdev, 0, 0, 0, false);
+
+	(void)hinic_set_fdir_tcam_rule_filter(nic_dev->hwdev, false);
 
 	(void)hinic_clear_fdir_tcam(nic_dev->hwdev, TCAM_PKT_BGP_DPORT);
 
@@ -2349,6 +2352,8 @@ hinic_add_del_ethertype_filter(struct rte_eth_dev *dev,
 		ethertype_filter.pkt_proto = filter->ether_type;
 		i = hinic_ethertype_filter_lookup(filter_info,
 						&ethertype_filter);
+		if (i < 0)
+			return -EINVAL;
 
 		if ((filter_info->type_mask & (1 << i))) {
 			filter_info->pkt_filters[i].enable = FALSE;
@@ -2801,6 +2806,19 @@ static int hinic_add_tcam_filter(struct rte_eth_dev *dev,
 						fdir_tcam_rule->index);
 			return rc;
 		}
+
+		rc = hinic_set_fdir_tcam_rule_filter(nic_dev->hwdev, true);
+		if (rc && rc != HINIC_MGMT_CMD_UNSUPPORTED) {
+			/*
+			 * hinic supports two methods: linear table and tcam
+			 * table, if tcam filter enables failed but linear table
+			 * is ok, which also needs to enable filter, so for this
+			 * scene, driver should not close fdir switch.
+			 */
+			(void)hinic_del_tcam_rule(nic_dev->hwdev,
+						fdir_tcam_rule->index);
+			return rc;
+		}
 	}
 
 	TAILQ_INSERT_TAIL(&tcam_info->tcam_list, tcam_filter, entries);
@@ -2966,6 +2984,12 @@ static struct rte_flow *hinic_flow_create(struct rte_eth_dev *dev,
 		if (!ret) {
 			ntuple_filter_ptr = rte_zmalloc("hinic_ntuple_filter",
 				sizeof(struct hinic_ntuple_filter_ele), 0);
+			if (ntuple_filter_ptr == NULL) {
+				PMD_DRV_LOG(ERR, "Failed to allocate ntuple_filter_ptr");
+				(void)hinic_add_del_ntuple_filter(dev,
+							&ntuple_filter, FALSE);
+				goto out;
+			}
 			rte_memcpy(&ntuple_filter_ptr->filter_info,
 				   &ntuple_filter,
 				   sizeof(struct rte_eth_ntuple_filter));
@@ -2992,6 +3016,12 @@ static struct rte_flow *hinic_flow_create(struct rte_eth_dev *dev,
 			ethertype_filter_ptr =
 				rte_zmalloc("hinic_ethertype_filter",
 				sizeof(struct hinic_ethertype_filter_ele), 0);
+			if (ethertype_filter_ptr == NULL) {
+				PMD_DRV_LOG(ERR, "Failed to allocate ethertype_filter_ptr");
+				(void)hinic_add_del_ethertype_filter(dev,
+						&ethertype_filter, FALSE);
+				goto out;
+			}
 			rte_memcpy(&ethertype_filter_ptr->filter_info,
 				&ethertype_filter,
 				sizeof(struct rte_eth_ethertype_filter));
@@ -3013,11 +3043,10 @@ static struct rte_flow *hinic_flow_create(struct rte_eth_dev *dev,
 				      actions, &fdir_rule, error);
 	if (!ret) {
 		if (fdir_rule.mode == HINIC_FDIR_MODE_NORMAL) {
-			ret = hinic_add_del_fdir_filter(dev,
-					&fdir_rule, TRUE);
+			ret = hinic_add_del_fdir_filter(dev, &fdir_rule, TRUE);
 		} else if (fdir_rule.mode == HINIC_FDIR_MODE_TCAM) {
-			ret = hinic_add_del_tcam_fdir_filter(dev,
-					&fdir_rule, TRUE);
+			ret = hinic_add_del_tcam_fdir_filter(dev, &fdir_rule,
+							     TRUE);
 		}  else {
 			PMD_DRV_LOG(INFO, "flow fdir rule create failed, rule mode wrong");
 			goto out;
@@ -3025,6 +3054,17 @@ static struct rte_flow *hinic_flow_create(struct rte_eth_dev *dev,
 		if (!ret) {
 			fdir_rule_ptr = rte_zmalloc("hinic_fdir_rule",
 				sizeof(struct hinic_fdir_rule_ele), 0);
+			if (fdir_rule_ptr == NULL) {
+				PMD_DRV_LOG(ERR, "Failed to allocate fdir_rule_ptr");
+				if (fdir_rule.mode == HINIC_FDIR_MODE_NORMAL)
+					hinic_add_del_fdir_filter(dev,
+						&fdir_rule, FALSE);
+				else if (fdir_rule.mode == HINIC_FDIR_MODE_TCAM)
+					hinic_add_del_tcam_fdir_filter(dev,
+						&fdir_rule, FALSE);
+
+				goto out;
+			}
 			rte_memcpy(&fdir_rule_ptr->filter_info, &fdir_rule,
 				sizeof(struct hinic_fdir_rule));
 			TAILQ_INSERT_TAIL(&nic_dev->filter_fdir_rule_list,
@@ -3197,6 +3237,8 @@ static void hinic_clear_all_fdir_filter(struct rte_eth_dev *dev)
 
 	(void)hinic_set_fdir_filter(nic_dev->hwdev, 0, 0, 0, false);
 
+	(void)hinic_set_fdir_tcam_rule_filter(nic_dev->hwdev, false);
+
 	(void)hinic_flush_tcam_rule(nic_dev->hwdev);
 }
 
@@ -3269,4 +3311,3 @@ const struct rte_flow_ops hinic_flow_ops = {
 	.destroy = hinic_flow_destroy,
 	.flush = hinic_flow_flush,
 };
-

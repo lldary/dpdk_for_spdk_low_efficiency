@@ -8,11 +8,20 @@ DPDK Tools User Guides
     :maxdepth: 2
     :numbered:
 
-    proc_info
-    pdump
-    pmdinfo
+    hugepages
     devbind
+    proc_info
+    pmdinfo
+    dumpcap
+    pdump
+    dmaperf
+    flow-perf
+    securityperf
     testbbdev
     cryptoperf
     comp_perf
     testeventdev
+    testregex
+    testmldev
+    graph
+    dts

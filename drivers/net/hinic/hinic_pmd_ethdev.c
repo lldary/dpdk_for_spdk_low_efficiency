@@ -3,8 +3,8 @@
  */
 
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
-#include <rte_ethdev_pci.h>
+#include <bus_pci_driver.h>
+#include <ethdev_pci.h>
 #include <rte_mbuf.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
@@ -69,17 +69,8 @@
 
 #define HINIC_VLAN_FILTER_EN		(1U << 0)
 
-#define HINIC_MTU_TO_PKTLEN(mtu)	\
-	((mtu) + ETH_HLEN + ETH_CRC_LEN)
-
-#define HINIC_PKTLEN_TO_MTU(pktlen)	\
-	((pktlen) - (ETH_HLEN + ETH_CRC_LEN))
-
 /* lro numer limit for one packet */
 #define HINIC_LRO_WQE_NUM_DEFAULT	8
-
-/* Driver-specific log messages type */
-int hinic_logtype;
 
 struct hinic_xstats_name_off {
 	char name[RTE_ETH_XSTATS_NAME_SIZE];
@@ -264,14 +255,14 @@ static int hinic_vlan_offload_set(struct rte_eth_dev *dev, int mask);
  * Interrupt handler triggered by NIC  for handling
  * specific event.
  *
- * @param: The address of parameter (struct rte_eth_dev *) regsitered before.
+ * @param: The address of parameter (struct rte_eth_dev *) registered before.
  */
 static void hinic_dev_interrupt_handler(void *param)
 {
 	struct rte_eth_dev *dev = param;
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 
-	if (!hinic_test_bit(HINIC_DEV_INTR_EN, &nic_dev->dev_status)) {
+	if (!rte_bit_relaxed_get32(HINIC_DEV_INTR_EN, &nic_dev->dev_status)) {
 		PMD_DRV_LOG(WARNING, "Device's interrupt is disabled, ignore interrupt event, dev_name: %s, port_id: %d",
 			    nic_dev->proc_dev_name, dev->data->port_id);
 		return;
@@ -320,23 +311,23 @@ static int hinic_dev_configure(struct rte_eth_dev *dev)
 		return -EINVAL;
 	}
 
-	if (dev->data->dev_conf.rxmode.mq_mode & ETH_MQ_RX_RSS_FLAG)
-		dev->data->dev_conf.rxmode.offloads |= DEV_RX_OFFLOAD_RSS_HASH;
+	if (dev->data->dev_conf.rxmode.mq_mode & RTE_ETH_MQ_RX_RSS_FLAG)
+		dev->data->dev_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_RSS_HASH;
 
 	/* mtu size is 256~9600 */
-	if (dev->data->dev_conf.rxmode.max_rx_pkt_len < HINIC_MIN_FRAME_SIZE ||
-	    dev->data->dev_conf.rxmode.max_rx_pkt_len >
-	    HINIC_MAX_JUMBO_FRAME_SIZE) {
+	if (HINIC_MTU_TO_PKTLEN(dev->data->dev_conf.rxmode.mtu) <
+			HINIC_MIN_FRAME_SIZE ||
+	    HINIC_MTU_TO_PKTLEN(dev->data->dev_conf.rxmode.mtu) >
+			HINIC_MAX_JUMBO_FRAME_SIZE) {
 		PMD_DRV_LOG(ERR,
-			"Max rx pkt len out of range, get max_rx_pkt_len:%d, "
+			"Packet length out of range, get packet length:%d, "
 			"expect between %d and %d",
-			dev->data->dev_conf.rxmode.max_rx_pkt_len,
+			HINIC_MTU_TO_PKTLEN(dev->data->dev_conf.rxmode.mtu),
 			HINIC_MIN_FRAME_SIZE, HINIC_MAX_JUMBO_FRAME_SIZE);
 		return -EINVAL;
 	}
 
-	nic_dev->mtu_size =
-		HINIC_PKTLEN_TO_MTU(dev->data->dev_conf.rxmode.max_rx_pkt_len);
+	nic_dev->mtu_size = dev->data->dev_conf.rxmode.mtu;
 
 	/* rss template */
 	err = hinic_config_mq_mode(dev, TRUE);
@@ -345,9 +336,9 @@ static int hinic_dev_configure(struct rte_eth_dev *dev)
 		return err;
 	}
 
-	/* init vlan offoad */
+	/* init VLAN offload */
 	err = hinic_vlan_offload_set(dev,
-				ETH_VLAN_STRIP_MASK | ETH_VLAN_FILTER_MASK);
+				RTE_ETH_VLAN_STRIP_MASK | RTE_ETH_VLAN_FILTER_MASK);
 	if (err) {
 		PMD_DRV_LOG(ERR, "Initialize vlan filter and strip failed");
 		(void)hinic_config_mq_mode(dev, FALSE);
@@ -705,15 +696,15 @@ static void hinic_get_speed_capa(struct rte_eth_dev *dev, uint32_t *speed_capa)
 	} else {
 		*speed_capa = 0;
 		if (!!(supported_link & HINIC_LINK_MODE_SUPPORT_1G))
-			*speed_capa |= ETH_LINK_SPEED_1G;
+			*speed_capa |= RTE_ETH_LINK_SPEED_1G;
 		if (!!(supported_link & HINIC_LINK_MODE_SUPPORT_10G))
-			*speed_capa |= ETH_LINK_SPEED_10G;
+			*speed_capa |= RTE_ETH_LINK_SPEED_10G;
 		if (!!(supported_link & HINIC_LINK_MODE_SUPPORT_25G))
-			*speed_capa |= ETH_LINK_SPEED_25G;
+			*speed_capa |= RTE_ETH_LINK_SPEED_25G;
 		if (!!(supported_link & HINIC_LINK_MODE_SUPPORT_40G))
-			*speed_capa |= ETH_LINK_SPEED_40G;
+			*speed_capa |= RTE_ETH_LINK_SPEED_40G;
 		if (!!(supported_link & HINIC_LINK_MODE_SUPPORT_100G))
-			*speed_capa |= ETH_LINK_SPEED_100G;
+			*speed_capa |= RTE_ETH_LINK_SPEED_100G;
 	}
 }
 
@@ -741,25 +732,26 @@ hinic_dev_infos_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *info)
 
 	hinic_get_speed_capa(dev, &info->speed_capa);
 	info->rx_queue_offload_capa = 0;
-	info->rx_offload_capa = DEV_RX_OFFLOAD_VLAN_STRIP |
-				DEV_RX_OFFLOAD_IPV4_CKSUM |
-				DEV_RX_OFFLOAD_UDP_CKSUM |
-				DEV_RX_OFFLOAD_TCP_CKSUM |
-				DEV_RX_OFFLOAD_VLAN_FILTER |
-				DEV_RX_OFFLOAD_SCATTER |
-				DEV_RX_OFFLOAD_JUMBO_FRAME |
-				DEV_RX_OFFLOAD_TCP_LRO |
-				DEV_RX_OFFLOAD_RSS_HASH;
+	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_VLAN_STRIP |
+				RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
+				RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+				RTE_ETH_RX_OFFLOAD_TCP_CKSUM |
+				RTE_ETH_RX_OFFLOAD_VLAN_FILTER |
+				RTE_ETH_RX_OFFLOAD_SCATTER |
+				RTE_ETH_RX_OFFLOAD_TCP_LRO |
+				RTE_ETH_RX_OFFLOAD_RSS_HASH;
 
 	info->tx_queue_offload_capa = 0;
-	info->tx_offload_capa = DEV_TX_OFFLOAD_VLAN_INSERT |
-				DEV_TX_OFFLOAD_IPV4_CKSUM |
-				DEV_TX_OFFLOAD_UDP_CKSUM |
-				DEV_TX_OFFLOAD_TCP_CKSUM |
-				DEV_TX_OFFLOAD_SCTP_CKSUM |
-				DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM |
-				DEV_TX_OFFLOAD_TCP_TSO |
-				DEV_TX_OFFLOAD_MULTI_SEGS;
+	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+				RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+				RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+				RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
+				RTE_ETH_TX_OFFLOAD_SCTP_CKSUM |
+				RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |
+				RTE_ETH_TX_OFFLOAD_TCP_TSO |
+				RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	info->dev_capa &= ~RTE_ETH_DEV_CAPA_FLOW_RULE_KEEP;
 
 	info->hash_key_size = HINIC_RSS_KEY_SIZE;
 	info->reta_size = HINIC_RSS_INDIR_SIZE;
@@ -856,20 +848,20 @@ static int hinic_priv_get_dev_link_status(struct hinic_nic_dev *nic_dev,
 	u8 port_link_status = 0;
 	struct nic_port_info port_link_info;
 	struct hinic_hwdev *nic_hwdev = nic_dev->hwdev;
-	uint32_t port_speed[LINK_SPEED_MAX] = {ETH_SPEED_NUM_10M,
-					ETH_SPEED_NUM_100M, ETH_SPEED_NUM_1G,
-					ETH_SPEED_NUM_10G, ETH_SPEED_NUM_25G,
-					ETH_SPEED_NUM_40G, ETH_SPEED_NUM_100G};
+	uint32_t port_speed[LINK_SPEED_MAX] = {RTE_ETH_SPEED_NUM_10M,
+					RTE_ETH_SPEED_NUM_100M, RTE_ETH_SPEED_NUM_1G,
+					RTE_ETH_SPEED_NUM_10G, RTE_ETH_SPEED_NUM_25G,
+					RTE_ETH_SPEED_NUM_40G, RTE_ETH_SPEED_NUM_100G};
 
 	rc = hinic_get_link_status(nic_hwdev, &port_link_status);
 	if (rc)
 		return rc;
 
 	if (!port_link_status) {
-		link->link_status = ETH_LINK_DOWN;
+		link->link_status = RTE_ETH_LINK_DOWN;
 		link->link_speed = 0;
-		link->link_duplex = ETH_LINK_HALF_DUPLEX;
-		link->link_autoneg = ETH_LINK_FIXED;
+		link->link_duplex = RTE_ETH_LINK_HALF_DUPLEX;
+		link->link_autoneg = RTE_ETH_LINK_FIXED;
 		return HINIC_OK;
 	}
 
@@ -911,8 +903,8 @@ static int hinic_link_update(struct rte_eth_dev *dev, int wait_to_complete)
 		/* Get link status information from hardware */
 		rc = hinic_priv_get_dev_link_status(nic_dev, &link);
 		if (rc != HINIC_OK) {
-			link.link_speed = ETH_SPEED_NUM_NONE;
-			link.link_duplex = ETH_LINK_FULL_DUPLEX;
+			link.link_speed = RTE_ETH_SPEED_NUM_NONE;
+			link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 			PMD_DRV_LOG(ERR, "Get link status failed");
 			goto out;
 		}
@@ -942,13 +934,6 @@ static int hinic_dev_set_link_up(struct rte_eth_dev *dev)
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 	int ret;
 
-	ret = hinic_set_xsfp_tx_status(nic_dev->hwdev, true);
-	if (ret) {
-		PMD_DRV_LOG(ERR, "Enable port tx xsfp failed, dev_name: %s, port_id: %d",
-			    nic_dev->proc_dev_name, dev->data->port_id);
-		return ret;
-	}
-
 	/* link status follow phy port status, up will open pma */
 	ret = hinic_set_port_enable(nic_dev->hwdev, true);
 	if (ret)
@@ -971,13 +956,6 @@ static int hinic_dev_set_link_down(struct rte_eth_dev *dev)
 {
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 	int ret;
-
-	ret = hinic_set_xsfp_tx_status(nic_dev->hwdev, false);
-	if (ret) {
-		PMD_DRV_LOG(ERR, "Disable port tx xsfp failed, dev_name: %s, port_id: %d",
-			    nic_dev->proc_dev_name, dev->data->port_id);
-		return ret;
-	}
 
 	/* link status follow phy port status, up will close pma */
 	ret = hinic_set_port_enable(nic_dev->hwdev, false);
@@ -1002,6 +980,7 @@ static int hinic_dev_start(struct rte_eth_dev *dev)
 	int rc;
 	char *name;
 	struct hinic_nic_dev *nic_dev;
+	uint16_t i;
 
 	nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 	name = dev->data->name;
@@ -1067,7 +1046,12 @@ static int hinic_dev_start(struct rte_eth_dev *dev)
 	if (dev->data->dev_conf.intr_conf.lsc != 0)
 		(void)hinic_link_update(dev, 0);
 
-	hinic_set_bit(HINIC_DEV_START, &nic_dev->dev_status);
+	rte_bit_relaxed_set32(HINIC_DEV_START, &nic_dev->dev_status);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
 
 	return 0;
 
@@ -1098,12 +1082,14 @@ init_qp_fail:
 /**
  * DPDK callback to release the receive queue.
  *
- * @param queue
- *   Generic receive queue pointer.
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ * @param qid
+ *   Receive queue index.
  */
-static void hinic_rx_queue_release(void *queue)
+static void hinic_rx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
-	struct hinic_rxq *rxq = queue;
+	struct hinic_rxq *rxq = dev->data->rx_queues[qid];
 	struct hinic_nic_dev *nic_dev;
 
 	if (!rxq) {
@@ -1130,12 +1116,14 @@ static void hinic_rx_queue_release(void *queue)
 /**
  * DPDK callback to release the transmit queue.
  *
- * @param queue
- *   Generic transmit queue pointer.
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ * @param qid
+ *   Transmit queue index.
  */
-static void hinic_tx_queue_release(void *queue)
+static void hinic_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
-	struct hinic_txq *txq = queue;
+	struct hinic_txq *txq = dev->data->tx_queues[qid];
 	struct hinic_nic_dev *nic_dev;
 
 	if (!txq) {
@@ -1180,21 +1168,25 @@ static void hinic_free_all_sq(struct hinic_nic_dev *nic_dev)
  * @param dev
  *   Pointer to Ethernet device structure.
  */
-static void hinic_dev_stop(struct rte_eth_dev *dev)
+static int hinic_dev_stop(struct rte_eth_dev *dev)
 {
 	int rc;
 	char *name;
 	uint16_t port_id;
 	struct hinic_nic_dev *nic_dev;
 	struct rte_eth_link link;
+	uint16_t i;
 
 	nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
 	name = dev->data->name;
 	port_id = dev->data->port_id;
 
-	if (!hinic_test_and_clear_bit(HINIC_DEV_START, &nic_dev->dev_status)) {
+	dev->data->dev_started = 0;
+
+	if (!rte_bit_relaxed_test_and_clear32(HINIC_DEV_START,
+					      &nic_dev->dev_status)) {
 		PMD_DRV_LOG(INFO, "Device %s already stopped", name);
-		return;
+		return 0;
 	}
 
 	/* just stop phy port and vport */
@@ -1229,6 +1221,13 @@ static void hinic_dev_stop(struct rte_eth_dev *dev)
 	/* free mbuf */
 	hinic_free_all_rx_mbuf(dev);
 	hinic_free_all_tx_mbuf(dev);
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+
+	return 0;
 }
 
 static void hinic_disable_interrupt(struct rte_eth_dev *dev)
@@ -1237,19 +1236,19 @@ static void hinic_disable_interrupt(struct rte_eth_dev *dev)
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
 	int ret, retries = 0;
 
-	hinic_clear_bit(HINIC_DEV_INTR_EN, &nic_dev->dev_status);
+	rte_bit_relaxed_clear32(HINIC_DEV_INTR_EN, &nic_dev->dev_status);
 
 	/* disable msix interrupt in hardware */
 	hinic_set_msix_state(nic_dev->hwdev, 0, HINIC_MSIX_DISABLE);
 
 	/* disable rte interrupt */
-	ret = rte_intr_disable(&pci_dev->intr_handle);
+	ret = rte_intr_disable(pci_dev->intr_handle);
 	if (ret)
 		PMD_DRV_LOG(ERR, "Disable intr failed: %d", ret);
 
 	do {
 		ret =
-		rte_intr_callback_unregister(&pci_dev->intr_handle,
+		rte_intr_callback_unregister(pci_dev->intr_handle,
 					     hinic_dev_interrupt_handler, dev);
 		if (ret >= 0) {
 			break;
@@ -1266,18 +1265,31 @@ static void hinic_disable_interrupt(struct rte_eth_dev *dev)
 	if (retries == HINIC_INTR_CB_UNREG_MAX_RETRIES)
 		PMD_DRV_LOG(ERR, "Unregister intr callback failed after %d retries",
 			    retries);
+
+	rte_bit_relaxed_clear32(HINIC_DEV_INIT, &nic_dev->dev_status);
 }
 
 static int hinic_set_dev_promiscuous(struct hinic_nic_dev *nic_dev, bool enable)
 {
-	u32 rx_mode_ctrl = nic_dev->rx_mode_status;
+	u32 rx_mode_ctrl;
+	int err;
+
+	err = hinic_mutex_lock(&nic_dev->rx_mode_mutex);
+	if (err)
+		return err;
+
+	rx_mode_ctrl = nic_dev->rx_mode_status;
 
 	if (enable)
 		rx_mode_ctrl |= HINIC_RX_MODE_PROMISC;
 	else
 		rx_mode_ctrl &= (~HINIC_RX_MODE_PROMISC);
 
-	return hinic_config_rx_mode(nic_dev, rx_mode_ctrl);
+	err = hinic_config_rx_mode(nic_dev, rx_mode_ctrl);
+
+	(void)hinic_mutex_unlock(&nic_dev->rx_mode_mutex);
+
+	return err;
 }
 
 /**
@@ -1310,6 +1322,8 @@ hinic_dev_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *stats)
 			nic_dev->proc_dev_name);
 		return err;
 	}
+
+	dev->data->rx_mbuf_alloc_failed = 0;
 
 	/* rx queue stats */
 	q_num = (nic_dev->num_rq < RTE_ETHDEV_QUEUE_STAT_CNTRS) ?
@@ -1525,22 +1539,18 @@ static void hinic_deinit_mac_addr(struct rte_eth_dev *eth_dev)
 
 	/* delete multicast mac addrs */
 	hinic_delete_mc_addr_list(nic_dev);
+
+	rte_free(nic_dev->mc_list);
+
 }
 
 static int hinic_dev_set_mtu(struct rte_eth_dev *dev, uint16_t mtu)
 {
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
-	uint32_t frame_size;
-	int ret = 0;
+	int ret;
 
 	PMD_DRV_LOG(INFO, "Set port mtu, port_id: %d, mtu: %d, max_pkt_len: %d",
 			dev->data->port_id, mtu, HINIC_MTU_TO_PKTLEN(mtu));
-
-	if (mtu < HINIC_MIN_MTU_SIZE || mtu > HINIC_MAX_MTU_SIZE) {
-		PMD_DRV_LOG(ERR, "Invalid mtu: %d, must between %d and %d",
-				mtu, HINIC_MIN_MTU_SIZE, HINIC_MAX_MTU_SIZE);
-		return -EINVAL;
-	}
 
 	ret = hinic_set_port_mtu(nic_dev->hwdev, mtu);
 	if (ret) {
@@ -1548,16 +1558,6 @@ static int hinic_dev_set_mtu(struct rte_eth_dev *dev, uint16_t mtu)
 		return ret;
 	}
 
-	/* update max frame size */
-	frame_size = HINIC_MTU_TO_PKTLEN(mtu);
-	if (frame_size > RTE_ETHER_MAX_LEN)
-		dev->data->dev_conf.rxmode.offloads |=
-			DEV_RX_OFFLOAD_JUMBO_FRAME;
-	else
-		dev->data->dev_conf.rxmode.offloads &=
-			~DEV_RX_OFFLOAD_JUMBO_FRAME;
-
-	dev->data->dev_conf.rxmode.max_rx_pkt_len = frame_size;
 	nic_dev->mtu_size = mtu;
 
 	return ret;
@@ -1607,6 +1607,9 @@ static int hinic_vlan_filter_set(struct rte_eth_dev *dev,
 
 	if (vlan_id > RTE_ETHER_MAX_VLAN_ID)
 		return -EINVAL;
+
+	if (vlan_id == 0)
+		return 0;
 
 	func_id = hinic_global_func_id(nic_dev->hwdev);
 
@@ -1661,8 +1664,8 @@ static int hinic_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 	int err;
 
 	/* Enable or disable VLAN filter */
-	if (mask & ETH_VLAN_FILTER_MASK) {
-		on = (rxmode->offloads & DEV_RX_OFFLOAD_VLAN_FILTER) ?
+	if (mask & RTE_ETH_VLAN_FILTER_MASK) {
+		on = (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_FILTER) ?
 			TRUE : FALSE;
 		err = hinic_config_vlan_filter(nic_dev->hwdev, on);
 		if (err == HINIC_MGMT_CMD_UNSUPPORTED) {
@@ -1683,8 +1686,8 @@ static int hinic_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 	}
 
 	/* Enable or disable VLAN stripping */
-	if (mask & ETH_VLAN_STRIP_MASK) {
-		on = (rxmode->offloads & DEV_RX_OFFLOAD_VLAN_STRIP) ?
+	if (mask & RTE_ETH_VLAN_STRIP_MASK) {
+		on = (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_STRIP) ?
 			TRUE : FALSE;
 		err = hinic_set_rx_vlan_offload(nic_dev->hwdev, on);
 		if (err) {
@@ -1698,12 +1701,6 @@ static int hinic_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 		PMD_DRV_LOG(INFO, "%s vlan strip succeed, device: %s, port_id: %d",
 			  on ? "Enable" : "Disable",
 			  nic_dev->proc_dev_name, dev->data->port_id);
-	}
-
-	if (mask & ETH_VLAN_EXTEND_MASK) {
-		PMD_DRV_LOG(ERR, "Don't support vlan qinq, device: %s, port_id: %d",
-			  nic_dev->proc_dev_name, dev->data->port_id);
-		return -ENOTSUP;
 	}
 
 	return 0;
@@ -1730,14 +1727,25 @@ static void hinic_remove_all_vlanid(struct rte_eth_dev *eth_dev)
 static int hinic_set_dev_allmulticast(struct hinic_nic_dev *nic_dev,
 				bool enable)
 {
-	u32 rx_mode_ctrl = nic_dev->rx_mode_status;
+	u32 rx_mode_ctrl;
+	int err;
+
+	err = hinic_mutex_lock(&nic_dev->rx_mode_mutex);
+	if (err)
+		return err;
+
+	rx_mode_ctrl = nic_dev->rx_mode_status;
 
 	if (enable)
 		rx_mode_ctrl |= HINIC_RX_MODE_MC_ALL;
 	else
 		rx_mode_ctrl &= (~HINIC_RX_MODE_MC_ALL);
 
-	return hinic_config_rx_mode(nic_dev, rx_mode_ctrl);
+	err = hinic_config_rx_mode(nic_dev, rx_mode_ctrl);
+
+	(void)hinic_mutex_unlock(&nic_dev->rx_mode_mutex);
+
+	return err;
 }
 
 /**
@@ -1865,13 +1873,13 @@ static int hinic_flow_ctrl_get(struct rte_eth_dev *dev,
 	fc_conf->autoneg = nic_pause.auto_neg;
 
 	if (nic_pause.tx_pause && nic_pause.rx_pause)
-		fc_conf->mode = RTE_FC_FULL;
+		fc_conf->mode = RTE_ETH_FC_FULL;
 	else if (nic_pause.tx_pause)
-		fc_conf->mode = RTE_FC_TX_PAUSE;
+		fc_conf->mode = RTE_ETH_FC_TX_PAUSE;
 	else if (nic_pause.rx_pause)
-		fc_conf->mode = RTE_FC_RX_PAUSE;
+		fc_conf->mode = RTE_ETH_FC_RX_PAUSE;
 	else
-		fc_conf->mode = RTE_FC_NONE;
+		fc_conf->mode = RTE_ETH_FC_NONE;
 
 	return 0;
 }
@@ -1885,14 +1893,14 @@ static int hinic_flow_ctrl_set(struct rte_eth_dev *dev,
 
 	nic_pause.auto_neg = fc_conf->autoneg;
 
-	if (((fc_conf->mode & RTE_FC_FULL) == RTE_FC_FULL) ||
-		(fc_conf->mode & RTE_FC_TX_PAUSE))
+	if (((fc_conf->mode & RTE_ETH_FC_FULL) == RTE_ETH_FC_FULL) ||
+		(fc_conf->mode & RTE_ETH_FC_TX_PAUSE))
 		nic_pause.tx_pause = true;
 	else
 		nic_pause.tx_pause = false;
 
-	if (((fc_conf->mode & RTE_FC_FULL) == RTE_FC_FULL) ||
-		(fc_conf->mode & RTE_FC_RX_PAUSE))
+	if (((fc_conf->mode & RTE_ETH_FC_FULL) == RTE_ETH_FC_FULL) ||
+		(fc_conf->mode & RTE_ETH_FC_RX_PAUSE))
 		nic_pause.rx_pause = true;
 	else
 		nic_pause.rx_pause = false;
@@ -1936,7 +1944,7 @@ static int hinic_rss_hash_update(struct rte_eth_dev *dev,
 	struct nic_rss_type rss_type = {0};
 	int err = 0;
 
-	if (!(nic_dev->flags & ETH_MQ_RX_RSS_FLAG)) {
+	if (!(nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG)) {
 		PMD_DRV_LOG(WARNING, "RSS is not enabled");
 		return HINIC_OK;
 	}
@@ -1957,14 +1965,14 @@ static int hinic_rss_hash_update(struct rte_eth_dev *dev,
 		}
 	}
 
-	rss_type.ipv4 = (rss_hf & (ETH_RSS_IPV4 | ETH_RSS_FRAG_IPV4)) ? 1 : 0;
-	rss_type.tcp_ipv4 = (rss_hf & ETH_RSS_NONFRAG_IPV4_TCP) ? 1 : 0;
-	rss_type.ipv6 = (rss_hf & (ETH_RSS_IPV6 | ETH_RSS_FRAG_IPV6)) ? 1 : 0;
-	rss_type.ipv6_ext = (rss_hf & ETH_RSS_IPV6_EX) ? 1 : 0;
-	rss_type.tcp_ipv6 = (rss_hf & ETH_RSS_NONFRAG_IPV6_TCP) ? 1 : 0;
-	rss_type.tcp_ipv6_ext = (rss_hf & ETH_RSS_IPV6_TCP_EX) ? 1 : 0;
-	rss_type.udp_ipv4 = (rss_hf & ETH_RSS_NONFRAG_IPV4_UDP) ? 1 : 0;
-	rss_type.udp_ipv6 = (rss_hf & ETH_RSS_NONFRAG_IPV6_UDP) ? 1 : 0;
+	rss_type.ipv4 = (rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_FRAG_IPV4)) ? 1 : 0;
+	rss_type.tcp_ipv4 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_TCP) ? 1 : 0;
+	rss_type.ipv6 = (rss_hf & (RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_FRAG_IPV6)) ? 1 : 0;
+	rss_type.ipv6_ext = (rss_hf & RTE_ETH_RSS_IPV6_EX) ? 1 : 0;
+	rss_type.tcp_ipv6 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_TCP) ? 1 : 0;
+	rss_type.tcp_ipv6_ext = (rss_hf & RTE_ETH_RSS_IPV6_TCP_EX) ? 1 : 0;
+	rss_type.udp_ipv4 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV4_UDP) ? 1 : 0;
+	rss_type.udp_ipv6 = (rss_hf & RTE_ETH_RSS_NONFRAG_IPV6_UDP) ? 1 : 0;
 
 	err = hinic_set_rss_type(nic_dev->hwdev, tmpl_idx, rss_type);
 	if (err) {
@@ -2000,7 +2008,7 @@ static int hinic_rss_conf_get(struct rte_eth_dev *dev,
 	struct nic_rss_type rss_type = {0};
 	int err;
 
-	if (!(nic_dev->flags & ETH_MQ_RX_RSS_FLAG)) {
+	if (!(nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG)) {
 		PMD_DRV_LOG(WARNING, "RSS is not enabled");
 		return HINIC_ERROR;
 	}
@@ -2021,15 +2029,15 @@ static int hinic_rss_conf_get(struct rte_eth_dev *dev,
 
 	rss_conf->rss_hf = 0;
 	rss_conf->rss_hf |=  rss_type.ipv4 ?
-		(ETH_RSS_IPV4 | ETH_RSS_FRAG_IPV4) : 0;
-	rss_conf->rss_hf |=  rss_type.tcp_ipv4 ? ETH_RSS_NONFRAG_IPV4_TCP : 0;
+		(RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_FRAG_IPV4) : 0;
+	rss_conf->rss_hf |=  rss_type.tcp_ipv4 ? RTE_ETH_RSS_NONFRAG_IPV4_TCP : 0;
 	rss_conf->rss_hf |=  rss_type.ipv6 ?
-		(ETH_RSS_IPV6 | ETH_RSS_FRAG_IPV6) : 0;
-	rss_conf->rss_hf |=  rss_type.ipv6_ext ? ETH_RSS_IPV6_EX : 0;
-	rss_conf->rss_hf |=  rss_type.tcp_ipv6 ? ETH_RSS_NONFRAG_IPV6_TCP : 0;
-	rss_conf->rss_hf |=  rss_type.tcp_ipv6_ext ? ETH_RSS_IPV6_TCP_EX : 0;
-	rss_conf->rss_hf |=  rss_type.udp_ipv4 ? ETH_RSS_NONFRAG_IPV4_UDP : 0;
-	rss_conf->rss_hf |=  rss_type.udp_ipv6 ? ETH_RSS_NONFRAG_IPV6_UDP : 0;
+		(RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_FRAG_IPV6) : 0;
+	rss_conf->rss_hf |=  rss_type.ipv6_ext ? RTE_ETH_RSS_IPV6_EX : 0;
+	rss_conf->rss_hf |=  rss_type.tcp_ipv6 ? RTE_ETH_RSS_NONFRAG_IPV6_TCP : 0;
+	rss_conf->rss_hf |=  rss_type.tcp_ipv6_ext ? RTE_ETH_RSS_IPV6_TCP_EX : 0;
+	rss_conf->rss_hf |=  rss_type.udp_ipv4 ? RTE_ETH_RSS_NONFRAG_IPV4_UDP : 0;
+	rss_conf->rss_hf |=  rss_type.udp_ipv6 ? RTE_ETH_RSS_NONFRAG_IPV6_UDP : 0;
 
 	return HINIC_OK;
 }
@@ -2059,7 +2067,7 @@ static int hinic_rss_indirtbl_update(struct rte_eth_dev *dev,
 	u16 i = 0;
 	u16 idx, shift;
 
-	if (!(nic_dev->flags & ETH_MQ_RX_RSS_FLAG))
+	if (!(nic_dev->flags & RTE_ETH_MQ_RX_RSS_FLAG))
 		return HINIC_OK;
 
 	if (reta_size != NIC_RSS_INDIR_SIZE) {
@@ -2073,8 +2081,8 @@ static int hinic_rss_indirtbl_update(struct rte_eth_dev *dev,
 
 	/* update rss indir_tbl */
 	for (i = 0; i < reta_size; i++) {
-		idx = i / RTE_RETA_GROUP_SIZE;
-		shift = i % RTE_RETA_GROUP_SIZE;
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
 
 		if (reta_conf[idx].reta[shift] >= nic_dev->num_rq) {
 			PMD_DRV_LOG(ERR, "Invalid reta entry, indirtbl[%d]: %d "
@@ -2139,8 +2147,8 @@ static int hinic_rss_indirtbl_query(struct rte_eth_dev *dev,
 	}
 
 	for (i = 0; i < reta_size; i++) {
-		idx = i / RTE_RETA_GROUP_SIZE;
-		shift = i % RTE_RETA_GROUP_SIZE;
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
 		if (reta_conf[idx].mask & (1ULL << shift))
 			reta_conf[idx].reta[shift] = (uint16_t)indirtbl[i];
 	}
@@ -2351,10 +2359,8 @@ static int hinic_set_mac_addr(struct rte_eth_dev *dev,
 
 	rte_ether_addr_copy(addr, &nic_dev->default_addr);
 
-	PMD_DRV_LOG(INFO, "Set new mac address %02x:%02x:%02x:%02x:%02x:%02x",
-		    addr->addr_bytes[0], addr->addr_bytes[1],
-		    addr->addr_bytes[2], addr->addr_bytes[3],
-		    addr->addr_bytes[4], addr->addr_bytes[5]);
+	PMD_DRV_LOG(INFO, "Set new mac address " RTE_ETHER_ADDR_PRT_FMT,
+		    RTE_ETHER_ADDR_BYTES(addr));
 
 	return 0;
 }
@@ -2490,42 +2496,20 @@ allmulti:
 }
 
 /**
- * DPDK callback to manage filter control operations
+ * DPDK callback to get flow operations
  *
  * @param dev
  *   Pointer to Ethernet device structure.
- * @param filter_type
- *   Filter type, which just supports generic type.
- * @param filter_op
- *   Filter operation to perform.
- * @param arg
+ * @param ops
  *   Pointer to operation-specific structure.
  *
  * @return
  *   0 on success, negative error value otherwise.
  */
-static int hinic_dev_filter_ctrl(struct rte_eth_dev *dev,
-		     enum rte_filter_type filter_type,
-		     enum rte_filter_op filter_op,
-		     void *arg)
+static int hinic_dev_flow_ops_get(struct rte_eth_dev *dev __rte_unused,
+				  const struct rte_flow_ops **ops)
 {
-	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
-	int func_id = hinic_global_func_id(nic_dev->hwdev);
-
-	switch (filter_type) {
-	case RTE_ETH_FILTER_GENERIC:
-		if (filter_op != RTE_ETH_FILTER_GET)
-			return -EINVAL;
-		*(const void **)arg = &hinic_flow_ops;
-		break;
-	default:
-		PMD_DRV_LOG(INFO, "Filter type (%d) not supported",
-			filter_type);
-		return -EINVAL;
-	}
-
-	PMD_DRV_LOG(INFO, "Set filter_ctrl succeed, func_id: 0x%x, filter_type: 0x%x,"
-			"filter_op: 0x%x.", func_id, filter_type, filter_op);
+	*ops = &hinic_flow_ops;
 	return 0;
 }
 
@@ -2567,25 +2551,52 @@ static int hinic_set_default_dcb_feature(struct hinic_nic_dev *nic_dev)
 					up_pgid, up_bw, up_strict);
 }
 
+static int hinic_pf_get_default_cos(struct hinic_hwdev *hwdev, u8 *cos_id)
+{
+	u8 default_cos = 0;
+	u8 valid_cos_bitmap;
+	u8 i;
+
+	valid_cos_bitmap = hwdev->cfg_mgmt->svc_cap.valid_cos_bitmap;
+	if (!valid_cos_bitmap) {
+		PMD_DRV_LOG(ERR, "PF has none cos to support\n");
+		return -EFAULT;
+	}
+
+	for (i = 0; i < NR_MAX_COS; i++) {
+		if (valid_cos_bitmap & BIT(i))
+			default_cos = i; /* Find max cos id as default cos */
+	}
+
+	*cos_id = default_cos;
+
+	return 0;
+}
+
 static int hinic_init_default_cos(struct hinic_nic_dev *nic_dev)
 {
 	u8 cos_id = 0;
 	int err;
 
 	if (!HINIC_IS_VF(nic_dev->hwdev)) {
-		nic_dev->default_cos =
-				(hinic_global_func_id(nic_dev->hwdev) +
-						DEFAULT_BASE_COS) % NR_MAX_COS;
+		err = hinic_pf_get_default_cos(nic_dev->hwdev, &cos_id);
+		if (err) {
+			PMD_DRV_LOG(ERR, "Get PF default cos failed, err: %d",
+				    err);
+			return HINIC_ERROR;
+		}
 	} else {
 		err = hinic_vf_get_default_cos(nic_dev->hwdev, &cos_id);
 		if (err) {
 			PMD_DRV_LOG(ERR, "Get VF default cos failed, err: %d",
-					err);
+				    err);
 			return HINIC_ERROR;
 		}
-
-		nic_dev->default_cos = cos_id;
 	}
+
+	nic_dev->default_cos = cos_id;
+
+	PMD_DRV_LOG(INFO, "Default cos %d", nic_dev->default_cos);
 
 	return 0;
 }
@@ -2663,8 +2674,7 @@ static int hinic_copy_mempool_init(struct hinic_nic_dev *nic_dev)
 
 static void hinic_copy_mempool_uninit(struct hinic_nic_dev *nic_dev)
 {
-	if (nic_dev->cpy_mpool != NULL)
-		rte_mempool_free(nic_dev->cpy_mpool);
+	rte_mempool_free(nic_dev->cpy_mpool);
 }
 
 static int hinic_init_sw_rxtxqs(struct hinic_nic_dev *nic_dev)
@@ -2922,18 +2932,23 @@ static void hinic_nic_dev_destroy(struct rte_eth_dev *eth_dev)
  * @param dev
  *   Pointer to Ethernet device structure.
  */
-static void hinic_dev_close(struct rte_eth_dev *dev)
+static int hinic_dev_close(struct rte_eth_dev *dev)
 {
 	struct hinic_nic_dev *nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
+	int ret;
 
-	if (hinic_test_and_set_bit(HINIC_DEV_CLOSE, &nic_dev->dev_status)) {
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
+
+	if (rte_bit_relaxed_test_and_set32(HINIC_DEV_CLOSE,
+					   &nic_dev->dev_status)) {
 		PMD_DRV_LOG(WARNING, "Device %s already closed",
 			    dev->data->name);
-		return;
+		return 0;
 	}
 
 	/* stop device first */
-	hinic_dev_stop(dev);
+	ret = hinic_dev_stop(dev);
 
 	/* rx_cqe, rx_info */
 	hinic_free_all_rx_resources(dev);
@@ -2954,8 +2969,13 @@ static void hinic_dev_close(struct rte_eth_dev *dev)
 	/* disable hardware and uio interrupt */
 	hinic_disable_interrupt(dev);
 
+	/* destroy rx mode mutex */
+	hinic_mutex_destroy(&nic_dev->rx_mode_mutex);
+
 	/* deinit nic hardware device */
 	hinic_nic_dev_destroy(dev);
+
+	return ret;
 }
 
 static const struct eth_dev_ops hinic_pmd_ops = {
@@ -2996,7 +3016,7 @@ static const struct eth_dev_ops hinic_pmd_ops = {
 	.mac_addr_remove               = hinic_mac_addr_remove,
 	.mac_addr_add                  = hinic_mac_addr_add,
 	.set_mc_addr_list              = hinic_set_mc_addr_list,
-	.filter_ctrl                   = hinic_dev_filter_ctrl,
+	.flow_ops_get                  = hinic_dev_flow_ops_get,
 };
 
 static const struct eth_dev_ops hinic_pmd_vf_ops = {
@@ -3031,7 +3051,11 @@ static const struct eth_dev_ops hinic_pmd_vf_ops = {
 	.mac_addr_remove               = hinic_mac_addr_remove,
 	.mac_addr_add                  = hinic_mac_addr_add,
 	.set_mc_addr_list              = hinic_set_mc_addr_list,
-	.filter_ctrl                   = hinic_dev_filter_ctrl,
+	.flow_ops_get                  = hinic_dev_flow_ops_get,
+};
+
+static const struct eth_dev_ops hinic_dev_sec_ops = {
+	.dev_infos_get                 = hinic_dev_infos_get,
 };
 
 static int hinic_func_init(struct rte_eth_dev *eth_dev)
@@ -3048,18 +3072,21 @@ static int hinic_func_init(struct rte_eth_dev *eth_dev)
 
 	/* EAL is SECONDARY and eth_dev is already created */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
+		eth_dev->dev_ops = &hinic_dev_sec_ops;
 		PMD_DRV_LOG(INFO, "Initialize %s in secondary process",
 			    eth_dev->data->name);
 
 		return 0;
 	}
 
+	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
+
 	nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(eth_dev);
 	memset(nic_dev, 0, sizeof(*nic_dev));
 
 	snprintf(nic_dev->proc_dev_name,
 		 sizeof(nic_dev->proc_dev_name),
-		 "hinic-%.4x:%.2x:%.2x.%x",
+		 "hinic-" PCI_PRI_FMT,
 		 pci_dev->addr.domain, pci_dev->addr.bus,
 		 pci_dev->addr.devid, pci_dev->addr.function);
 
@@ -3083,12 +3110,6 @@ static int hinic_func_init(struct rte_eth_dev *eth_dev)
 		goto mc_addr_fail;
 	}
 
-	/*
-	 * Pass the information to the rte_eth_dev_close() that it should also
-	 * release the private port resources.
-	 */
-	eth_dev->data->dev_flags |= RTE_ETH_DEV_CLOSE_REMOVE;
-
 	/* create hardware nic_device */
 	rc = hinic_nic_dev_create(eth_dev);
 	if (rc) {
@@ -3110,7 +3131,7 @@ static int hinic_func_init(struct rte_eth_dev *eth_dev)
 	}
 
 	/* register callback func to eal lib */
-	rc = rte_intr_callback_register(&pci_dev->intr_handle,
+	rc = rte_intr_callback_register(pci_dev->intr_handle,
 					hinic_dev_interrupt_handler,
 					(void *)eth_dev);
 	if (rc) {
@@ -3120,13 +3141,15 @@ static int hinic_func_init(struct rte_eth_dev *eth_dev)
 	}
 
 	/* enable uio/vfio intr/eventfd mapping */
-	rc = rte_intr_enable(&pci_dev->intr_handle);
+	rc = rte_intr_enable(pci_dev->intr_handle);
 	if (rc) {
 		PMD_DRV_LOG(ERR, "Enable rte interrupt failed, dev_name: %s",
 			    eth_dev->data->name);
 		goto enable_intr_fail;
 	}
-	hinic_set_bit(HINIC_DEV_INTR_EN, &nic_dev->dev_status);
+	rte_bit_relaxed_set32(HINIC_DEV_INTR_EN, &nic_dev->dev_status);
+
+	hinic_mutex_init(&nic_dev->rx_mode_mutex, NULL);
 
 	/* initialize filter info */
 	filter_info = &nic_dev->filter;
@@ -3141,14 +3164,14 @@ static int hinic_func_init(struct rte_eth_dev *eth_dev)
 	TAILQ_INIT(&nic_dev->filter_fdir_rule_list);
 	TAILQ_INIT(&nic_dev->hinic_flow_list);
 
-	hinic_set_bit(HINIC_DEV_INIT, &nic_dev->dev_status);
+	rte_bit_relaxed_set32(HINIC_DEV_INIT, &nic_dev->dev_status);
 	PMD_DRV_LOG(INFO, "Initialize %s in primary successfully",
 		    eth_dev->data->name);
 
 	return 0;
 
 enable_intr_fail:
-	(void)rte_intr_callback_unregister(&pci_dev->intr_handle,
+	(void)rte_intr_callback_unregister(pci_dev->intr_handle,
 					   hinic_dev_interrupt_handler,
 					   (void *)eth_dev);
 
@@ -3179,7 +3202,7 @@ static int hinic_dev_init(struct rte_eth_dev *eth_dev)
 
 	pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
 
-	PMD_DRV_LOG(INFO, "Initializing pf hinic-%.4x:%.2x:%.2x.%x in %s process",
+	PMD_DRV_LOG(INFO, "Initializing pf hinic-" PCI_PRI_FMT " in %s process",
 		    pci_dev->addr.domain, pci_dev->addr.bus,
 		    pci_dev->addr.devid, pci_dev->addr.function,
 		    (rte_eal_process_type() == RTE_PROC_PRIMARY) ?
@@ -3194,24 +3217,10 @@ static int hinic_dev_init(struct rte_eth_dev *eth_dev)
 
 static int hinic_dev_uninit(struct rte_eth_dev *dev)
 {
-	struct hinic_nic_dev *nic_dev;
-
-	nic_dev = HINIC_ETH_DEV_TO_PRIVATE_NIC_DEV(dev);
-	hinic_clear_bit(HINIC_DEV_INIT, &nic_dev->dev_status);
-
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
 
 	hinic_dev_close(dev);
-
-	dev->dev_ops = NULL;
-	dev->rx_pkt_burst = NULL;
-	dev->tx_pkt_burst = NULL;
-
-	rte_free(nic_dev->mc_list);
-
-	rte_free(dev->data->mac_addrs);
-	dev->data->mac_addrs = NULL;
 
 	return HINIC_OK;
 }
@@ -3248,10 +3257,4 @@ static struct rte_pci_driver rte_hinic_pmd = {
 
 RTE_PMD_REGISTER_PCI(net_hinic, rte_hinic_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_hinic, pci_id_hinic_map);
-
-RTE_INIT(hinic_init_log)
-{
-	hinic_logtype = rte_log_register("pmd.net.hinic");
-	if (hinic_logtype >= 0)
-		rte_log_set_level(hinic_logtype, RTE_LOG_INFO);
-}
+RTE_LOG_REGISTER_DEFAULT(hinic_logtype, INFO);

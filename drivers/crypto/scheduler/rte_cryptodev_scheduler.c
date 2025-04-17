@@ -4,42 +4,43 @@
 #include <rte_string_fns.h>
 #include <rte_reorder.h>
 #include <rte_cryptodev.h>
-#include <rte_cryptodev_pmd.h>
+#include <cryptodev_pmd.h>
+#include <rte_security_driver.h>
 #include <rte_malloc.h>
 
 #include "rte_cryptodev_scheduler.h"
 #include "scheduler_pmd_private.h"
 
-int scheduler_logtype_driver;
+#define MAX_CAPS 256
 
 /** update the scheduler pmd's capability with attaching device's
  *  capability.
  *  For each device to be attached, the scheduler's capability should be
- *  the common capability set of all slaves
+ *  the common capability set of all workers
  **/
 static uint32_t
 sync_caps(struct rte_cryptodev_capabilities *caps,
 		uint32_t nb_caps,
-		const struct rte_cryptodev_capabilities *slave_caps)
+		const struct rte_cryptodev_capabilities *worker_caps)
 {
-	uint32_t sync_nb_caps = nb_caps, nb_slave_caps = 0;
+	uint32_t sync_nb_caps = nb_caps, nb_worker_caps = 0;
 	uint32_t i;
 
-	while (slave_caps[nb_slave_caps].op != RTE_CRYPTO_OP_TYPE_UNDEFINED)
-		nb_slave_caps++;
+	while (worker_caps[nb_worker_caps].op != RTE_CRYPTO_OP_TYPE_UNDEFINED)
+		nb_worker_caps++;
 
 	if (nb_caps == 0) {
-		rte_memcpy(caps, slave_caps, sizeof(*caps) * nb_slave_caps);
-		return nb_slave_caps;
+		rte_memcpy(caps, worker_caps, sizeof(*caps) * nb_worker_caps);
+		return nb_worker_caps;
 	}
 
 	for (i = 0; i < sync_nb_caps; i++) {
 		struct rte_cryptodev_capabilities *cap = &caps[i];
 		uint32_t j;
 
-		for (j = 0; j < nb_slave_caps; j++) {
+		for (j = 0; j < nb_worker_caps; j++) {
 			const struct rte_cryptodev_capabilities *s_cap =
-					&slave_caps[j];
+					&worker_caps[j];
 
 			if (s_cap->op != cap->op || s_cap->sym.xform_type !=
 					cap->sym.xform_type)
@@ -61,7 +62,6 @@ sync_caps(struct rte_cryptodev_capabilities *caps,
 					cap->sym.auth.digest_size.max ?
 					s_cap->sym.auth.digest_size.max :
 					cap->sym.auth.digest_size.max;
-
 			}
 
 			if (s_cap->sym.xform_type ==
@@ -74,7 +74,7 @@ sync_caps(struct rte_cryptodev_capabilities *caps,
 			break;
 		}
 
-		if (j < nb_slave_caps)
+		if (j < nb_worker_caps)
 			continue;
 
 		/* remove a uncommon cap from the array */
@@ -83,26 +83,174 @@ sync_caps(struct rte_cryptodev_capabilities *caps,
 
 		memset(&caps[sync_nb_caps - 1], 0, sizeof(*cap));
 		sync_nb_caps--;
+		i--;
 	}
 
 	return sync_nb_caps;
 }
 
 static int
-update_scheduler_capability(struct scheduler_ctx *sched_ctx)
+check_sec_cap_equal(const struct rte_security_capability *sec_cap1,
+		struct rte_security_capability *sec_cap2)
 {
-	struct rte_cryptodev_capabilities tmp_caps[256] = { {0} };
-	uint32_t nb_caps = 0, i;
+	if (sec_cap1->action != sec_cap2->action ||
+			sec_cap1->protocol != sec_cap2->protocol ||
+			sec_cap1->ol_flags != sec_cap2->ol_flags)
+		return 0;
 
-	if (sched_ctx->capabilities) {
-		rte_free(sched_ctx->capabilities);
-		sched_ctx->capabilities = NULL;
+	if (sec_cap1->protocol == RTE_SECURITY_PROTOCOL_DOCSIS)
+		return !memcmp(&sec_cap1->docsis, &sec_cap2->docsis,
+				sizeof(sec_cap1->docsis));
+	else
+		return 0;
+}
+
+static void
+copy_sec_cap(struct rte_security_capability *dst_sec_cap,
+		struct rte_security_capability *src_sec_cap)
+{
+	dst_sec_cap->action = src_sec_cap->action;
+	dst_sec_cap->protocol = src_sec_cap->protocol;
+	if (src_sec_cap->protocol == RTE_SECURITY_PROTOCOL_DOCSIS)
+		dst_sec_cap->docsis = src_sec_cap->docsis;
+	dst_sec_cap->ol_flags = src_sec_cap->ol_flags;
+}
+
+static uint32_t
+sync_sec_crypto_caps(struct rte_cryptodev_capabilities *tmp_sec_crypto_caps,
+		const struct rte_cryptodev_capabilities *sec_crypto_caps,
+		const struct rte_cryptodev_capabilities *worker_sec_crypto_caps)
+{
+	uint8_t nb_caps = 0;
+
+	nb_caps = sync_caps(tmp_sec_crypto_caps, nb_caps, sec_crypto_caps);
+	sync_caps(tmp_sec_crypto_caps, nb_caps, worker_sec_crypto_caps);
+
+	return nb_caps;
+}
+
+/** update the scheduler pmd's security capability with attaching device's
+ *  security capability.
+ *  For each device to be attached, the scheduler's security capability should
+ *  be the common capability set of all workers
+ **/
+static uint32_t
+sync_sec_caps(uint32_t worker_idx,
+		struct rte_security_capability *sec_caps,
+		struct rte_cryptodev_capabilities sec_crypto_caps[][MAX_CAPS],
+		uint32_t nb_sec_caps,
+		const struct rte_security_capability *worker_sec_caps)
+{
+	uint32_t nb_worker_sec_caps = 0, i;
+
+	if (worker_sec_caps == NULL)
+		return 0;
+
+	while (worker_sec_caps[nb_worker_sec_caps].action !=
+					RTE_SECURITY_ACTION_TYPE_NONE)
+		nb_worker_sec_caps++;
+
+	/* Handle first worker */
+	if (worker_idx == 0) {
+		uint32_t nb_worker_sec_crypto_caps = 0;
+		uint32_t nb_worker_supp_sec_caps = 0;
+
+		for (i = 0; i < nb_worker_sec_caps; i++) {
+			/* Check for supported security protocols */
+			if (!scheduler_check_sec_proto_supp(worker_sec_caps[i].action,
+					worker_sec_caps[i].protocol))
+				continue;
+
+			sec_caps[nb_worker_supp_sec_caps] = worker_sec_caps[i];
+
+			while (worker_sec_caps[i].crypto_capabilities[
+					nb_worker_sec_crypto_caps].op !=
+						RTE_CRYPTO_OP_TYPE_UNDEFINED)
+				nb_worker_sec_crypto_caps++;
+
+			rte_memcpy(&sec_crypto_caps[nb_worker_supp_sec_caps][0],
+				&worker_sec_caps[i].crypto_capabilities[0],
+				sizeof(sec_crypto_caps[nb_worker_supp_sec_caps][0]) *
+					nb_worker_sec_crypto_caps);
+
+			nb_worker_supp_sec_caps++;
+		}
+		return nb_worker_supp_sec_caps;
 	}
 
-	for (i = 0; i < sched_ctx->nb_slaves; i++) {
-		struct rte_cryptodev_info dev_info;
+	for (i = 0; i < nb_sec_caps; i++) {
+		struct rte_security_capability *sec_cap = &sec_caps[i];
+		uint32_t j;
 
-		rte_cryptodev_info_get(sched_ctx->slaves[i].dev_id, &dev_info);
+		for (j = 0; j < nb_worker_sec_caps; j++) {
+			struct rte_cryptodev_capabilities
+					tmp_sec_crypto_caps[MAX_CAPS] = { {0} };
+			uint32_t nb_sec_crypto_caps = 0;
+			const struct rte_security_capability *worker_sec_cap =
+								&worker_sec_caps[j];
+
+			if (!check_sec_cap_equal(worker_sec_cap, sec_cap))
+				continue;
+
+			/* Sync the crypto caps of the common security cap */
+			nb_sec_crypto_caps = sync_sec_crypto_caps(
+						tmp_sec_crypto_caps,
+						&sec_crypto_caps[i][0],
+						&worker_sec_cap->crypto_capabilities[0]);
+
+			memset(&sec_crypto_caps[i][0], 0,
+					sizeof(sec_crypto_caps[i][0]) * MAX_CAPS);
+
+			rte_memcpy(&sec_crypto_caps[i][0],
+					&tmp_sec_crypto_caps[0],
+					sizeof(sec_crypto_caps[i][0]) * nb_sec_crypto_caps);
+
+			break;
+		}
+
+		if (j < nb_worker_sec_caps)
+			continue;
+
+		/*
+		 * Remove an uncommon security cap, and it's associated crypto
+		 * caps, from the arrays
+		 */
+		for (j = i; j < nb_sec_caps - 1; j++) {
+			rte_memcpy(&sec_caps[j], &sec_caps[j+1],
+					sizeof(*sec_cap));
+
+			rte_memcpy(&sec_crypto_caps[j][0],
+					&sec_crypto_caps[j+1][0],
+					sizeof(*&sec_crypto_caps[j][0]) *
+						MAX_CAPS);
+		}
+		memset(&sec_caps[nb_sec_caps - 1], 0, sizeof(*sec_cap));
+		memset(&sec_crypto_caps[nb_sec_caps - 1][0], 0,
+			sizeof(*&sec_crypto_caps[nb_sec_caps - 1][0]) *
+				MAX_CAPS);
+		nb_sec_caps--;
+		i--;
+	}
+
+	return nb_sec_caps;
+}
+
+static int
+update_scheduler_capability(struct scheduler_ctx *sched_ctx)
+{
+	struct rte_cryptodev_capabilities tmp_caps[MAX_CAPS] = { {0} };
+	struct rte_security_capability tmp_sec_caps[MAX_CAPS] = { {0} };
+	struct rte_cryptodev_capabilities
+		tmp_sec_crypto_caps[MAX_CAPS][MAX_CAPS] = { {{0}} };
+	uint32_t nb_caps = 0, nb_sec_caps = 0, i;
+	struct rte_cryptodev_info dev_info;
+
+	/* Free any previously allocated capability memory */
+	scheduler_free_capabilities(sched_ctx);
+
+	/* Determine the new cryptodev capabilities for the scheduler */
+	for (i = 0; i < sched_ctx->nb_workers; i++) {
+		rte_cryptodev_info_get(sched_ctx->workers[i].dev_id, &dev_info);
 
 		nb_caps = sync_caps(tmp_caps, nb_caps, dev_info.capabilities);
 		if (nb_caps == 0)
@@ -118,6 +266,54 @@ update_scheduler_capability(struct scheduler_ctx *sched_ctx)
 	rte_memcpy(sched_ctx->capabilities, tmp_caps,
 			sizeof(struct rte_cryptodev_capabilities) * nb_caps);
 
+	/* Determine the new security capabilities for the scheduler */
+	for (i = 0; i < sched_ctx->nb_workers; i++) {
+		struct rte_cryptodev *dev =
+				&rte_cryptodevs[sched_ctx->workers[i].dev_id];
+		struct rte_security_ctx *sec_ctx = dev->security_ctx;
+
+		nb_sec_caps = sync_sec_caps(i, tmp_sec_caps, tmp_sec_crypto_caps,
+			nb_sec_caps, rte_security_capabilities_get(sec_ctx));
+	}
+
+	sched_ctx->sec_capabilities = rte_zmalloc_socket(NULL,
+					sizeof(struct rte_security_capability) *
+					(nb_sec_caps + 1), 0, SOCKET_ID_ANY);
+	if (!sched_ctx->sec_capabilities)
+		return -ENOMEM;
+
+	sched_ctx->sec_crypto_capabilities = rte_zmalloc_socket(NULL,
+				sizeof(struct rte_cryptodev_capabilities *) *
+				(nb_sec_caps + 1),
+				0, SOCKET_ID_ANY);
+	if (!sched_ctx->sec_crypto_capabilities)
+		return -ENOMEM;
+
+	for (i = 0; i < nb_sec_caps; i++) {
+		uint16_t nb_sec_crypto_caps = 0;
+
+		copy_sec_cap(&sched_ctx->sec_capabilities[i], &tmp_sec_caps[i]);
+
+		while (tmp_sec_crypto_caps[i][nb_sec_crypto_caps].op !=
+						RTE_CRYPTO_OP_TYPE_UNDEFINED)
+			nb_sec_crypto_caps++;
+
+		sched_ctx->sec_crypto_capabilities[i] =
+			rte_zmalloc_socket(NULL,
+				sizeof(struct rte_cryptodev_capabilities) *
+				(nb_sec_crypto_caps + 1), 0, SOCKET_ID_ANY);
+		if (!sched_ctx->sec_crypto_capabilities[i])
+			return -ENOMEM;
+
+		rte_memcpy(sched_ctx->sec_crypto_capabilities[i],
+				&tmp_sec_crypto_caps[i][0],
+				sizeof(struct rte_cryptodev_capabilities)
+					* nb_sec_crypto_caps);
+
+		sched_ctx->sec_capabilities[i].crypto_capabilities =
+				sched_ctx->sec_crypto_capabilities[i];
+	}
+
 	return 0;
 }
 
@@ -129,10 +325,10 @@ update_scheduler_feature_flag(struct rte_cryptodev *dev)
 
 	dev->feature_flags = 0;
 
-	for (i = 0; i < sched_ctx->nb_slaves; i++) {
+	for (i = 0; i < sched_ctx->nb_workers; i++) {
 		struct rte_cryptodev_info dev_info;
 
-		rte_cryptodev_info_get(sched_ctx->slaves[i].dev_id, &dev_info);
+		rte_cryptodev_info_get(sched_ctx->workers[i].dev_id, &dev_info);
 
 		dev->feature_flags |= dev_info.feature_flags;
 	}
@@ -144,15 +340,15 @@ update_max_nb_qp(struct scheduler_ctx *sched_ctx)
 	uint32_t i;
 	uint32_t max_nb_qp;
 
-	if (!sched_ctx->nb_slaves)
+	if (!sched_ctx->nb_workers)
 		return;
 
-	max_nb_qp = sched_ctx->nb_slaves ? UINT32_MAX : 0;
+	max_nb_qp = sched_ctx->nb_workers ? UINT32_MAX : 0;
 
-	for (i = 0; i < sched_ctx->nb_slaves; i++) {
+	for (i = 0; i < sched_ctx->nb_workers; i++) {
 		struct rte_cryptodev_info dev_info;
 
-		rte_cryptodev_info_get(sched_ctx->slaves[i].dev_id, &dev_info);
+		rte_cryptodev_info_get(sched_ctx->workers[i].dev_id, &dev_info);
 		max_nb_qp = dev_info.max_nb_queue_pairs < max_nb_qp ?
 				dev_info.max_nb_queue_pairs : max_nb_qp;
 	}
@@ -162,11 +358,11 @@ update_max_nb_qp(struct scheduler_ctx *sched_ctx)
 
 /** Attach a device to the scheduler. */
 int
-rte_cryptodev_scheduler_slave_attach(uint8_t scheduler_id, uint8_t slave_id)
+rte_cryptodev_scheduler_worker_attach(uint8_t scheduler_id, uint8_t worker_id)
 {
 	struct rte_cryptodev *dev = rte_cryptodev_pmd_get_dev(scheduler_id);
 	struct scheduler_ctx *sched_ctx;
-	struct scheduler_slave *slave;
+	struct scheduler_worker *worker;
 	struct rte_cryptodev_info dev_info;
 	uint32_t i;
 
@@ -186,30 +382,31 @@ rte_cryptodev_scheduler_slave_attach(uint8_t scheduler_id, uint8_t slave_id)
 	}
 
 	sched_ctx = dev->data->dev_private;
-	if (sched_ctx->nb_slaves >=
-			RTE_CRYPTODEV_SCHEDULER_MAX_NB_SLAVES) {
-		CR_SCHED_LOG(ERR, "Too many slaves attached");
+	if (sched_ctx->nb_workers >=
+			RTE_CRYPTODEV_SCHEDULER_MAX_NB_WORKERS) {
+		CR_SCHED_LOG(ERR, "Too many workers attached");
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < sched_ctx->nb_slaves; i++)
-		if (sched_ctx->slaves[i].dev_id == slave_id) {
-			CR_SCHED_LOG(ERR, "Slave already added");
+	for (i = 0; i < sched_ctx->nb_workers; i++)
+		if (sched_ctx->workers[i].dev_id == worker_id) {
+			CR_SCHED_LOG(ERR, "Worker already added");
 			return -ENOTSUP;
 		}
 
-	slave = &sched_ctx->slaves[sched_ctx->nb_slaves];
+	worker = &sched_ctx->workers[sched_ctx->nb_workers];
 
-	rte_cryptodev_info_get(slave_id, &dev_info);
+	rte_cryptodev_info_get(worker_id, &dev_info);
 
-	slave->dev_id = slave_id;
-	slave->driver_id = dev_info.driver_id;
-	sched_ctx->nb_slaves++;
+	worker->dev_id = worker_id;
+	worker->driver_id = dev_info.driver_id;
+	sched_ctx->nb_workers++;
 
 	if (update_scheduler_capability(sched_ctx) < 0) {
-		slave->dev_id = 0;
-		slave->driver_id = 0;
-		sched_ctx->nb_slaves--;
+		scheduler_free_capabilities(sched_ctx);
+		worker->dev_id = 0;
+		worker->driver_id = 0;
+		sched_ctx->nb_workers--;
 
 		CR_SCHED_LOG(ERR, "capabilities update failed");
 		return -ENOTSUP;
@@ -223,11 +420,11 @@ rte_cryptodev_scheduler_slave_attach(uint8_t scheduler_id, uint8_t slave_id)
 }
 
 int
-rte_cryptodev_scheduler_slave_detach(uint8_t scheduler_id, uint8_t slave_id)
+rte_cryptodev_scheduler_worker_detach(uint8_t scheduler_id, uint8_t worker_id)
 {
 	struct rte_cryptodev *dev = rte_cryptodev_pmd_get_dev(scheduler_id);
 	struct scheduler_ctx *sched_ctx;
-	uint32_t i, slave_pos;
+	uint32_t i, worker_pos;
 
 	if (!dev) {
 		CR_SCHED_LOG(ERR, "Operation not supported");
@@ -246,28 +443,29 @@ rte_cryptodev_scheduler_slave_detach(uint8_t scheduler_id, uint8_t slave_id)
 
 	sched_ctx = dev->data->dev_private;
 
-	for (slave_pos = 0; slave_pos < sched_ctx->nb_slaves; slave_pos++)
-		if (sched_ctx->slaves[slave_pos].dev_id == slave_id)
+	for (worker_pos = 0; worker_pos < sched_ctx->nb_workers; worker_pos++)
+		if (sched_ctx->workers[worker_pos].dev_id == worker_id)
 			break;
-	if (slave_pos == sched_ctx->nb_slaves) {
-		CR_SCHED_LOG(ERR, "Cannot find slave");
+	if (worker_pos == sched_ctx->nb_workers) {
+		CR_SCHED_LOG(ERR, "Cannot find worker");
 		return -ENOTSUP;
 	}
 
-	if (sched_ctx->ops.slave_detach(dev, slave_id) < 0) {
-		CR_SCHED_LOG(ERR, "Failed to detach slave");
+	if (sched_ctx->ops.worker_detach(dev, worker_id) < 0) {
+		CR_SCHED_LOG(ERR, "Failed to detach worker");
 		return -ENOTSUP;
 	}
 
-	for (i = slave_pos; i < sched_ctx->nb_slaves - 1; i++) {
-		memcpy(&sched_ctx->slaves[i], &sched_ctx->slaves[i+1],
-				sizeof(struct scheduler_slave));
+	for (i = worker_pos; i < sched_ctx->nb_workers - 1; i++) {
+		memcpy(&sched_ctx->workers[i], &sched_ctx->workers[i+1],
+				sizeof(struct scheduler_worker));
 	}
-	memset(&sched_ctx->slaves[sched_ctx->nb_slaves - 1], 0,
-			sizeof(struct scheduler_slave));
-	sched_ctx->nb_slaves--;
+	memset(&sched_ctx->workers[sched_ctx->nb_workers - 1], 0,
+			sizeof(struct scheduler_worker));
+	sched_ctx->nb_workers--;
 
 	if (update_scheduler_capability(sched_ctx) < 0) {
+		scheduler_free_capabilities(sched_ctx);
 		CR_SCHED_LOG(ERR, "capabilities update failed");
 		return -ENOTSUP;
 	}
@@ -461,8 +659,8 @@ rte_cryptodev_scheduler_load_user_scheduler(uint8_t scheduler_id,
 	sched_ctx->ops.create_private_ctx = scheduler->ops->create_private_ctx;
 	sched_ctx->ops.scheduler_start = scheduler->ops->scheduler_start;
 	sched_ctx->ops.scheduler_stop = scheduler->ops->scheduler_stop;
-	sched_ctx->ops.slave_attach = scheduler->ops->slave_attach;
-	sched_ctx->ops.slave_detach = scheduler->ops->slave_detach;
+	sched_ctx->ops.worker_attach = scheduler->ops->worker_attach;
+	sched_ctx->ops.worker_detach = scheduler->ops->worker_detach;
 	sched_ctx->ops.option_set = scheduler->ops->option_set;
 	sched_ctx->ops.option_get = scheduler->ops->option_get;
 
@@ -487,11 +685,11 @@ rte_cryptodev_scheduler_load_user_scheduler(uint8_t scheduler_id,
 }
 
 int
-rte_cryptodev_scheduler_slaves_get(uint8_t scheduler_id, uint8_t *slaves)
+rte_cryptodev_scheduler_workers_get(uint8_t scheduler_id, uint8_t *workers)
 {
 	struct rte_cryptodev *dev = rte_cryptodev_pmd_get_dev(scheduler_id);
 	struct scheduler_ctx *sched_ctx;
-	uint32_t nb_slaves = 0;
+	uint32_t nb_workers = 0;
 
 	if (!dev) {
 		CR_SCHED_LOG(ERR, "Operation not supported");
@@ -505,16 +703,16 @@ rte_cryptodev_scheduler_slaves_get(uint8_t scheduler_id, uint8_t *slaves)
 
 	sched_ctx = dev->data->dev_private;
 
-	nb_slaves = sched_ctx->nb_slaves;
+	nb_workers = sched_ctx->nb_workers;
 
-	if (slaves && nb_slaves) {
+	if (workers && nb_workers) {
 		uint32_t i;
 
-		for (i = 0; i < nb_slaves; i++)
-			slaves[i] = sched_ctx->slaves[i].dev_id;
+		for (i = 0; i < nb_workers; i++)
+			workers[i] = sched_ctx->workers[i].dev_id;
 	}
 
-	return (int)nb_slaves;
+	return (int)nb_workers;
 }
 
 int
@@ -543,7 +741,8 @@ rte_cryptodev_scheduler_option_set(uint8_t scheduler_id,
 
 	sched_ctx = dev->data->dev_private;
 
-	RTE_FUNC_PTR_OR_ERR_RET(*sched_ctx->ops.option_set, -ENOTSUP);
+	if (*sched_ctx->ops.option_set == NULL)
+		return -ENOTSUP;
 
 	return (*sched_ctx->ops.option_set)(dev, option_type, option);
 }
@@ -573,12 +772,11 @@ rte_cryptodev_scheduler_option_get(uint8_t scheduler_id,
 
 	sched_ctx = dev->data->dev_private;
 
-	RTE_FUNC_PTR_OR_ERR_RET(*sched_ctx->ops.option_get, -ENOTSUP);
+	if (*sched_ctx->ops.option_get == NULL)
+		return -ENOTSUP;
 
 	return (*sched_ctx->ops.option_get)(dev, option_type, option);
 }
 
-RTE_INIT(scheduler_init_log)
-{
-	scheduler_logtype_driver = rte_log_register("pmd.crypto.scheduler");
-}
+
+RTE_LOG_REGISTER_DEFAULT(scheduler_logtype_driver, INFO);

@@ -12,7 +12,7 @@
 #include <rte_branch_prediction.h>
 #include <rte_cycles.h>
 #include <rte_ether.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_errno.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
@@ -36,11 +36,12 @@
  * - nb_pkts < RTE_VIRTIO_DESC_PER_LOOP, just return no packet
  */
 uint16_t
-virtio_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
-	uint16_t nb_pkts)
+virtio_recv_pkts_vec(void *rx_queue,
+		struct rte_mbuf **__rte_restrict rx_pkts,
+		uint16_t nb_pkts)
 {
 	struct virtnet_rx *rxvq = rx_queue;
-	struct virtqueue *vq = rxvq->vq;
+	struct virtqueue *vq = virtnet_rxq_to_vq(rxvq);
 	struct virtio_hw *hw = vq->hw;
 	uint16_t nb_used, nb_total;
 	uint16_t desc_idx;
@@ -71,8 +72,8 @@ virtio_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 	 */
 	uint16x8_t len_adjust = {
 		0, 0,
-		(uint16_t)vq->hw->vtnet_hdr_size, 0,
-		(uint16_t)vq->hw->vtnet_hdr_size,
+		(uint16_t)hw->vtnet_hdr_size, 0,
+		(uint16_t)hw->vtnet_hdr_size,
 		0,
 		0, 0
 	};
@@ -83,7 +84,13 @@ virtio_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 	if (unlikely(nb_pkts < RTE_VIRTIO_DESC_PER_LOOP))
 		return 0;
 
-	/* virtqueue_nused has a load-acquire or rte_cio_rmb inside */
+	if (vq->vq_free_cnt >= RTE_VIRTIO_VPMD_RX_REARM_THRESH) {
+		virtio_rxq_rearm_vec(rxvq);
+		if (unlikely(virtqueue_kick_prepare(vq)))
+			virtqueue_notify(vq);
+	}
+
+	/* virtqueue_nused has a load-acquire or rte_io_rmb inside */
 	nb_used = virtqueue_nused(vq);
 
 	if (unlikely(nb_used == 0))
@@ -94,16 +101,10 @@ virtio_recv_pkts_vec(void *rx_queue, struct rte_mbuf **rx_pkts,
 
 	desc_idx = (uint16_t)(vq->vq_used_cons_idx & (vq->vq_nentries - 1));
 	rused = &vq->vq_split.ring.used->ring[desc_idx];
-	sw_ring  = &vq->sw_ring[desc_idx];
-	sw_ring_end = &vq->sw_ring[vq->vq_nentries];
+	sw_ring = &vq->rxq.sw_ring[desc_idx];
+	sw_ring_end = &vq->rxq.sw_ring[vq->vq_nentries];
 
 	rte_prefetch_non_temporal(rused);
-
-	if (vq->vq_free_cnt >= RTE_VIRTIO_VPMD_RX_REARM_THRESH) {
-		virtio_rxq_rearm_vec(rxvq);
-		if (unlikely(virtqueue_kick_prepare(vq)))
-			virtqueue_notify(vq);
-	}
 
 	nb_total = nb_used;
 	ref_rx_pkts = rx_pkts;

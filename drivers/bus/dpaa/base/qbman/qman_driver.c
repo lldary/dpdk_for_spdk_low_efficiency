@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
  *
  * Copyright 2008-2016 Freescale Semiconductor Inc.
- * Copyright 2017,2019 NXP
+ * Copyright 2017-2022 NXP
  *
  */
 
@@ -9,6 +9,8 @@
 #include <process.h>
 #include "qman_priv.h"
 #include <sys/ioctl.h>
+#include <err.h>
+
 #include <rte_branch_prediction.h>
 
 /* Global variable containing revision id (even on non-control plane systems
@@ -50,7 +52,8 @@ static int fsl_qman_portal_init(uint32_t index, int is_shared)
 	map.index = index;
 	ret = process_portal_map(&map);
 	if (ret) {
-		error(0, ret, "process_portal_map()");
+		errno = ret;
+		err(0, "process_portal_map()");
 		return ret;
 	}
 	qpcfg.channel = map.channel;
@@ -61,7 +64,7 @@ static int fsl_qman_portal_init(uint32_t index, int is_shared)
 	qpcfg.addr_virt[DPAA_PORTAL_CE] = map.addr.cena;
 	qpcfg.addr_virt[DPAA_PORTAL_CI] = map.addr.cinh;
 
-	qmfd = open(QMAN_PORTAL_IRQ_PATH, O_RDONLY);
+	qmfd = open(QMAN_PORTAL_IRQ_PATH, O_RDONLY | O_NONBLOCK);
 	if (qmfd == -1) {
 		pr_err("QMan irq init failed\n");
 		process_portal_unmap(&map.addr);
@@ -96,8 +99,10 @@ static int fsl_qman_portal_finish(void)
 	cfg = qman_destroy_affine_portal(NULL);
 	DPAA_BUG_ON(cfg != &qpcfg);
 	ret = process_portal_unmap(&map.addr);
-	if (ret)
-		error(0, ret, "process_portal_unmap()");
+	if (ret) {
+		errno = ret;
+		err(0, "process_portal_unmap()");
+	}
 	return ret;
 }
 
@@ -142,11 +147,12 @@ struct qman_portal *fsl_qman_fq_portal_create(int *fd)
 	struct qm_portal_config *q_pcfg;
 	struct dpaa_ioctl_irq_map irq_map;
 	struct dpaa_ioctl_portal_map q_map = {0};
-	int q_fd = 0, ret;
+	int q_fd, ret;
 
 	q_pcfg = kzalloc((sizeof(struct qm_portal_config)), 0);
 	if (!q_pcfg) {
-		error(0, -1, "q_pcfg kzalloc failed");
+		/* kzalloc sets errno */
+		err(0, "q_pcfg kzalloc failed");
 		return NULL;
 	}
 
@@ -155,7 +161,8 @@ struct qman_portal *fsl_qman_fq_portal_create(int *fd)
 	q_map.index = QBMAN_ANY_PORTAL_IDX;
 	ret = process_portal_map(&q_map);
 	if (ret) {
-		error(0, ret, "process_portal_map()");
+		errno = ret;
+		err(0, "process_portal_map()");
 		kfree(q_pcfg);
 		return NULL;
 	}
@@ -167,7 +174,7 @@ struct qman_portal *fsl_qman_fq_portal_create(int *fd)
 	q_pcfg->addr_virt[DPAA_PORTAL_CE] = q_map.addr.cena;
 	q_pcfg->addr_virt[DPAA_PORTAL_CI] = q_map.addr.cinh;
 
-	q_fd = open(QMAN_PORTAL_IRQ_PATH, O_RDONLY);
+	q_fd = open(QMAN_PORTAL_IRQ_PATH, O_RDONLY | O_NONBLOCK);
 	if (q_fd == -1) {
 		pr_err("QMan irq init failed\n");
 		goto err;
@@ -179,7 +186,7 @@ struct qman_portal *fsl_qman_fq_portal_create(int *fd)
 	if (!portal) {
 		pr_err("Qman portal initialisation failed (%d)\n",
 		       q_pcfg->cpu);
-		goto err;
+		goto err_alloc;
 	}
 
 	irq_map.type = dpaa_portal_qman;
@@ -188,11 +195,9 @@ struct qman_portal *fsl_qman_fq_portal_create(int *fd)
 
 	*fd = q_fd;
 	return portal;
+err_alloc:
+	close(q_fd);
 err:
-	if (portal)
-		qman_free_global_portal(portal);
-	if (q_fd)
-		close(q_fd);
 	process_portal_unmap(&q_map.addr);
 	kfree(q_pcfg);
 	return NULL;

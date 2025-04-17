@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright 2019 Mellanox Technologies, Ltd
 
-drivers = ['ifc',
-	   'mlx5',]
+if is_windows
+    subdir_done()
+endif
+
+drivers = [
+        'ifc',
+        'mlx5',
+        'nfp',
+        'sfc',
+]
 std_deps = ['bus_pci', 'kvargs']
 std_deps += ['vhost']
-config_flag_fmt = 'RTE_LIBRTE_@0@_PMD'
-driver_name_fmt = 'rte_pmd_@0@'

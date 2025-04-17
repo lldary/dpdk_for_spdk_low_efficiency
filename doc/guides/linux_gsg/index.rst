@@ -14,9 +14,11 @@ Getting Started Guide for Linux
     sys_reqs
     build_dpdk
     cross_build_dpdk_for_arm64
+    cross_build_dpdk_for_loongarch
+    cross_build_dpdk_for_riscv
     linux_drivers
     build_sample_apps
     linux_eal_parameters
     enable_func
-    quick_start
     nic_perf_intel_platform
+    amd_platform

@@ -4,10 +4,24 @@
 
 #include <rte_eal_trace.h>
 #include <rte_lcore.h>
+#include <rte_random.h>
 #include <rte_trace.h>
 
 #include "test.h"
 #include "test_trace.h"
+
+int app_dpdk_test_tp_count;
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+
+static int
+test_trace(void)
+{
+	printf("trace not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
 
 static int32_t
 test_trace_point_globbing(void)
@@ -70,7 +84,14 @@ failed:
 static int32_t
 test_trace_point_disable_enable(void)
 {
+	int expected;
 	int rc;
+
+	/* At tp registration, the associated counter increases once. */
+	expected = 1;
+	TEST_ASSERT_EQUAL(app_dpdk_test_tp_count, expected,
+		"Expecting %d, but got %d for app_dpdk_test_tp_count",
+		expected, app_dpdk_test_tp_count);
 
 	rc = rte_trace_point_disable(&__app_dpdk_test_tp);
 	if (rc < 0)
@@ -78,6 +99,12 @@ test_trace_point_disable_enable(void)
 
 	if (rte_trace_point_is_enabled(&__app_dpdk_test_tp))
 		goto failed;
+
+	/* No emission expected */
+	app_dpdk_test_tp("app.dpdk.test.tp");
+	TEST_ASSERT_EQUAL(app_dpdk_test_tp_count, expected,
+		"Expecting %d, but got %d for app_dpdk_test_tp_count",
+		expected, app_dpdk_test_tp_count);
 
 	rc = rte_trace_point_enable(&__app_dpdk_test_tp);
 	if (rc < 0)
@@ -88,6 +115,11 @@ test_trace_point_disable_enable(void)
 
 	/* Emit the trace */
 	app_dpdk_test_tp("app.dpdk.test.tp");
+	expected++;
+	TEST_ASSERT_EQUAL(app_dpdk_test_tp_count, expected,
+		"Expecting %d, but got %d for app_dpdk_test_tp_count",
+		expected, app_dpdk_test_tp_count);
+
 	return TEST_SUCCESS;
 
 failed:
@@ -100,9 +132,6 @@ test_trace_mode(void)
 	enum rte_trace_mode current;
 
 	current = rte_trace_mode_get();
-
-	if (!rte_trace_is_enabled())
-		return TEST_SKIPPED;
 
 	rte_trace_mode_set(RTE_TRACE_MODE_DISCARD);
 	if (rte_trace_mode_get() != RTE_TRACE_MODE_DISCARD)
@@ -149,7 +178,12 @@ test_fp_trace_points(void)
 static int
 test_generic_trace_points(void)
 {
+	uint8_t arr[RTE_TRACE_BLOB_LEN_MAX];
 	int tmp;
+	int i;
+
+	for (i = 0; i < RTE_TRACE_BLOB_LEN_MAX; i++)
+		arr[i] = i;
 
 	rte_eal_trace_generic_void();
 	rte_eal_trace_generic_u64(0x10000000000000);
@@ -166,9 +200,28 @@ test_generic_trace_points(void)
 	rte_eal_trace_generic_double(20000.5000004);
 	rte_eal_trace_generic_ptr(&tmp);
 	rte_eal_trace_generic_str("my string");
+	rte_eal_trace_generic_size_t(sizeof(void *));
+	rte_eal_trace_generic_blob(arr, 0);
+	rte_eal_trace_generic_blob(arr, 17);
+	rte_eal_trace_generic_blob(arr, RTE_TRACE_BLOB_LEN_MAX);
+	rte_eal_trace_generic_blob(arr, rte_rand() %
+					RTE_TRACE_BLOB_LEN_MAX);
 	RTE_EAL_TRACE_GENERIC_FUNC;
 
 	return TEST_SUCCESS;
+}
+
+static int
+test_trace_dump(void)
+{
+	rte_trace_dump(stdout);
+	return 0;
+}
+
+static int
+test_trace_metadata_dump(void)
+{
+	return rte_trace_metadata_dump(stdout);
 }
 
 static struct unit_test_suite trace_tests = {
@@ -183,6 +236,8 @@ static struct unit_test_suite trace_tests = {
 		TEST_CASE(test_trace_point_globbing),
 		TEST_CASE(test_trace_point_regex),
 		TEST_CASE(test_trace_points_lookup),
+		TEST_CASE(test_trace_dump),
+		TEST_CASE(test_trace_metadata_dump),
 		TEST_CASES_END()
 	}
 };
@@ -193,21 +248,6 @@ test_trace(void)
 	return unit_test_suite_runner(&trace_tests);
 }
 
-REGISTER_TEST_COMMAND(trace_autotest, test_trace);
+#endif /* !RTE_EXEC_ENV_WINDOWS */
 
-static int
-test_trace_dump(void)
-{
-	rte_trace_dump(stdout);
-	return 0;
-}
-
-REGISTER_TEST_COMMAND(trace_dump, test_trace_dump);
-
-static int
-test_trace_metadata_dump(void)
-{
-	return rte_trace_metadata_dump(stdout);
-}
-
-REGISTER_TEST_COMMAND(trace_metadata_dump, test_trace_metadata_dump);
+REGISTER_FAST_TEST(trace_autotest, true, true, test_trace);

@@ -22,15 +22,15 @@ processors-and-mcus/qoriq-layerscape-arm-processors:QORIQ-ARM>`_.
 Common Offload HW Block Drivers
 -------------------------------
 
-1. **Nics Driver**
+#. **Nics Driver**
 
    See :doc:`../nics/dpaa` for NXP dpaa nic driver information.
 
-2. **Cryptodev Driver**
+#. **Cryptodev Driver**
 
    See :doc:`../cryptodevs/dpaa_sec` for NXP dpaa cryptodev driver information.
 
-3. **Eventdev Driver**
+#. **Eventdev Driver**
 
    See :doc:`../eventdevs/dpaa` for NXP dpaa eventdev driver information.
 
@@ -41,34 +41,45 @@ Steps To Setup Platform
 There are four main pre-requisites for executing DPAA PMD on a DPAA
 compatible board:
 
-1. **ARM 64 Tool Chain**
+#. **ARM 64 Tool Chain**
 
    For example, the `*aarch64* Linaro Toolchain <https://releases.linaro.org/components/toolchain/binaries/7.3-2018.05/aarch64-linux-gnu/gcc-linaro-7.3.1-2018.05-i686_aarch64-linux-gnu.tar.xz>`_.
 
-2. **Linux Kernel**
+#. **Linux Kernel**
 
    It can be obtained from `NXP's Github hosting <https://source.codeaurora.org/external/qoriq/qoriq-components/linux>`_.
 
-3. **Rootfile system**
+#. **Rootfile system**
 
    Any *aarch64* supporting filesystem can be used. For example,
    Ubuntu 16.04 LTS (Xenial) or 18.04 (Bionic) userland which can be obtained
    from `here
    <http://cdimage.ubuntu.com/ubuntu-base/releases/18.04/release/ubuntu-base-18.04.1-base-arm64.tar.gz>`_.
 
-4. **FMC Tool**
+#. **FMC Tool**
 
-   Before any DPDK application can be executed, the Frame Manager Configuration
-   Tool (FMC) need to be executed to set the configurations of the queues. This
+   If one is planning to use more than 1 Recv queue and hardware capability to
+   parse, classify and distribute the packets, the Frame Manager Configuration
+   Tool (FMC) need to be executed to set the configurations of the queues before
+   running the DPAA based DPDK application. This setting is persistent, the
+   configuration will remain in the hardware till it is re-configured. This
    includes the queue state, RSS and other policies.
    This tool can be obtained from `NXP (Freescale) Public Git Repository <https://source.codeaurora.org/external/qoriq/qoriq-components/fmc>`_.
 
    This tool needs configuration files which are available in the
    :ref:`DPDK Extra Scripts <extra_scripts>`, described below for DPDK usages.
 
-As an alternative method, DPAA PMD can also be executed using images provided
-as part of SDK from NXP. The SDK includes all the above prerequisites necessary
-to bring up a DPAA board.
+   Note that DPAA PMD can also be executed using images provided
+   as part of SDK from NXP. The SDK includes all the above prerequisites
+   necessary (i.e. fmc tool) to bring up a DPAA board.
+
+   As an alternate method, DPAA PMDs starting from DPDK 20.11 also support the
+   fmlib library integration. The driver will detect about any existing FMC
+   based config (if /tmp/fmc.bin is present). DPAA FMD will be used only if no
+   previous fmc config is existing.
+
+   Note that fmlib based integration rely on underlying fmd driver in kernel,
+   which is available as part of NXP kernel or NXP SDK.
 
 The following dependencies are not part of DPDK and must be installed
 separately:

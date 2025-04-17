@@ -21,7 +21,6 @@
 #include "channel_manager.h"
 #include "channel_monitor.h"
 #include "power_manager.h"
-#include "channel_commands.h"
 
 struct cmd_quit_result {
 	cmdline_fixed_string_t quit;
@@ -155,10 +154,10 @@ cmdline_parse_token_string_t cmd_set_pcpu_vm_name =
 				vm_name, NULL);
 cmdline_parse_token_num_t set_pcpu_vcpu =
 		TOKEN_NUM_INITIALIZER(struct cmd_set_pcpu_result,
-				vcpu, UINT8);
+				vcpu, RTE_UINT8);
 cmdline_parse_token_num_t set_pcpu_core =
 		TOKEN_NUM_INITIALIZER(struct cmd_set_pcpu_result,
-				core, UINT64);
+				core, RTE_UINT64);
 
 
 cmdline_parse_inst_t cmd_set_pcpu_set = {
@@ -455,7 +454,7 @@ cmdline_parse_token_string_t cmd_show_cpu_freq =
 
 cmdline_parse_token_num_t cmd_show_cpu_freq_core_num =
 	TOKEN_NUM_INITIALIZER(struct cmd_show_cpu_freq_result,
-			core_num, UINT8);
+			core_num, RTE_UINT8);
 
 cmdline_parse_inst_t cmd_show_cpu_freq_set = {
 	.f = cmd_show_cpu_freq_parsed,
@@ -504,7 +503,7 @@ cmdline_parse_token_string_t cmd_set_cpu_freq =
 			set_cpu_freq, "set_cpu_freq");
 cmdline_parse_token_num_t cmd_set_cpu_freq_core_num =
 	TOKEN_NUM_INITIALIZER(struct cmd_set_cpu_freq_result,
-			core_num, UINT8);
+			core_num, RTE_UINT8);
 cmdline_parse_token_string_t cmd_set_cpu_freq_cmd_cmd =
 	TOKEN_STRING_INITIALIZER(struct cmd_set_cpu_freq_result,
 			cmd, "up#down#min#max#enable_turbo#disable_turbo");

@@ -7,15 +7,19 @@
 # DPDK instance, use 'make'
 
 if not is_linux
-	build = false
+    build = false
+    subdir_done()
 endif
 
 if not cc.has_header('linux/virtio_blk.h')
-	build = false
+    build = false
+    subdir_done()
 endif
 
 deps += 'vhost'
 allow_experimental_apis = true
 sources = files(
-	'blk.c', 'vhost_blk.c', 'vhost_blk_compat.c'
+        'blk.c',
+        'vhost_blk.c',
+        'vhost_blk_compat.c',
 )

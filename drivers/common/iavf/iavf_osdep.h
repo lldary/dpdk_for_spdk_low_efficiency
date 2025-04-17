@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2017-2020 Intel Corporation
+ * Copyright(c) 2017-2021 Intel Corporation
  */
 
 #ifndef _IAVF_OSDEP_H_
@@ -55,6 +55,15 @@ typedef uint64_t        s64;
 #define __be64          uint64_t
 #endif
 
+/* Avoid macro redefinition warning on Windows */
+#ifdef RTE_EXEC_ENV_WINDOWS
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#endif
 #define min(a, b) RTE_MIN(a, b)
 #define max(a, b) RTE_MAX(a, b)
 
@@ -123,6 +132,11 @@ writeq(uint64_t value, volatile void *addr)
 #define IAVF_PCI_REG_WRITE(reg, value)         writel(value, reg)
 #define IAVF_PCI_REG_WRITE_RELAXED(reg, value) writel_relaxed(value, reg)
 
+#define IAVF_PCI_REG_WC_WRITE(reg, value) \
+	rte_write32_wc((rte_cpu_to_le_32(value)), reg)
+#define IAVF_PCI_REG_WC_WRITE_RELAXED(reg, value) \
+	rte_write32_wc_relaxed((rte_cpu_to_le_32(value)), reg)
+
 #define IAVF_READ_REG(hw, reg)                 rd32(hw, reg)
 #define IAVF_WRITE_REG(hw, reg, value)         wr32(hw, reg, value)
 
@@ -156,11 +170,6 @@ struct iavf_virt_mem {
 	u32 size;
 } __rte_packed;
 
-/* SW spinlock */
-struct iavf_spinlock {
-	rte_spinlock_t spinlock;
-};
-
 #define iavf_allocate_dma_mem(h, m, unused, s, a) \
 			iavf_allocate_dma_mem_d(h, m, s, a)
 #define iavf_free_dma_mem(h, m) iavf_free_dma_mem_d(h, m)
@@ -168,32 +177,14 @@ struct iavf_spinlock {
 #define iavf_allocate_virt_mem(h, m, s) iavf_allocate_virt_mem_d(h, m, s)
 #define iavf_free_virt_mem(h, m) iavf_free_virt_mem_d(h, m)
 
-static inline void
-iavf_init_spinlock_d(struct iavf_spinlock *sp)
-{
-	rte_spinlock_init(&sp->spinlock);
-}
+/* SW spinlock */
+struct iavf_spinlock {
+	rte_spinlock_t spinlock;
+};
 
-static inline void
-iavf_acquire_spinlock_d(struct iavf_spinlock *sp)
-{
-	rte_spinlock_lock(&sp->spinlock);
-}
-
-static inline void
-iavf_release_spinlock_d(struct iavf_spinlock *sp)
-{
-	rte_spinlock_unlock(&sp->spinlock);
-}
-
-static inline void
-iavf_destroy_spinlock_d(__rte_unused struct iavf_spinlock *sp)
-{
-}
-
-#define iavf_init_spinlock(_sp) iavf_init_spinlock_d(_sp)
-#define iavf_acquire_spinlock(_sp) iavf_acquire_spinlock_d(_sp)
-#define iavf_release_spinlock(_sp) iavf_release_spinlock_d(_sp)
-#define iavf_destroy_spinlock(_sp) iavf_destroy_spinlock_d(_sp)
+#define iavf_init_spinlock(sp) rte_spinlock_init(&(sp)->spinlock)
+#define iavf_acquire_spinlock(sp) rte_spinlock_lock(&(sp)->spinlock)
+#define iavf_release_spinlock(sp) rte_spinlock_unlock(&(sp)->spinlock)
+#define iavf_destroy_spinlock(sp) RTE_SET_USED(sp)
 
 #endif /* _IAVF_OSDEP_H_ */

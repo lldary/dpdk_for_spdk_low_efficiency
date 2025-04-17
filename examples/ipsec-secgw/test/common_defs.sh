@@ -20,13 +20,13 @@ REMOTE_MAC=`ssh ${REMOTE_HOST} ip addr show dev ${REMOTE_IFACE}`
 st=$?
 REMOTE_MAC=`echo ${REMOTE_MAC} | sed -e 's/^.*ether //' -e 's/ brd.*$//'`
 if [[ $st -ne 0 || -z "${REMOTE_MAC}" ]]; then
-	echo "coouldn't retrieve ether addr from ${REMOTE_IFACE}"
+	echo "couldn't retrieve ether addr from ${REMOTE_IFACE}"
 	exit 127
 fi
 
 LOCAL_IFACE=dtap0
 
-LOCAL_MAC="00:64:74:61:70:30"
+LOCAL_MAC="02:64:74:61:70:30"
 
 REMOTE_IPV4=192.168.31.14
 LOCAL_IPV4=192.168.31.92
@@ -34,13 +34,13 @@ LOCAL_IPV4=192.168.31.92
 REMOTE_IPV6=fd12:3456:789a:0031:0000:0000:0000:0014
 LOCAL_IPV6=fd12:3456:789a:0031:0000:0000:0000:0092
 
-DPDK_PATH=${RTE_SDK:-${PWD}}
-DPDK_BUILD=${RTE_TARGET:-x86_64-native-linux-gcc}
+DPDK_PATH=${PWD}
+DPDK_BUILD="build"
 DPDK_VARS=""
 
 # by default ipsec-secgw can't deal with multi-segment packets
 # make sure our local/remote host wouldn't generate fragmented packets
-# if reassmebly option is not enabled
+# if reassembly option is not enabled
 DEF_MTU_LEN=1400
 DEF_PING_LEN=1200
 

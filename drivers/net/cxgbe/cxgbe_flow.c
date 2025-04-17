@@ -188,54 +188,22 @@ ch_rte_parsetype_eth(const void *dmask, const struct rte_flow_item *item,
 		return 0;
 
 	/* we don't support SRC_MAC filtering*/
-	if (!rte_is_zero_ether_addr(&mask->src))
+	if (!rte_is_zero_ether_addr(&spec->hdr.src_addr) ||
+	    (umask && !rte_is_zero_ether_addr(&umask->hdr.src_addr)))
 		return rte_flow_error_set(e, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM,
 					  item,
 					  "src mac filtering not supported");
 
-	if (!rte_is_zero_ether_addr(&mask->dst)) {
-		const u8 *addr = (const u8 *)&spec->dst.addr_bytes[0];
-		const u8 *m = (const u8 *)&mask->dst.addr_bytes[0];
-		struct rte_flow *flow = (struct rte_flow *)fs->private;
-		struct port_info *pi = (struct port_info *)
-					(flow->dev->data->dev_private);
-		int idx;
-
-		idx = cxgbe_mpstcam_alloc(pi, addr, m);
-		if (idx <= 0)
-			return rte_flow_error_set(e, idx,
-						  RTE_FLOW_ERROR_TYPE_ITEM,
-						  NULL, "unable to allocate mac"
-						  " entry in h/w");
-		CXGBE_FILL_FS(idx, 0x1ff, macidx);
+	if (!rte_is_zero_ether_addr(&spec->hdr.dst_addr) ||
+	    (umask && !rte_is_zero_ether_addr(&umask->hdr.dst_addr))) {
+		CXGBE_FILL_FS(0, 0x1ff, macidx);
+		CXGBE_FILL_FS_MEMCPY(spec->hdr.dst_addr.addr_bytes, mask->hdr.dst_addr.addr_bytes,
+				     dmac);
 	}
 
-	CXGBE_FILL_FS(be16_to_cpu(spec->type),
-		      be16_to_cpu(mask->type), ethtype);
-
-	return 0;
-}
-
-static int
-ch_rte_parsetype_port(const void *dmask, const struct rte_flow_item *item,
-		      struct ch_filter_specification *fs,
-		      struct rte_flow_error *e)
-{
-	const struct rte_flow_item_phy_port *val = item->spec;
-	const struct rte_flow_item_phy_port *umask = item->mask;
-	const struct rte_flow_item_phy_port *mask;
-
-	mask = umask ? umask : (const struct rte_flow_item_phy_port *)dmask;
-
-	if (!val)
-		return 0; /* Wildcard, match all physical ports */
-
-	if (val->index > 0x7)
-		return rte_flow_error_set(e, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM,
-					  item,
-					  "port index up to 0x7 is supported");
-
-	CXGBE_FILL_FS(val->index, mask->index, iport);
+	if (spec->hdr.ether_type || (umask && umask->hdr.ether_type))
+		CXGBE_FILL_FS(be16_to_cpu(spec->hdr.ether_type),
+			      be16_to_cpu(mask->hdr.ether_type), ethtype);
 
 	return 0;
 }
@@ -251,11 +219,6 @@ ch_rte_parsetype_vlan(const void *dmask, const struct rte_flow_item *item,
 
 	/* If user has not given any mask, then use chelsio supported mask. */
 	mask = umask ? umask : (const struct rte_flow_item_vlan *)dmask;
-
-	if (!fs->mask.ethtype)
-		return rte_flow_error_set(e, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM,
-					  item,
-					  "Can't parse VLAN item without knowing ethertype");
 
 	/* If ethertype is already set and is not VLAN (0x8100) or
 	 * QINQ(0x88A8), then don't proceed further. Otherwise,
@@ -276,70 +239,26 @@ ch_rte_parsetype_vlan(const void *dmask, const struct rte_flow_item *item,
 	if (fs->val.ethtype == RTE_ETHER_TYPE_QINQ) {
 		CXGBE_FILL_FS(1, 1, ovlan_vld);
 		if (spec) {
-			CXGBE_FILL_FS(be16_to_cpu(spec->tci),
-				      be16_to_cpu(mask->tci), ovlan);
-
+			if (spec->hdr.vlan_tci || (umask && umask->hdr.vlan_tci))
+				CXGBE_FILL_FS(be16_to_cpu(spec->hdr.vlan_tci),
+					      be16_to_cpu(mask->hdr.vlan_tci), ovlan);
 			fs->mask.ethtype = 0;
 			fs->val.ethtype = 0;
 		}
-	} else if (fs->val.ethtype == RTE_ETHER_TYPE_VLAN) {
+	} else {
 		CXGBE_FILL_FS(1, 1, ivlan_vld);
 		if (spec) {
-			CXGBE_FILL_FS(be16_to_cpu(spec->tci),
-				      be16_to_cpu(mask->tci), ivlan);
-
+			if (spec->hdr.vlan_tci || (umask && umask->hdr.vlan_tci))
+				CXGBE_FILL_FS(be16_to_cpu(spec->hdr.vlan_tci),
+					      be16_to_cpu(mask->hdr.vlan_tci), ivlan);
 			fs->mask.ethtype = 0;
 			fs->val.ethtype = 0;
 		}
 	}
 
-	if (spec)
-		CXGBE_FILL_FS(be16_to_cpu(spec->inner_type),
-			      be16_to_cpu(mask->inner_type), ethtype);
-
-	return 0;
-}
-
-static int
-ch_rte_parsetype_pf(const void *dmask __rte_unused,
-		    const struct rte_flow_item *item __rte_unused,
-		    struct ch_filter_specification *fs,
-		    struct rte_flow_error *e __rte_unused)
-{
-	struct rte_flow *flow = (struct rte_flow *)fs->private;
-	struct rte_eth_dev *dev = flow->dev;
-	struct adapter *adap = ethdev2adap(dev);
-
-	CXGBE_FILL_FS(1, 1, pfvf_vld);
-
-	CXGBE_FILL_FS(adap->pf, 0x7, pf);
-	return 0;
-}
-
-static int
-ch_rte_parsetype_vf(const void *dmask, const struct rte_flow_item *item,
-		    struct ch_filter_specification *fs,
-		    struct rte_flow_error *e)
-{
-	const struct rte_flow_item_vf *umask = item->mask;
-	const struct rte_flow_item_vf *val = item->spec;
-	const struct rte_flow_item_vf *mask;
-
-	/* If user has not given any mask, then use chelsio supported mask. */
-	mask = umask ? umask : (const struct rte_flow_item_vf *)dmask;
-
-	CXGBE_FILL_FS(1, 1, pfvf_vld);
-
-	if (!val)
-		return 0; /* Wildcard, match all Vf */
-
-	if (val->id > UCHAR_MAX)
-		return rte_flow_error_set(e, EINVAL,
-					  RTE_FLOW_ERROR_TYPE_ITEM,
-					  item,
-					  "VF ID > MAX(255)");
-
-	CXGBE_FILL_FS(val->id, mask->id, vf);
+	if (spec && (spec->hdr.eth_proto || (umask && umask->hdr.eth_proto)))
+		CXGBE_FILL_FS(be16_to_cpu(spec->hdr.eth_proto),
+			      be16_to_cpu(mask->hdr.eth_proto), ethtype);
 
 	return 0;
 }
@@ -363,10 +282,15 @@ ch_rte_parsetype_udp(const void *dmask, const struct rte_flow_item *item,
 	CXGBE_FILL_FS(IPPROTO_UDP, 0xff, proto);
 	if (!val)
 		return 0;
-	CXGBE_FILL_FS(be16_to_cpu(val->hdr.src_port),
-		      be16_to_cpu(mask->hdr.src_port), fport);
-	CXGBE_FILL_FS(be16_to_cpu(val->hdr.dst_port),
-		      be16_to_cpu(mask->hdr.dst_port), lport);
+
+	if (val->hdr.src_port || (umask && umask->hdr.src_port))
+		CXGBE_FILL_FS(be16_to_cpu(val->hdr.src_port),
+			      be16_to_cpu(mask->hdr.src_port), fport);
+
+	if (val->hdr.dst_port || (umask && umask->hdr.dst_port))
+		CXGBE_FILL_FS(be16_to_cpu(val->hdr.dst_port),
+			      be16_to_cpu(mask->hdr.dst_port), lport);
+
 	return 0;
 }
 
@@ -391,10 +315,15 @@ ch_rte_parsetype_tcp(const void *dmask, const struct rte_flow_item *item,
 	CXGBE_FILL_FS(IPPROTO_TCP, 0xff, proto);
 	if (!val)
 		return 0;
-	CXGBE_FILL_FS(be16_to_cpu(val->hdr.src_port),
-		      be16_to_cpu(mask->hdr.src_port), fport);
-	CXGBE_FILL_FS(be16_to_cpu(val->hdr.dst_port),
-		      be16_to_cpu(mask->hdr.dst_port), lport);
+
+	if (val->hdr.src_port || (umask && umask->hdr.src_port))
+		CXGBE_FILL_FS(be16_to_cpu(val->hdr.src_port),
+			      be16_to_cpu(mask->hdr.src_port), fport);
+
+	if (val->hdr.dst_port || (umask && umask->hdr.dst_port))
+		CXGBE_FILL_FS(be16_to_cpu(val->hdr.dst_port),
+			      be16_to_cpu(mask->hdr.dst_port), lport);
+
 	return 0;
 }
 
@@ -422,10 +351,21 @@ ch_rte_parsetype_ipv4(const void *dmask, const struct rte_flow_item *item,
 	if (!val)
 		return 0; /* ipv4 wild card */
 
-	CXGBE_FILL_FS(val->hdr.next_proto_id, mask->hdr.next_proto_id, proto);
-	CXGBE_FILL_FS_MEMCPY(val->hdr.dst_addr, mask->hdr.dst_addr, lip);
-	CXGBE_FILL_FS_MEMCPY(val->hdr.src_addr, mask->hdr.src_addr, fip);
-	CXGBE_FILL_FS(val->hdr.type_of_service, mask->hdr.type_of_service, tos);
+	if (val->hdr.next_proto_id || (umask && umask->hdr.next_proto_id))
+		CXGBE_FILL_FS(val->hdr.next_proto_id, mask->hdr.next_proto_id,
+			      proto);
+
+	if (val->hdr.dst_addr || (umask && umask->hdr.dst_addr))
+		CXGBE_FILL_FS_MEMCPY(val->hdr.dst_addr, mask->hdr.dst_addr,
+				     lip);
+
+	if (val->hdr.src_addr || (umask && umask->hdr.src_addr))
+		CXGBE_FILL_FS_MEMCPY(val->hdr.src_addr, mask->hdr.src_addr,
+				     fip);
+
+	if (val->hdr.type_of_service || (umask && umask->hdr.type_of_service))
+		CXGBE_FILL_FS(val->hdr.type_of_service,
+			      mask->hdr.type_of_service, tos);
 
 	return 0;
 }
@@ -439,6 +379,7 @@ ch_rte_parsetype_ipv6(const void *dmask, const struct rte_flow_item *item,
 	const struct rte_flow_item_ipv6 *umask = item->mask;
 	const struct rte_flow_item_ipv6 *mask;
 	u32 vtc_flow, vtc_flow_mask;
+	u8 z[16] = { 0 };
 
 	mask = umask ? umask : (const struct rte_flow_item_ipv6 *)dmask;
 
@@ -459,17 +400,28 @@ ch_rte_parsetype_ipv6(const void *dmask, const struct rte_flow_item *item,
 	if (!val)
 		return 0; /* ipv6 wild card */
 
-	CXGBE_FILL_FS(val->hdr.proto, mask->hdr.proto, proto);
+	if (val->hdr.proto || (umask && umask->hdr.proto))
+		CXGBE_FILL_FS(val->hdr.proto, mask->hdr.proto, proto);
 
 	vtc_flow = be32_to_cpu(val->hdr.vtc_flow);
-	CXGBE_FILL_FS((vtc_flow & RTE_IPV6_HDR_TC_MASK) >>
-		      RTE_IPV6_HDR_TC_SHIFT,
-		      (vtc_flow_mask & RTE_IPV6_HDR_TC_MASK) >>
-		      RTE_IPV6_HDR_TC_SHIFT,
-		      tos);
+	if (val->hdr.vtc_flow || (umask && umask->hdr.vtc_flow))
+		CXGBE_FILL_FS((vtc_flow & RTE_IPV6_HDR_TC_MASK) >>
+			      RTE_IPV6_HDR_TC_SHIFT,
+			      (vtc_flow_mask & RTE_IPV6_HDR_TC_MASK) >>
+			      RTE_IPV6_HDR_TC_SHIFT,
+			      tos);
 
-	CXGBE_FILL_FS_MEMCPY(val->hdr.dst_addr, mask->hdr.dst_addr, lip);
-	CXGBE_FILL_FS_MEMCPY(val->hdr.src_addr, mask->hdr.src_addr, fip);
+	if (memcmp(val->hdr.dst_addr, z, sizeof(val->hdr.dst_addr)) ||
+	    (umask &&
+	     memcmp(umask->hdr.dst_addr, z, sizeof(umask->hdr.dst_addr))))
+		CXGBE_FILL_FS_MEMCPY(val->hdr.dst_addr, mask->hdr.dst_addr,
+				     lip);
+
+	if (memcmp(val->hdr.src_addr, z, sizeof(val->hdr.src_addr)) ||
+	    (umask &&
+	     memcmp(umask->hdr.src_addr, z, sizeof(umask->hdr.src_addr))))
+		CXGBE_FILL_FS_MEMCPY(val->hdr.src_addr, mask->hdr.src_addr,
+				     fip);
 
 	return 0;
 }
@@ -646,7 +598,6 @@ ch_rte_parse_atype_switch(const struct rte_flow_action *a,
 	const struct rte_flow_action_set_ipv4 *ipv4;
 	const struct rte_flow_action_set_ipv6 *ipv6;
 	const struct rte_flow_action_set_tp *tp_port;
-	const struct rte_flow_action_phy_port *port;
 	const struct rte_flow_action_set_mac *mac;
 	int item_index;
 	u16 tmp_vlan;
@@ -692,10 +643,6 @@ ch_rte_parse_atype_switch(const struct rte_flow_action *a,
 		break;
 	case RTE_FLOW_ACTION_TYPE_OF_POP_VLAN:
 		fs->newvlan = VLAN_REMOVE;
-		break;
-	case RTE_FLOW_ACTION_TYPE_PHY_PORT:
-		port = (const struct rte_flow_action_phy_port *)a->conf;
-		fs->eport = port->index;
 		break;
 	case RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC:
 		item_index = cxgbe_get_flow_item_index(items,
@@ -884,7 +831,6 @@ cxgbe_rtef_parse_actions(struct rte_flow *flow,
 			goto action_switch;
 		case RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN:
 		case RTE_FLOW_ACTION_TYPE_OF_POP_VLAN:
-		case RTE_FLOW_ACTION_TYPE_PHY_PORT:
 		case RTE_FLOW_ACTION_TYPE_MAC_SWAP:
 		case RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC:
 		case RTE_FLOW_ACTION_TYPE_SET_IPV4_DST:
@@ -943,24 +889,17 @@ static struct chrte_fparse parseitem[] = {
 	[RTE_FLOW_ITEM_TYPE_ETH] = {
 		.fptr  = ch_rte_parsetype_eth,
 		.dmask = &(const struct rte_flow_item_eth){
-			.dst.addr_bytes = "\xff\xff\xff\xff\xff\xff",
-			.src.addr_bytes = "\x00\x00\x00\x00\x00\x00",
-			.type = 0xffff,
-		}
-	},
-
-	[RTE_FLOW_ITEM_TYPE_PHY_PORT] = {
-		.fptr = ch_rte_parsetype_port,
-		.dmask = &(const struct rte_flow_item_phy_port){
-			.index = 0x7,
+			.hdr.dst_addr.addr_bytes = "\xff\xff\xff\xff\xff\xff",
+			.hdr.src_addr.addr_bytes = "\x00\x00\x00\x00\x00\x00",
+			.hdr.ether_type = 0xffff,
 		}
 	},
 
 	[RTE_FLOW_ITEM_TYPE_VLAN] = {
 		.fptr = ch_rte_parsetype_vlan,
 		.dmask = &(const struct rte_flow_item_vlan){
-			.tci = 0xffff,
-			.inner_type = 0xffff,
+			.hdr.vlan_tci = 0xffff,
+			.hdr.eth_proto = 0xffff,
 		}
 	},
 
@@ -998,18 +937,6 @@ static struct chrte_fparse parseitem[] = {
 	[RTE_FLOW_ITEM_TYPE_TCP] = {
 		.fptr  = ch_rte_parsetype_tcp,
 		.dmask = &rte_flow_item_tcp_mask,
-	},
-
-	[RTE_FLOW_ITEM_TYPE_PF] = {
-		.fptr = ch_rte_parsetype_pf,
-		.dmask = NULL,
-	},
-
-	[RTE_FLOW_ITEM_TYPE_VF] = {
-		.fptr = ch_rte_parsetype_vf,
-		.dmask = &(const struct rte_flow_item_vf){
-			.id = 0xffffffff,
-		}
 	},
 };
 
@@ -1062,8 +989,8 @@ cxgbe_rtef_parse_items(struct rte_flow *flow,
 		}
 	}
 
-	cxgbe_fill_filter_region(adap, &flow->fs);
 	cxgbe_tweak_filter_spec(adap, &flow->fs);
+	cxgbe_fill_filter_region(adap, &flow->fs);
 
 	return 0;
 }
@@ -1212,17 +1139,6 @@ static int __cxgbe_flow_destroy(struct rte_eth_dev *dev, struct rte_flow *flow)
 		return ctx.result;
 	}
 
-	fs = &flow->fs;
-	if (fs->mask.macidx) {
-		struct port_info *pi = (struct port_info *)
-					(dev->data->dev_private);
-		int ret;
-
-		ret = cxgbe_mpstcam_remove(pi, fs->val.macidx);
-		if (!ret)
-			return ret;
-	}
-
 	return 0;
 }
 
@@ -1332,6 +1248,7 @@ cxgbe_flow_validate(struct rte_eth_dev *dev,
 
 	flow->item_parser = parseitem;
 	flow->dev = dev;
+	flow->fs.private = (void *)flow;
 
 	ret = cxgbe_flow_parse(flow, attr, item, action, e);
 	if (ret) {
@@ -1366,7 +1283,7 @@ out:
 }
 
 /*
- * @ret : > 0 filter destroyed succsesfully
+ * @ret : > 0 filter destroyed successfully
  *        < 0 error destroying filter
  *        == 1 filter not active / not found
  */
@@ -1436,23 +1353,9 @@ static const struct rte_flow_ops cxgbe_flow_ops = {
 };
 
 int
-cxgbe_dev_filter_ctrl(struct rte_eth_dev *dev,
-		      enum rte_filter_type filter_type,
-		      enum rte_filter_op filter_op,
-		      void *arg)
+cxgbe_dev_flow_ops_get(struct rte_eth_dev *dev __rte_unused,
+		       const struct rte_flow_ops **ops)
 {
-	int ret = 0;
-
-	RTE_SET_USED(dev);
-	switch (filter_type) {
-	case RTE_ETH_FILTER_GENERIC:
-		if (filter_op != RTE_ETH_FILTER_GET)
-			return -EINVAL;
-		*(const void **)arg = &cxgbe_flow_ops;
-		break;
-	default:
-		ret = -ENOTSUP;
-		break;
-	}
-	return ret;
+	*ops = &cxgbe_flow_ops;
+	return 0;
 }

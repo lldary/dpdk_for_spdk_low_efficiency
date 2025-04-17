@@ -25,9 +25,9 @@
 #include <rte_errno.h>
 #include <rte_memory.h>
 #include <rte_eal.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_net.h>
-#include <rte_bus_vmbus.h>
+#include <bus_vmbus_driver.h>
 #include <rte_spinlock.h>
 
 #include "hn_logs.h"
@@ -40,9 +40,6 @@
 	(sizeof(struct vmbus_chanpkt_hdr) + sizeof(struct hn_nvs_rndis))
 
 #define HN_TXD_CACHE_SIZE	32 /* per cpu tx_descriptor pool cache */
-#define HN_TXCOPY_THRESHOLD	512
-
-#define HN_RXCOPY_THRESHOLD	256
 #define HN_RXQ_EVENT_DEFAULT	2048
 
 struct hn_rxinfo {
@@ -119,7 +116,7 @@ hn_update_packet_stats(struct hn_stats *stats, const struct rte_mbuf *m)
 		uint32_t bin;
 
 		/* count zeros, and offset into correct bin */
-		bin = (sizeof(s) * 8) - __builtin_clz(s) - 5;
+		bin = (sizeof(s) * 8) - rte_clz32(s) - 5;
 		stats->size_bins[bin]++;
 	} else {
 		if (s < 64)
@@ -160,8 +157,8 @@ static void hn_txd_init(struct rte_mempool *mp __rte_unused,
 
 	txd->queue_id = txq->queue_id;
 	txd->chim_index = NVS_CHIM_IDX_INVALID;
-	txd->rndis_pkt = (struct rndis_packet_msg *)(char *)txq->tx_rndis
-		+ idx * HN_RNDIS_PKT_ALIGNED;
+	txd->rndis_pkt = (struct rndis_packet_msg *)((char *)txq->tx_rndis
+		+ idx * HN_RNDIS_PKT_ALIGNED);
 }
 
 int
@@ -206,11 +203,13 @@ hn_chim_uninit(struct rte_eth_dev *dev)
 static uint32_t hn_chim_alloc(struct hn_data *hv)
 {
 	uint32_t index = NVS_CHIM_IDX_INVALID;
-	uint64_t slab;
+	uint64_t slab = 0;
 
 	rte_spinlock_lock(&hv->chim_lock);
-	if (rte_bitmap_scan(hv->chim_bmap, &index, &slab))
+	if (rte_bitmap_scan(hv->chim_bmap, &index, &slab)) {
+		index += rte_bsf64(slab);
 		rte_bitmap_clear(hv->chim_bmap, index);
+	}
 	rte_spinlock_unlock(&hv->chim_lock);
 
 	return index;
@@ -250,16 +249,6 @@ hn_dev_tx_queue_setup(struct rte_eth_dev *dev,
 
 	PMD_INIT_FUNC_TRACE();
 
-	txq = rte_zmalloc_socket("HN_TXQ", sizeof(*txq), RTE_CACHE_LINE_SIZE,
-				 socket_id);
-	if (!txq)
-		return -ENOMEM;
-
-	txq->hv = hv;
-	txq->chan = hv->channels[queue_idx];
-	txq->port_id = dev->data->port_id;
-	txq->queue_id = queue_idx;
-
 	tx_free_thresh = tx_conf->tx_free_thresh;
 	if (tx_free_thresh == 0)
 		tx_free_thresh = RTE_MIN(nb_desc / 4,
@@ -274,6 +263,15 @@ hn_dev_tx_queue_setup(struct rte_eth_dev *dev,
 		return -EINVAL;
 	}
 
+	txq = rte_zmalloc_socket("HN_TXQ", sizeof(*txq), RTE_CACHE_LINE_SIZE,
+				 socket_id);
+	if (!txq)
+		return -ENOMEM;
+
+	txq->hv = hv;
+	txq->chan = hv->channels[queue_idx];
+	txq->port_id = dev->data->port_id;
+	txq->queue_id = queue_idx;
 	txq->free_thresh = tx_free_thresh;
 
 	snprintf(name, sizeof(name),
@@ -282,10 +280,15 @@ hn_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	PMD_INIT_LOG(DEBUG, "TX descriptor pool %s n=%u size=%zu",
 		     name, nb_desc, sizeof(struct hn_txdesc));
 
-	txq->tx_rndis = rte_calloc("hn_txq_rndis", nb_desc,
-				   HN_RNDIS_PKT_ALIGNED, RTE_CACHE_LINE_SIZE);
-	if (txq->tx_rndis == NULL)
+	txq->tx_rndis_mz = rte_memzone_reserve_aligned(name,
+			nb_desc * HN_RNDIS_PKT_ALIGNED, rte_socket_id(),
+			RTE_MEMZONE_IOVA_CONTIG, HN_RNDIS_PKT_ALIGNED);
+	if (!txq->tx_rndis_mz) {
+		err = -rte_errno;
 		goto error;
+	}
+	txq->tx_rndis = txq->tx_rndis_mz->addr;
+	txq->tx_rndis_iova = txq->tx_rndis_mz->iova;
 
 	txq->txdesc_pool = rte_mempool_create(name, nb_desc,
 					      sizeof(struct hn_txdesc),
@@ -312,13 +315,21 @@ hn_dev_tx_queue_setup(struct rte_eth_dev *dev,
 	}
 
 error:
-	if (txq->txdesc_pool)
-		rte_mempool_free(txq->txdesc_pool);
-	rte_free(txq->tx_rndis);
+	rte_mempool_free(txq->txdesc_pool);
+	rte_memzone_free(txq->tx_rndis_mz);
 	rte_free(txq);
 	return err;
 }
 
+void
+hn_dev_tx_queue_info(struct rte_eth_dev *dev, uint16_t queue_id,
+		     struct rte_eth_txq_info *qinfo)
+{
+	struct hn_tx_queue *txq = dev->data->tx_queues[queue_id];
+
+	qinfo->nb_desc = txq->txdesc_pool->size;
+	qinfo->conf.offloads = dev->data->dev_conf.txmode.offloads;
+}
 
 static struct hn_txdesc *hn_txd_get(struct hn_tx_queue *txq)
 {
@@ -344,20 +355,42 @@ static void hn_txd_put(struct hn_tx_queue *txq, struct hn_txdesc *txd)
 }
 
 void
-hn_dev_tx_queue_release(void *arg)
+hn_dev_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
-	struct hn_tx_queue *txq = arg;
+	struct hn_tx_queue *txq = dev->data->tx_queues[qid];
 
 	PMD_INIT_FUNC_TRACE();
 
 	if (!txq)
 		return;
 
-	if (txq->txdesc_pool)
-		rte_mempool_free(txq->txdesc_pool);
+	rte_mempool_free(txq->txdesc_pool);
 
-	rte_free(txq->tx_rndis);
+	rte_memzone_free(txq->tx_rndis_mz);
 	rte_free(txq);
+}
+
+/*
+ * Check the status of a Tx descriptor in the queue.
+ *
+ * returns:
+ *  - -EINVAL              - offset outside of tx_descriptor pool.
+ *  - RTE_ETH_TX_DESC_FULL - descriptor is not acknowledged by host.
+ *  - RTE_ETH_TX_DESC_DONE - descriptor is available.
+ */
+int hn_dev_tx_descriptor_status(void *arg, uint16_t offset)
+{
+	const struct hn_tx_queue *txq = arg;
+
+	hn_process_events(txq->hv, txq->queue_id, 0);
+
+	if (offset >= rte_mempool_avail_count(txq->txdesc_pool))
+		return -EINVAL;
+
+	if (offset < rte_mempool_in_use_count(txq->txdesc_pool))
+		return RTE_ETH_TX_DESC_FULL;
+	else
+		return RTE_ETH_TX_DESC_DONE;
 }
 
 static void
@@ -380,13 +413,15 @@ hn_nvs_send_completed(struct rte_eth_dev *dev, uint16_t queue_id,
 		txq->stats.bytes += txd->data_size;
 		txq->stats.packets += txd->packets;
 	} else {
-		PMD_TX_LOG(NOTICE, "port %u:%u complete tx %u failed status %u",
-			   txq->port_id, txq->queue_id, txd->chim_index, ack->status);
+		PMD_DRV_LOG(NOTICE, "port %u:%u complete tx %u failed status %u",
+			    txq->port_id, txq->queue_id, txd->chim_index, ack->status);
 		++txq->stats.errors;
 	}
 
-	if (txd->chim_index != NVS_CHIM_IDX_INVALID)
+	if (txd->chim_index != NVS_CHIM_IDX_INVALID) {
 		hn_chim_free(hv, txd->chim_index);
+		txd->chim_index = NVS_CHIM_IDX_INVALID;
+	}
 
 	rte_pktmbuf_free(txd->m);
 	hn_txd_put(txq, txd);
@@ -406,8 +441,7 @@ hn_nvs_handle_comp(struct rte_eth_dev *dev, uint16_t queue_id,
 		break;
 
 	default:
-		PMD_TX_LOG(NOTICE,
-			   "unexpected send completion type %u",
+		PMD_DRV_LOG(NOTICE, "unexpected send completion type %u",
 			   hdr->type);
 	}
 }
@@ -488,35 +522,24 @@ next:
 	return 0;
 }
 
-/*
- * Ack the consumed RXBUF associated w/ this channel packet,
- * so that this RXBUF can be recycled by the hypervisor.
- */
-static void hn_rx_buf_release(struct hn_rx_bufinfo *rxb)
-{
-	struct rte_mbuf_ext_shared_info *shinfo = &rxb->shinfo;
-	struct hn_data *hv = rxb->hv;
-
-	if (rte_mbuf_ext_refcnt_update(shinfo, -1) == 0) {
-		hn_nvs_ack_rxbuf(rxb->chan, rxb->xactid);
-		--hv->rxbuf_outstanding;
-	}
-}
-
 static void hn_rx_buf_free_cb(void *buf __rte_unused, void *opaque)
 {
-	hn_rx_buf_release(opaque);
+	struct hn_rx_bufinfo *rxb = opaque;
+	struct hn_rx_queue *rxq = rxb->rxq;
+
+	rte_atomic32_dec(&rxq->rxbuf_outstanding);
+	hn_nvs_ack_rxbuf(rxb->chan, rxb->xactid);
 }
 
-static struct hn_rx_bufinfo *hn_rx_buf_init(const struct hn_rx_queue *rxq,
+static struct hn_rx_bufinfo *hn_rx_buf_init(struct hn_rx_queue *rxq,
 					    const struct vmbus_chanpkt_rxbuf *pkt)
 {
 	struct hn_rx_bufinfo *rxb;
 
-	rxb = rxq->hv->rxbuf_info + pkt->hdr.xactid;
+	rxb = rxq->rxbuf_info + pkt->hdr.xactid;
 	rxb->chan = rxq->chan;
 	rxb->xactid = pkt->hdr.xactid;
-	rxb->hv = rxq->hv;
+	rxb->rxq = rxq;
 
 	rxb->shinfo.free_cb = hn_rx_buf_free_cb;
 	rxb->shinfo.fcb_opaque = rxb;
@@ -530,6 +553,7 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 {
 	struct hn_data *hv = rxq->hv;
 	struct rte_mbuf *m;
+	bool use_extbuf = false;
 
 	m = rte_pktmbuf_alloc(rxq->mb_pool);
 	if (unlikely(!m)) {
@@ -544,27 +568,30 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 	 * For large packets, avoid copy if possible but need to keep
 	 * some space available in receive area for later packets.
 	 */
-	if (dlen >= HN_RXCOPY_THRESHOLD &&
-	    hv->rxbuf_outstanding < hv->rxbuf_section_cnt / 2) {
+	if (hv->rx_extmbuf_enable && dlen > hv->rx_copybreak &&
+	    (uint32_t)rte_atomic32_read(&rxq->rxbuf_outstanding) <
+			hv->rxbuf_section_cnt / 2) {
 		struct rte_mbuf_ext_shared_info *shinfo;
 		const void *rxbuf;
 		rte_iova_t iova;
 
 		/*
-		 * Build an external mbuf that points to recveive area.
+		 * Build an external mbuf that points to receive area.
 		 * Use refcount to handle multiple packets in same
 		 * receive buffer section.
 		 */
-		rxbuf = hv->rxbuf_res->addr;
+		rxbuf = hv->rxbuf_res.addr;
 		iova = rte_mem_virt2iova(rxbuf) + RTE_PTR_DIFF(data, rxbuf);
 		shinfo = &rxb->shinfo;
 
-		if (rte_mbuf_ext_refcnt_update(shinfo, 1) == 1)
-			++hv->rxbuf_outstanding;
+		/* shinfo is already set to 1 by the caller */
+		if (rte_mbuf_ext_refcnt_update(shinfo, 1) == 2)
+			rte_atomic32_inc(&rxq->rxbuf_outstanding);
 
 		rte_pktmbuf_attach_extbuf(m, data, iova,
 					  dlen + headroom, shinfo);
 		m->data_off = headroom;
+		use_extbuf = true;
 	} else {
 		/* Mbuf's in pool must be large enough to hold small packets */
 		if (unlikely(rte_pktmbuf_tailroom(m) < dlen)) {
@@ -585,13 +612,17 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 					   RTE_PTYPE_L4_MASK);
 
 	if (info->vlan_info != HN_NDIS_VLAN_INFO_INVALID) {
-		m->vlan_tci = info->vlan_info;
-		m->ol_flags |= PKT_RX_VLAN_STRIPPED | PKT_RX_VLAN;
+		m->vlan_tci = RTE_VLAN_TCI_MAKE(NDIS_VLAN_INFO_ID(info->vlan_info),
+						NDIS_VLAN_INFO_PRI(info->vlan_info),
+						NDIS_VLAN_INFO_CFI(info->vlan_info));
+		m->ol_flags |= RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_VLAN;
 
 		/* NDIS always strips tag, put it back if necessary */
 		if (!hv->vlan_strip && rte_vlan_insert(&m)) {
 			PMD_DRV_LOG(DEBUG, "vlan insert failed");
 			++rxq->stats.errors;
+			if (use_extbuf)
+				rte_pktmbuf_detach_extbuf(m);
 			rte_pktmbuf_free(m);
 			return;
 		}
@@ -599,18 +630,18 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 
 	if (info->csum_info != HN_NDIS_RXCSUM_INFO_INVALID) {
 		if (info->csum_info & NDIS_RXCSUM_INFO_IPCS_OK)
-			m->ol_flags |= PKT_RX_IP_CKSUM_GOOD;
+			m->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_GOOD;
 
 		if (info->csum_info & (NDIS_RXCSUM_INFO_UDPCS_OK
 				       | NDIS_RXCSUM_INFO_TCPCS_OK))
-			m->ol_flags |= PKT_RX_L4_CKSUM_GOOD;
+			m->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_GOOD;
 		else if (info->csum_info & (NDIS_RXCSUM_INFO_TCPCS_FAILED
 					    | NDIS_RXCSUM_INFO_UDPCS_FAILED))
-			m->ol_flags |= PKT_RX_L4_CKSUM_BAD;
+			m->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_BAD;
 	}
 
 	if (info->hash_info != HN_NDIS_HASH_INFO_INVALID) {
-		m->ol_flags |= PKT_RX_RSS_HASH;
+		m->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
 		m->hash.rss = info->hash_value;
 	}
 
@@ -625,6 +656,9 @@ static void hn_rxpkt(struct hn_rx_queue *rxq, struct hn_rx_bufinfo *rxb,
 
 	if (unlikely(rte_ring_sp_enqueue(rxq->rx_ring, m) != 0)) {
 		++rxq->stats.ring_full;
+		PMD_RX_LOG(DEBUG, "rx ring full");
+		if (use_extbuf)
+			rte_pktmbuf_detach_extbuf(m);
 		rte_pktmbuf_free(m);
 	}
 }
@@ -633,7 +667,8 @@ static void hn_rndis_rx_data(struct hn_rx_queue *rxq,
 			     struct hn_rx_bufinfo *rxb,
 			     void *data, uint32_t dlen)
 {
-	unsigned int data_off, data_len, pktinfo_off, pktinfo_len;
+	unsigned int data_off, data_len;
+	unsigned int pktinfo_off, pktinfo_len;
 	const struct rndis_packet_msg *pkt = data;
 	struct hn_rxinfo info = {
 		.vlan_info = HN_NDIS_VLAN_INFO_INVALID,
@@ -678,7 +713,8 @@ static void hn_rndis_rx_data(struct hn_rx_queue *rxq,
 			goto error;
 	}
 
-	if (unlikely(data_off + data_len > pkt->len))
+	/* overflow check */
+	if (data_len > data_len + data_off || data_len + data_off > pkt->len)
 		goto error;
 
 	if (unlikely(data_len < RTE_ETHER_HDR_LEN))
@@ -729,8 +765,8 @@ hn_nvs_handle_rxbuf(struct rte_eth_dev *dev,
 {
 	const struct vmbus_chanpkt_rxbuf *pkt;
 	const struct hn_nvs_hdr *nvs_hdr = buf;
-	uint32_t rxbuf_sz = hv->rxbuf_res->len;
-	char *rxbuf = hv->rxbuf_res->addr;
+	uint32_t rxbuf_sz = hv->rxbuf_res.len;
+	char *rxbuf = hv->rxbuf_res.addr;
 	unsigned int i, hlen, count;
 	struct hn_rx_bufinfo *rxb;
 
@@ -800,7 +836,8 @@ hn_nvs_handle_rxbuf(struct rte_eth_dev *dev,
 	}
 
 	/* Send ACK now if external mbuf not used */
-	hn_rx_buf_release(rxb);
+	if (rte_mbuf_ext_refcnt_update(&rxb->shinfo, -1) == 0)
+		hn_nvs_ack_rxbuf(rxb->chan, rxb->xactid);
 }
 
 /*
@@ -856,7 +893,35 @@ struct hn_rx_queue *hn_rx_queue_alloc(struct hn_data *hv,
 		return NULL;
 	}
 
+	/* setup rxbuf_info for non-primary queue */
+	if (queue_id) {
+		rxq->rxbuf_info = rte_calloc("HN_RXBUF_INFO",
+					hv->rxbuf_section_cnt,
+					sizeof(*rxq->rxbuf_info),
+					RTE_CACHE_LINE_SIZE);
+
+		if (!rxq->rxbuf_info) {
+			PMD_DRV_LOG(ERR,
+				"Could not allocate rxbuf info for queue %d\n",
+				queue_id);
+			rte_free(rxq->event_buf);
+			rte_free(rxq);
+			return NULL;
+		}
+	}
+
 	return rxq;
+}
+
+void
+hn_dev_rx_queue_info(struct rte_eth_dev *dev, uint16_t queue_id,
+		     struct rte_eth_rxq_info *qinfo)
+{
+	struct hn_rx_queue *rxq = dev->data->rx_queues[queue_id];
+
+	qinfo->mp = rxq->mb_pool;
+	qinfo->nb_desc = rxq->rx_ring->size;
+	qinfo->conf.offloads = dev->data->dev_conf.rxmode.offloads;
 }
 
 int
@@ -910,6 +975,7 @@ hn_dev_rx_queue_setup(struct rte_eth_dev *dev,
 
 fail:
 	rte_ring_free(rxq->rx_ring);
+	rte_free(rxq->rxbuf_info);
 	rte_free(rxq->event_buf);
 	rte_free(rxq);
 	return error;
@@ -932,18 +998,53 @@ hn_rx_queue_free(struct hn_rx_queue *rxq, bool keep_primary)
 	if (keep_primary && rxq == rxq->hv->primary)
 		return;
 
+	rte_free(rxq->rxbuf_info);
 	rte_free(rxq->event_buf);
 	rte_free(rxq);
 }
 
 void
-hn_dev_rx_queue_release(void *arg)
+hn_dev_rx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
-	struct hn_rx_queue *rxq = arg;
+	struct hn_rx_queue *rxq = dev->data->rx_queues[qid];
 
 	PMD_INIT_FUNC_TRACE();
 
 	hn_rx_queue_free(rxq, true);
+}
+
+/*
+ * Get the number of used descriptor in a rx queue
+ * For this device that means how many packets are pending in the ring.
+ */
+uint32_t
+hn_dev_rx_queue_count(void *rx_queue)
+{
+	struct hn_rx_queue *rxq = rx_queue;
+
+	return rte_ring_count(rxq->rx_ring);
+}
+
+/*
+ * Check the status of a Rx descriptor in the queue
+ *
+ * returns:
+ *  - -EINVAL               - offset outside of ring
+ *  - RTE_ETH_RX_DESC_AVAIL - no data available yet
+ *  - RTE_ETH_RX_DESC_DONE  - data is waiting in staging ring
+ */
+int hn_dev_rx_queue_status(void *arg, uint16_t offset)
+{
+	const struct hn_rx_queue *rxq = arg;
+
+	hn_process_events(rxq->hv, rxq->queue_id, 0);
+	if (offset >= rxq->rx_ring->capacity)
+		return -EINVAL;
+
+	if (offset < rte_ring_count(rxq->rx_ring))
+		return RTE_ETH_RX_DESC_DONE;
+	else
+		return RTE_ETH_RX_DESC_AVAIL;
 }
 
 int
@@ -1097,10 +1198,16 @@ static int hn_flush_txagg(struct hn_tx_queue *txq, bool *need_sig)
 
 	if (likely(ret == 0))
 		hn_reset_txagg(txq);
-	else
-		PMD_TX_LOG(NOTICE, "port %u:%u send failed: %d",
-			   txq->port_id, txq->queue_id, ret);
+	else if (ret == -EAGAIN) {
+		PMD_TX_LOG(DEBUG, "port %u:%u channel full",
+			   txq->port_id, txq->queue_id);
+		++txq->stats.channel_full;
+	} else {
+		++txq->stats.errors;
 
+		PMD_DRV_LOG(NOTICE, "port %u:%u send failed: %d",
+			   txq->port_id, txq->queue_id, ret);
+	}
 	return ret;
 }
 
@@ -1159,7 +1266,7 @@ hn_try_txagg(struct hn_data *hv, struct hn_tx_queue *txq,
 	if (txd->chim_index == NVS_CHIM_IDX_INVALID)
 		return NULL;
 
-	chim = (uint8_t *)hv->chim_res->addr
+	chim = (uint8_t *)hv->chim_res.addr
 			+ txd->chim_index * hv->chim_szmax;
 
 	txq->agg_txd = txd;
@@ -1224,41 +1331,48 @@ static void hn_encap(struct rndis_packet_msg *pkt,
 					  NDIS_PKTINFO_TYPE_HASHVAL);
 	*pi_data = queue_id;
 
-	if (m->ol_flags & PKT_TX_VLAN_PKT) {
+	if (m->ol_flags & RTE_MBUF_F_TX_VLAN) {
 		pi_data = hn_rndis_pktinfo_append(pkt, NDIS_VLAN_INFO_SIZE,
 						  NDIS_PKTINFO_TYPE_VLAN);
-		*pi_data = m->vlan_tci;
+		*pi_data = NDIS_VLAN_INFO_MAKE(RTE_VLAN_TCI_ID(m->vlan_tci),
+					       RTE_VLAN_TCI_PRI(m->vlan_tci),
+					       RTE_VLAN_TCI_DEI(m->vlan_tci));
 	}
 
-	if (m->ol_flags & PKT_TX_TCP_SEG) {
+	if (m->ol_flags & RTE_MBUF_F_TX_TCP_SEG) {
 		pi_data = hn_rndis_pktinfo_append(pkt, NDIS_LSO2_INFO_SIZE,
 						  NDIS_PKTINFO_TYPE_LSO);
 
-		if (m->ol_flags & PKT_TX_IPV6) {
+		if (m->ol_flags & RTE_MBUF_F_TX_IPV6) {
 			*pi_data = NDIS_LSO2_INFO_MAKEIPV6(hlen,
 							   m->tso_segsz);
 		} else {
 			*pi_data = NDIS_LSO2_INFO_MAKEIPV4(hlen,
 							   m->tso_segsz);
 		}
-	} else if (m->ol_flags &
-		   (PKT_TX_TCP_CKSUM | PKT_TX_UDP_CKSUM | PKT_TX_IP_CKSUM)) {
+	} else if ((m->ol_flags & RTE_MBUF_F_TX_L4_MASK) ==
+			RTE_MBUF_F_TX_TCP_CKSUM ||
+		   (m->ol_flags & RTE_MBUF_F_TX_L4_MASK) ==
+			RTE_MBUF_F_TX_UDP_CKSUM ||
+		   (m->ol_flags & RTE_MBUF_F_TX_IP_CKSUM)) {
 		pi_data = hn_rndis_pktinfo_append(pkt, NDIS_TXCSUM_INFO_SIZE,
 						  NDIS_PKTINFO_TYPE_CSUM);
 		*pi_data = 0;
 
-		if (m->ol_flags & PKT_TX_IPV6)
+		if (m->ol_flags & RTE_MBUF_F_TX_IPV6)
 			*pi_data |= NDIS_TXCSUM_INFO_IPV6;
-		if (m->ol_flags & PKT_TX_IPV4) {
+		if (m->ol_flags & RTE_MBUF_F_TX_IPV4) {
 			*pi_data |= NDIS_TXCSUM_INFO_IPV4;
 
-			if (m->ol_flags & PKT_TX_IP_CKSUM)
+			if (m->ol_flags & RTE_MBUF_F_TX_IP_CKSUM)
 				*pi_data |= NDIS_TXCSUM_INFO_IPCS;
 		}
 
-		if (m->ol_flags & PKT_TX_TCP_CKSUM)
+		if ((m->ol_flags & RTE_MBUF_F_TX_L4_MASK) ==
+				RTE_MBUF_F_TX_TCP_CKSUM)
 			*pi_data |= NDIS_TXCSUM_INFO_MKTCPCS(hlen);
-		else if (m->ol_flags & PKT_TX_UDP_CKSUM)
+		else if ((m->ol_flags & RTE_MBUF_F_TX_L4_MASK) ==
+				RTE_MBUF_F_TX_UDP_CKSUM)
 			*pi_data |= NDIS_TXCSUM_INFO_MKUDPCS(hlen);
 	}
 
@@ -1280,7 +1394,8 @@ static unsigned int hn_get_slots(const struct rte_mbuf *m)
 		unsigned int size = rte_pktmbuf_data_len(m);
 		unsigned int offs = rte_mbuf_data_iova(m) & PAGE_MASK;
 
-		slots += (offs + size + PAGE_SIZE - 1) / PAGE_SIZE;
+		slots += (offs + size + rte_mem_page_size() - 1) /
+				rte_mem_page_size();
 		m = m->next;
 	}
 
@@ -1295,12 +1410,13 @@ static unsigned int hn_fill_sg(struct vmbus_gpa *sg,
 
 	while (m) {
 		rte_iova_t addr = rte_mbuf_data_iova(m);
-		unsigned int page = addr / PAGE_SIZE;
+		unsigned int page = addr / rte_mem_page_size();
 		unsigned int offset = addr & PAGE_MASK;
 		unsigned int len = rte_pktmbuf_data_len(m);
 
 		while (len > 0) {
-			unsigned int bytes = RTE_MIN(len, PAGE_SIZE - offset);
+			unsigned int bytes = RTE_MIN(len,
+					rte_mem_page_size() - offset);
 
 			sg[segs].page = page;
 			sg[segs].ofs = offset;
@@ -1340,13 +1456,10 @@ static int hn_xmit_sg(struct hn_tx_queue *txq,
 	hn_rndis_dump(txd->rndis_pkt);
 
 	/* pass IOVA of rndis header in first segment */
-	addr = rte_malloc_virt2iova(txd->rndis_pkt);
-	if (unlikely(addr == RTE_BAD_IOVA)) {
-		PMD_DRV_LOG(ERR, "RNDIS transmit can not get iova");
-		return -EINVAL;
-	}
+	addr = txq->tx_rndis_iova +
+		((char *)txd->rndis_pkt - (char *)txq->tx_rndis);
 
-	sg[0].page = addr / PAGE_SIZE;
+	sg[0].page = addr / rte_mem_page_size();
 	sg[0].ofs = addr & PAGE_MASK;
 	sg[0].len = RNDIS_PACKET_MSG_OFFSET_ABS(hn_rndis_pktlen(txd->rndis_pkt));
 	segs = 1;
@@ -1388,16 +1501,20 @@ hn_xmit_pkts(void *ptxq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		hn_process_events(hv, txq->queue_id, 0);
 
 	/* Transmit over VF if present and up */
-	rte_rwlock_read_lock(&hv->vf_lock);
-	vf_dev = hn_get_vf_dev(hv);
-	if (vf_dev && vf_dev->data->dev_started) {
-		void *sub_q = vf_dev->data->tx_queues[queue_id];
+	if (hv->vf_ctx.vf_vsc_switched) {
+		rte_rwlock_read_lock(&hv->vf_lock);
+		vf_dev = hn_get_vf_dev(hv);
+		if (hv->vf_ctx.vf_vsc_switched && vf_dev &&
+		    vf_dev->data->dev_started) {
+			void *sub_q = vf_dev->data->tx_queues[queue_id];
 
-		nb_tx = (*vf_dev->tx_pkt_burst)(sub_q, tx_pkts, nb_pkts);
+			nb_tx = (*vf_dev->tx_pkt_burst)
+					(sub_q, tx_pkts, nb_pkts);
+			rte_rwlock_read_unlock(&hv->vf_lock);
+			return nb_tx;
+		}
 		rte_rwlock_read_unlock(&hv->vf_lock);
-		return nb_tx;
 	}
-	rte_rwlock_read_unlock(&hv->vf_lock);
 
 	for (nb_tx = 0; nb_tx < nb_pkts; nb_tx++) {
 		struct rte_mbuf *m = tx_pkts[nb_tx];
@@ -1410,7 +1527,8 @@ hn_xmit_pkts(void *ptxq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 			break;
 
 		/* For small packets aggregate them in chimney buffer */
-		if (m->pkt_len < HN_TXCOPY_THRESHOLD && pkt_size <= txq->agg_szmax) {
+		if (m->pkt_len <= hv->tx_copybreak &&
+		    pkt_size <= txq->agg_szmax) {
 			/* If this packet will not fit, then flush  */
 			if (txq->agg_pktleft == 0 ||
 			    RTE_ALIGN(pkt_size, txq->agg_align) > txq->agg_szleft) {
@@ -1446,8 +1564,13 @@ hn_xmit_pkts(void *ptxq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 			ret = hn_xmit_sg(txq, txd, m, &need_sig);
 			if (unlikely(ret != 0)) {
-				PMD_TX_LOG(NOTICE, "sg send failed: %d", ret);
-				++txq->stats.errors;
+				if (ret == -EAGAIN) {
+					PMD_TX_LOG(DEBUG, "sg channel full");
+					++txq->stats.channel_full;
+				} else {
+					PMD_DRV_LOG(NOTICE, "sg send failed: %d", ret);
+					++txq->stats.errors;
+				}
 				hn_txd_put(txq, txd);
 				goto fail;
 			}
@@ -1504,13 +1627,17 @@ hn_recv_pkts(void *prxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 					   (void **)rx_pkts, nb_pkts, NULL);
 
 	/* If VF is available, check that as well */
-	rte_rwlock_read_lock(&hv->vf_lock);
-	vf_dev = hn_get_vf_dev(hv);
-	if (vf_dev && vf_dev->data->dev_started)
-		nb_rcv += hn_recv_vf(vf_dev->data->port_id, rxq,
-				     rx_pkts + nb_rcv, nb_pkts - nb_rcv);
+	if (hv->vf_ctx.vf_vsc_switched) {
+		rte_rwlock_read_lock(&hv->vf_lock);
+		vf_dev = hn_get_vf_dev(hv);
+		if (hv->vf_ctx.vf_vsc_switched && vf_dev &&
+		    vf_dev->data->dev_started)
+			nb_rcv += hn_recv_vf(vf_dev->data->port_id, rxq,
+					     rx_pkts + nb_rcv,
+					     nb_pkts - nb_rcv);
 
-	rte_rwlock_read_unlock(&hv->vf_lock);
+		rte_rwlock_read_unlock(&hv->vf_lock);
+	}
 	return nb_rcv;
 }
 
@@ -1528,7 +1655,7 @@ hn_dev_free_queues(struct rte_eth_dev *dev)
 	dev->data->nb_rx_queues = 0;
 
 	for (i = 0; i < dev->data->nb_tx_queues; i++) {
-		hn_dev_tx_queue_release(dev->data->tx_queues[i]);
+		hn_dev_tx_queue_release(dev, i);
 		dev->data->tx_queues[i] = NULL;
 	}
 	dev->data->nb_tx_queues = 0;

@@ -2,7 +2,7 @@
  * Copyright(c) 2017 Huawei Technologies Co., Ltd
  */
 
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 
 #include "hinic_compat.h"
 #include "hinic_csr.h"
@@ -280,7 +280,7 @@ void hinic_set_msix_state(void *hwdev, u16 msix_idx, enum hinic_msix_state flag)
 	/* vfio-pci does not mmap msi-x vector table to user space,
 	 * we can not access the space when kernel driver is vfio-pci
 	 */
-	if (hw->pcidev_hdl->kdrv == RTE_KDRV_VFIO)
+	if (hw->pcidev_hdl->kdrv == RTE_PCI_KDRV_VFIO)
 		return;
 
 	mask_bits = readl(hwif->intr_regs_base + offset);
@@ -321,7 +321,7 @@ int wait_until_doorbell_flush_states(struct hinic_hwif *hwif,
 		rte_delay_ms(1);
 	} while (time_before(jiffies, end));
 
-	return -EFAULT;
+	return -ETIMEDOUT;
 }
 
 static int wait_until_doorbell_and_outbound_enabled(struct hinic_hwif *hwif)
@@ -343,7 +343,7 @@ static int wait_until_doorbell_and_outbound_enabled(struct hinic_hwif *hwif)
 		rte_delay_ms(1);
 	} while (time_before(jiffies, end));
 
-	return -EFAULT;
+	return -ETIMEDOUT;
 }
 
 u16 hinic_global_func_id(void *hwdev)

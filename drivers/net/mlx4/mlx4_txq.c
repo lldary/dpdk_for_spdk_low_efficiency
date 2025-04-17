@@ -27,7 +27,7 @@
 
 #include <rte_common.h>
 #include <rte_errno.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
@@ -157,6 +157,27 @@ error:
 	} while (i--);
 	return -rte_errno;
 }
+
+void
+mlx4_tx_uar_uninit_secondary(struct rte_eth_dev *dev)
+{
+	struct mlx4_proc_priv *ppriv =
+			(struct mlx4_proc_priv *)dev->process_private;
+	const size_t page_size = sysconf(_SC_PAGESIZE);
+	void *addr;
+	size_t i;
+
+	if (page_size == (size_t)-1) {
+		ERROR("Failed to get mem page size");
+		return;
+	}
+	for (i = 0; i < ppriv->uar_table_sz; i++) {
+		addr = ppriv->uar_table[i];
+		if (addr)
+			munmap(RTE_PTR_ALIGN_FLOOR(addr, page_size), page_size);
+	}
+}
+
 #else
 int
 mlx4_tx_uar_init_secondary(struct rte_eth_dev *dev __rte_unused,
@@ -166,6 +187,13 @@ mlx4_tx_uar_init_secondary(struct rte_eth_dev *dev __rte_unused,
 	ERROR("UAR remap is not supported");
 	rte_errno = ENOTSUP;
 	return -rte_errno;
+}
+
+void
+mlx4_tx_uar_uninit_secondary(struct rte_eth_dev *dev __rte_unused)
+{
+	assert(rte_eal_process_type() == RTE_PROC_SECONDARY);
+	ERROR("UAR remap is not supported");
 }
 #endif
 
@@ -178,19 +206,18 @@ mlx4_tx_uar_init_secondary(struct rte_eth_dev *dev __rte_unused,
 static void
 mlx4_txq_free_elts(struct txq *txq)
 {
-	unsigned int elts_head = txq->elts_head;
-	unsigned int elts_tail = txq->elts_tail;
 	struct txq_elt (*elts)[txq->elts_n] = txq->elts;
-	unsigned int elts_m = txq->elts_n - 1;
+	unsigned int n = txq->elts_n;
 
-	DEBUG("%p: freeing WRs", (void *)txq);
-	while (elts_tail != elts_head) {
-		struct txq_elt *elt = &(*elts)[elts_tail++ & elts_m];
+	DEBUG("%p: freeing WRs, %u", (void *)txq, n);
+	while (n--) {
+		struct txq_elt *elt = &(*elts)[n];
 
-		MLX4_ASSERT(elt->buf != NULL);
-		rte_pktmbuf_free(elt->buf);
-		elt->buf = NULL;
-		elt->wqe = NULL;
+		if (elt->buf) {
+			rte_pktmbuf_free(elt->buf);
+			elt->buf = NULL;
+			elt->wqe = NULL;
+		}
 	}
 	txq->elts_tail = txq->elts_head;
 }
@@ -246,20 +273,20 @@ mlx4_txq_fill_dv_obj_info(struct txq *txq, struct mlx4dv_obj *mlxdv)
 uint64_t
 mlx4_get_tx_port_offloads(struct mlx4_priv *priv)
 {
-	uint64_t offloads = DEV_TX_OFFLOAD_MULTI_SEGS;
+	uint64_t offloads = RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
 
 	if (priv->hw_csum) {
-		offloads |= (DEV_TX_OFFLOAD_IPV4_CKSUM |
-			     DEV_TX_OFFLOAD_UDP_CKSUM |
-			     DEV_TX_OFFLOAD_TCP_CKSUM);
+		offloads |= (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+			     RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+			     RTE_ETH_TX_OFFLOAD_TCP_CKSUM);
 	}
 	if (priv->tso)
-		offloads |= DEV_TX_OFFLOAD_TCP_TSO;
+		offloads |= RTE_ETH_TX_OFFLOAD_TCP_TSO;
 	if (priv->hw_csum_l2tun) {
-		offloads |= DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM;
+		offloads |= RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM;
 		if (priv->tso)
-			offloads |= (DEV_TX_OFFLOAD_VXLAN_TNL_TSO |
-				     DEV_TX_OFFLOAD_GRE_TNL_TSO);
+			offloads |= (RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO |
+				     RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO);
 	}
 	return offloads;
 }
@@ -367,16 +394,17 @@ mlx4_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 		.elts_comp_cd_init =
 			RTE_MIN(MLX4_PMD_TX_PER_COMP_REQ, desc / 4),
 		.csum = priv->hw_csum &&
-			(offloads & (DEV_TX_OFFLOAD_IPV4_CKSUM |
-					   DEV_TX_OFFLOAD_UDP_CKSUM |
-					   DEV_TX_OFFLOAD_TCP_CKSUM)),
+			(offloads & (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+					   RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+					   RTE_ETH_TX_OFFLOAD_TCP_CKSUM)),
 		.csum_l2tun = priv->hw_csum_l2tun &&
 			      (offloads &
-			       DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM),
+			       RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM),
 		/* Enable Tx loopback for VF devices. */
 		.lb = !!priv->vf,
 		.bounce_buf = bounce_buf,
 	};
+	dev->data->tx_queues[idx] = txq;
 	priv->verbs_alloc_ctx.type = MLX4_VERBS_ALLOC_TYPE_TX_QUEUE;
 	priv->verbs_alloc_ctx.obj = txq;
 	txq->cq = mlx4_glue->create_cq(priv->ctx, desc, NULL, NULL, 0);
@@ -480,13 +508,11 @@ mlx4_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
 	/* Save pointer of global generation number to check memory event. */
 	txq->mr_ctrl.dev_gen_ptr = &priv->mr.dev_gen;
 	DEBUG("%p: adding Tx queue %p to list", (void *)dev, (void *)txq);
-	dev->data->tx_queues[idx] = txq;
 	priv->verbs_alloc_ctx.type = MLX4_VERBS_ALLOC_TYPE_NONE;
 	return 0;
 error:
-	dev->data->tx_queues[idx] = NULL;
 	ret = rte_errno;
-	mlx4_tx_queue_release(txq);
+	mlx4_tx_queue_release(dev, idx);
 	rte_errno = ret;
 	MLX4_ASSERT(rte_errno > 0);
 	priv->verbs_alloc_ctx.type = MLX4_VERBS_ALLOC_TYPE_NONE;
@@ -496,26 +522,20 @@ error:
 /**
  * DPDK callback to release a Tx queue.
  *
- * @param dpdk_txq
- *   Generic Tx queue pointer.
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ * @param idx
+ *   Transmit queue index.
  */
 void
-mlx4_tx_queue_release(void *dpdk_txq)
+mlx4_tx_queue_release(struct rte_eth_dev *dev, uint16_t idx)
 {
-	struct txq *txq = (struct txq *)dpdk_txq;
-	struct mlx4_priv *priv;
-	unsigned int i;
+	struct txq *txq = dev->data->tx_queues[idx];
 
 	if (txq == NULL)
 		return;
-	priv = txq->priv;
-	for (i = 0; i != ETH_DEV(priv)->data->nb_tx_queues; ++i)
-		if (ETH_DEV(priv)->data->tx_queues[i] == txq) {
-			DEBUG("%p: removing Tx queue %p from list",
-			      (void *)ETH_DEV(priv), (void *)txq);
-			ETH_DEV(priv)->data->tx_queues[i] = NULL;
-			break;
-		}
+	DEBUG("%p: removing Tx queue %hu from list", (void *)dev, idx);
+	dev->data->tx_queues[idx] = NULL;
 	mlx4_txq_free_elts(txq);
 	if (txq->qp)
 		claim_zero(mlx4_glue->destroy_qp(txq->qp));

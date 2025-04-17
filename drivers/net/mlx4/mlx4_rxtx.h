@@ -19,7 +19,7 @@
 #pragma GCC diagnostic error "-Wpedantic"
 #endif
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_mbuf.h>
 #include <rte_mempool.h>
 
@@ -141,7 +141,7 @@ int mlx4_rx_queue_setup(struct rte_eth_dev *dev, uint16_t idx,
 			uint16_t desc, unsigned int socket,
 			const struct rte_eth_rxconf *conf,
 			struct rte_mempool *mp);
-void mlx4_rx_queue_release(void *dpdk_rxq);
+void mlx4_rx_queue_release(struct rte_eth_dev *dev, uint16_t idx);
 
 /* mlx4_rxtx.c */
 
@@ -149,19 +149,16 @@ uint16_t mlx4_tx_burst(void *dpdk_txq, struct rte_mbuf **pkts,
 		       uint16_t pkts_n);
 uint16_t mlx4_rx_burst(void *dpdk_rxq, struct rte_mbuf **pkts,
 		       uint16_t pkts_n);
-uint16_t mlx4_tx_burst_removed(void *dpdk_txq, struct rte_mbuf **pkts,
-			       uint16_t pkts_n);
-uint16_t mlx4_rx_burst_removed(void *dpdk_rxq, struct rte_mbuf **pkts,
-			       uint16_t pkts_n);
 
 /* mlx4_txq.c */
 
 int mlx4_tx_uar_init_secondary(struct rte_eth_dev *dev, int fd);
+void mlx4_tx_uar_uninit_secondary(struct rte_eth_dev *dev);
 uint64_t mlx4_get_tx_port_offloads(struct mlx4_priv *priv);
 int mlx4_tx_queue_setup(struct rte_eth_dev *dev, uint16_t idx,
 			uint16_t desc, unsigned int socket,
 			const struct rte_eth_txconf *conf);
-void mlx4_tx_queue_release(void *dpdk_txq);
+void mlx4_tx_queue_release(struct rte_eth_dev *dev, uint16_t idx);
 
 /* mlx4_mr.c */
 

@@ -6,9 +6,14 @@ APP = bond_app
 
 # all source are stored in SRCS-y
 SRCS-y := main.c
+SRC-DEPS := build/commands.h
+
+PKGCONF ?= pkg-config
 
 # Build using pkg-config variables if possible
-ifeq ($(shell pkg-config --exists libdpdk && echo 0),0)
+ifneq ($(shell $(PKGCONF) --exists libdpdk && echo 0),0)
+$(error "no installation of DPDK found")
+endif
 
 all: shared
 .PHONY: shared static
@@ -17,21 +22,30 @@ shared: build/$(APP)-shared
 static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-LDFLAGS += -lrte_pmd_bond
-
-PKGCONF ?= pkg-config
+LDFLAGS += -lrte_net_bond
 
 PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
-CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
+CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk) -I build/
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
-LDFLAGS_STATIC = -Wl,-Bstatic $(shell $(PKGCONF) --static --libs libdpdk)
+LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
+
+build/commands.h: commands.list Makefile
+	dpdk-cmdline-gen.py -o $@ --context-name=main_ctx $<
+
+ifeq ($(MAKECMDGOALS),static)
+# check for broken pkg-config
+ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
+$(warning "pkg-config output list does not contain drivers between 'whole-archive'/'no-whole-archive' flags.")
+$(error "Cannot generate statically-linked binaries with this version of pkg-config")
+endif
+endif
 
 CFLAGS += -DALLOW_EXPERIMENTAL_API
 
-build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build
+build/$(APP)-shared: $(SRCS-y) Makefile $(PC_FILE) | build $(SRC-DEPS)
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_SHARED)
 
-build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build
+build/$(APP)-static: $(SRCS-y) Makefile $(PC_FILE) | build  $(SRC-DEPS)
 	$(CC) $(CFLAGS) $(SRCS-y) -o $@ $(LDFLAGS) $(LDFLAGS_STATIC)
 
 build:
@@ -39,35 +53,5 @@ build:
 
 .PHONY: clean
 clean:
-	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared
+	rm -f build/$(APP) build/$(APP)-static build/$(APP)-shared build/*.h
 	test -d build && rmdir -p build || true
-
-else
-
-ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
-endif
-
-# Default target, detect a build directory, by looking for a path with a .config
-RTE_TARGET ?= $(notdir $(abspath $(dir $(firstword $(wildcard $(RTE_SDK)/*/.config)))))
-
-include $(RTE_SDK)/mk/rte.vars.mk
-
-CFLAGS += $(WERROR_FLAGS)
-
-# workaround for a gcc bug with noreturn attribute
-# http://gcc.gnu.org/bugzilla/show_bug.cgi?id=12603
-ifeq ($(CONFIG_RTE_TOOLCHAIN_GCC),y)
-CFLAGS_main.o += -Wno-return-type
-endif
-
-CFLAGS += -O3
-CFLAGS += -DALLOW_EXPERIMENTAL_API
-
-ifeq ($(CONFIG_RTE_BUILD_SHARED_LIB),y)
-LDLIBS += -lrte_pmd_bond
-endif
-
-include $(RTE_SDK)/mk/rte.extapp.mk
-
-endif

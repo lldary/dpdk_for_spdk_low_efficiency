@@ -33,9 +33,9 @@ Lcore-related options
     At a given instance only one core option ``--lcores``, ``-l`` or ``-c`` can
     be used.
 
-*   ``--master-lcore <core ID>``
+*   ``--main-lcore <core ID>``
 
-    Core ID that is used as master.
+    Core ID that is used as main.
 
 *   ``-s <service core mask>``
 
@@ -44,20 +44,20 @@ Lcore-related options
 Device-related options
 ~~~~~~~~~~~~~~~~~~~~~~
 
-*   ``-b, --pci-blacklist <[domain:]bus:devid.func>``
+*   ``-b, --block <[domain:]bus:devid.func>``
 
-    Blacklist a PCI device to prevent EAL from using it. Multiple -b options are
-    allowed.
-
-.. Note::
-    PCI blacklist cannot be used with ``-w`` option.
-
-*   ``-w, --pci-whitelist <[domain:]bus:devid.func>``
-
-    Add a PCI device in white list.
+    Skip probing a PCI device to prevent EAL from using it.
+    Multiple -b options are allowed.
 
 .. Note::
-    PCI whitelist cannot be used with ``-b`` option.
+    Block list cannot be used with the allow list ``-a`` option.
+
+*   ``-a, --allow <[domain:]bus:devid.func>``
+
+    Add a PCI device in to the list of devices to probe.
+
+.. Note::
+    Allow list cannot be used with the block list ``-b`` option.
 
 *   ``--vdev <device arguments>``
 
@@ -115,6 +115,12 @@ Memory-related options
 *   ``--iova-mode <pa|va>``
 
     Force IOVA mode to a specific value.
+
+*   ``--huge-worker-stack[=size]``
+
+    Allocate worker stack memory from hugepage memory. Stack size defaults
+    to system pthread stack size unless the optional size (in kbytes) is
+    specified.
 
 Debugging options
 ~~~~~~~~~~~~~~~~~
@@ -199,7 +205,7 @@ Other options
 
     Display the version information on startup.
 
-*   ``mbuf-pool-ops-name``:
+*   ``--mbuf-pool-ops-name``:
 
     Pool ops name for mbuf to use.
 
@@ -210,3 +216,19 @@ Other options
 *    ``--no-telemetry``:
 
     Disable telemetry.
+
+*    ``--force-max-simd-bitwidth=<val>``:
+
+    Specify the maximum SIMD bitwidth size to handle. This limits which vector paths,
+    if any, are taken, as any paths taken must use a bitwidth below the max bitwidth limit.
+    For example, to allow all SIMD bitwidths up to and including AVX-512::
+
+        --force-max-simd-bitwidth=512
+
+    The following example shows limiting the bitwidth to 64-bits to disable all vector code::
+
+        --force-max-simd-bitwidth=64
+
+    To disable use of max SIMD bitwidth limit::
+
+        --force-max-simd-bitwidth=0

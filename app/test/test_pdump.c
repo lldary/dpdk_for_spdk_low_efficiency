@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <limits.h>
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_pdump.h>
 #include "rte_eal.h"
 #include "rte_lcore.h"
@@ -136,8 +136,8 @@ test_pdump_uninit(void)
 	return ret;
 }
 
-void *
-send_pkts(void *empty)
+uint32_t
+send_pkts(void *empty __rte_unused)
 {
 	int ret = 0;
 	struct rte_mbuf *pbuf[NUM_PACKETS] = { };
@@ -147,13 +147,21 @@ send_pkts(void *empty)
 	ret = test_get_mbuf_from_pool(&mp, pbuf, poolname);
 	if (ret < 0)
 		printf("get_mbuf_from_pool failed\n");
-	do {
+
+	ret = test_dev_start(portid, mp);
+	if (ret < 0)
+		printf("test_dev_start(%hu, %p) failed, error code: %d\n",
+			portid, mp, ret);
+
+	while (ret >= 0 && flag_for_send_pkts) {
 		ret = test_packet_forward(pbuf, portid, QUEUE_ID);
 		if (ret < 0)
 			printf("send pkts Failed\n");
-	} while (flag_for_send_pkts);
+	};
+
+	rte_eth_dev_stop(portid);
 	test_put_mbuf_to_pool(mp, pbuf);
-	return empty;
+	return 0;
 }
 
 /*
@@ -184,7 +192,7 @@ run_pdump_server_tests(void)
 	};
 
 	snprintf(coremask, sizeof(coremask), "%x",
-		 (1 << rte_get_master_lcore()));
+		 (1 << rte_get_main_lcore()));
 
 	ret = test_pdump_init();
 	ret |= launch_p(argv1);
@@ -211,4 +219,4 @@ test_pdump(void)
 	return TEST_SUCCESS;
 }
 
-REGISTER_TEST_COMMAND(pdump_autotest, test_pdump);
+REGISTER_FAST_TEST(pdump_autotest, true, false, test_pdump);

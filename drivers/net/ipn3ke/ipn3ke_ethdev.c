@@ -4,19 +4,19 @@
 
 #include <stdint.h>
 
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_ethdev.h>
 #include <rte_pci.h>
 #include <rte_malloc.h>
 
 #include <rte_mbuf.h>
 #include <rte_sched.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 
 #include <rte_io.h>
 #include <rte_rawdev.h>
 #include <rte_rawdev_pmd.h>
-#include <rte_bus_ifpga.h>
+#include <bus_ifpga_driver.h>
 #include <ifpga_common.h>
 #include <ifpga_logs.h>
 #include <ifpga_rawdev.h>
@@ -25,8 +25,6 @@
 #include "ipn3ke_flow.h"
 #include "ipn3ke_logs.h"
 #include "ipn3ke_ethdev.h"
-
-int ipn3ke_afu_logtype;
 
 static const struct rte_afu_uuid afu_uuid_ipn3ke_map[] = {
 	{ MAP_UUID_10G_LOW,  MAP_UUID_10G_HIGH },
@@ -471,7 +469,6 @@ static int ipn3ke_vswitch_probe(struct rte_afu_device *afu_dev)
 	struct ipn3ke_hw *hw;
 	struct rte_eth_dev *i40e_eth;
 	struct ifpga_rawdev *ifpga_dev;
-	uint16_t port_id;
 	int i, j, retval;
 	char *fvl_bdf;
 
@@ -485,7 +482,7 @@ static int ipn3ke_vswitch_probe(struct rte_afu_device *afu_dev)
 					RTE_CACHE_LINE_SIZE,
 					afu_dev->device.numa_node);
 		if (!hw) {
-			IPN3KE_AFU_PMD_ERR("failed to allocate hardwart data");
+			IPN3KE_AFU_PMD_ERR("failed to allocate hardware data");
 				retval = -ENOMEM;
 				return -ENOMEM;
 		}
@@ -521,14 +518,12 @@ static int ipn3ke_vswitch_probe(struct rte_afu_device *afu_dev)
 
 		for (; j < 8; j++) {
 			fvl_bdf = ifpga_dev->fvl_bdf[j];
-			retval = rte_eth_dev_get_port_by_name(fvl_bdf,
-				&port_id);
-			if (retval) {
+			i40e_eth = rte_eth_dev_get_by_name(fvl_bdf);
+			if (!i40e_eth) {
 				continue;
 			} else {
-				i40e_eth = &rte_eth_devices[port_id];
 				rpst.i40e_pf_eth = i40e_eth;
-				rpst.i40e_pf_eth_port_id = port_id;
+				rpst.i40e_pf_eth_port_id = i40e_eth->data->port_id;
 
 				j++;
 				break;
@@ -563,11 +558,9 @@ static int ipn3ke_vswitch_remove(struct rte_afu_device *afu_dev)
 		snprintf(name, sizeof(name), "net_%s_representor_%d",
 			afu_dev->device.name, i);
 
-		ethdev = rte_eth_dev_allocated(afu_dev->device.name);
-		if (!ethdev)
-			return -ENODEV;
-
-		rte_eth_dev_destroy(ethdev, ipn3ke_rpst_uninit);
+		ethdev = rte_eth_dev_allocated(name);
+		if (ethdev != NULL)
+			rte_eth_dev_destroy(ethdev, ipn3ke_rpst_uninit);
 	}
 
 	ret = rte_eth_switch_domain_free(hw->switch_domain_id);
@@ -587,10 +580,4 @@ static struct rte_afu_driver afu_ipn3ke_driver = {
 };
 
 RTE_PMD_REGISTER_AFU(net_ipn3ke_afu, afu_ipn3ke_driver);
-
-RTE_INIT(ipn3ke_afu_init_log)
-{
-	ipn3ke_afu_logtype = rte_log_register("pmd.afu.ipn3ke");
-	if (ipn3ke_afu_logtype >= 0)
-		rte_log_set_level(ipn3ke_afu_logtype, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER_DEFAULT(ipn3ke_afu_logtype, NOTICE);

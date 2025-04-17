@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #include "ice_acl.h"
@@ -123,7 +123,7 @@ ice_aq_program_acl_entry(struct ice_hw *hw, u8 tcam_idx, u16 entry_idx,
  * @buf: address of indirect data buffer
  * @cd: pointer to command details structure or NULL
  *
- *  Query ACL entry (direct 0x0C24)
+ * Query ACL entry (direct 0x0C24)
  *
  * NOTE: Caller of this API to parse 'buf' appropriately since it contains
  * response (key and key invert)
@@ -250,7 +250,7 @@ ice_aq_query_actpair(struct ice_hw *hw, u8 act_mem_idx, u16 act_entry_idx,
  * @hw: pointer to the HW struct
  * @cd: pointer to command details structure or NULL
  *
- * ACL - de-allocate (direct 0x0C1A) resources. Used by SW to release all the
+ * De-allocate ACL resources (direct 0x0C1A). Used by SW to release all the
  * resources allocated for it using a single command
  */
 enum ice_status ice_aq_dealloc_acl_res(struct ice_hw *hw, struct ice_sq_cd *cd)
@@ -263,7 +263,7 @@ enum ice_status ice_aq_dealloc_acl_res(struct ice_hw *hw, struct ice_sq_cd *cd)
 }
 
 /**
- * ice_acl_prof_aq_send - sending acl profile aq commands
+ * ice_acl_prof_aq_send - sending ACL profile AQ commands
  * @hw: pointer to the HW struct
  * @opc: command opcode
  * @prof_id: profile ID
@@ -288,16 +288,16 @@ ice_acl_prof_aq_send(struct ice_hw *hw, u16 opc, u8 prof_id,
 }
 
 /**
- * ice_prgm_acl_prof_extrt - program ACL profile extraction sequence
+ * ice_prgm_acl_prof_xtrct - program ACL profile extraction sequence
  * @hw: pointer to the HW struct
  * @prof_id: profile ID
  * @buf: ptr to buffer
  * @cd: pointer to command details structure or NULL
  *
- * ACL - program ACL profile extraction (indirect 0x0C1D)
+ * Program ACL profile extraction (indirect 0x0C1D)
  */
 enum ice_status
-ice_prgm_acl_prof_extrt(struct ice_hw *hw, u8 prof_id,
+ice_prgm_acl_prof_xtrct(struct ice_hw *hw, u8 prof_id,
 			struct ice_aqc_acl_prof_generic_frmt *buf,
 			struct ice_sq_cd *cd)
 {
@@ -312,7 +312,7 @@ ice_prgm_acl_prof_extrt(struct ice_hw *hw, u8 prof_id,
  * @buf: ptr to buffer (which will contain response of this command)
  * @cd: pointer to command details structure or NULL
  *
- * ACL - query ACL profile (indirect 0x0C21)
+ * Query ACL profile (indirect 0x0C21)
  */
 enum ice_status
 ice_query_acl_prof(struct ice_hw *hw, u8 prof_id,
@@ -354,7 +354,7 @@ static enum ice_status ice_aq_acl_cntrs_chk_params(struct ice_acl_cntrs *cntrs)
 			status = ICE_ERR_OUT_OF_RANGE;
 		break;
 	default:
-		/* Unspecified counter type - Invalid or error*/
+		/* Unspecified counter type - Invalid or error */
 		status = ICE_ERR_PARAM;
 	}
 
@@ -367,7 +367,7 @@ static enum ice_status ice_aq_acl_cntrs_chk_params(struct ice_acl_cntrs *cntrs)
  * @cntrs: ptr to buffer describing input and output params
  * @cd: pointer to command details structure or NULL
  *
- * ACL - allocate (indirect 0x0C16) counters. This function attempts to
+ * Allocate ACL counters (indirect 0x0C16). This function attempts to
  * allocate a contiguous block of counters. In case of failures, caller can
  * attempt to allocate a smaller chunk. The allocation is considered
  * unsuccessful if returned counter value is invalid. In this case it returns
@@ -410,8 +410,7 @@ ice_aq_alloc_acl_cntrs(struct ice_hw *hw, struct ice_acl_cntrs *cntrs,
  * @cntrs: ptr to buffer describing input and output params
  * @cd: pointer to command details structure or NULL
  *
- * ACL - de-allocate (direct 0x0C17) counters.
- * This function deallocate ACL counters.
+ * De-allocate ACL counters (direct 0x0C17)
  */
 enum ice_status
 ice_aq_dealloc_acl_cntrs(struct ice_hw *hw, struct ice_acl_cntrs *cntrs,
@@ -436,49 +435,13 @@ ice_aq_dealloc_acl_cntrs(struct ice_hw *hw, struct ice_acl_cntrs *cntrs,
 }
 
 /**
- * ice_aq_query_acl_cntrs - query ACL counter
- * @hw: pointer to the HW struct
- * @bank: queries counter bank
- * @index: queried counter index
- * @cntr_val: pointer to counter or packet counter value
- * @cd: pointer to command details structure or NULL
- *
- * ACL - query ACL counter (direct 0x0C27)
- */
-enum ice_status
-ice_aq_query_acl_cntrs(struct ice_hw *hw, u8 bank, u16 index, u64 *cntr_val,
-		       struct ice_sq_cd *cd)
-{
-	struct ice_aqc_acl_query_counter *cmd;
-	struct ice_aq_desc desc;
-	enum ice_status status;
-
-	if (!cntr_val)
-		return ICE_ERR_PARAM;
-
-	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_query_acl_counter);
-	cmd = &desc.params.query_counter;
-	cmd->counter_index = CPU_TO_LE16(index);
-	cmd->counter_bank = bank;
-	status = ice_aq_send_cmd(hw, &desc, NULL, 0, cd);
-	if (!status) {
-		__le64 resp_val = 0;
-
-		ice_memcpy(&resp_val, cmd->ops.resp.val,
-			   sizeof(cmd->ops.resp.val), ICE_NONDMA_TO_NONDMA);
-		*cntr_val = LE64_TO_CPU(resp_val);
-	}
-	return status;
-}
-
-/**
  * ice_prog_acl_prof_ranges - program ACL profile ranges
  * @hw: pointer to the HW struct
  * @prof_id: programmed or updated profile ID
  * @buf: pointer to input buffer
  * @cd: pointer to command details structure or NULL
  *
- * ACL - program ACL profile ranges (indirect 0x0C1E)
+ * Program ACL profile ranges (indirect 0x0C1E)
  */
 enum ice_status
 ice_prog_acl_prof_ranges(struct ice_hw *hw, u8 prof_id,
@@ -501,7 +464,7 @@ ice_prog_acl_prof_ranges(struct ice_hw *hw, u8 prof_id,
  * @buf: pointer to response buffer
  * @cd: pointer to command details structure or NULL
  *
- * ACL - query ACL profile ranges (indirect 0x0C22)
+ * Query ACL profile ranges (indirect 0x0C22)
  */
 enum ice_status
 ice_query_acl_prof_ranges(struct ice_hw *hw, u8 prof_id,
@@ -571,7 +534,7 @@ ice_aq_dealloc_acl_scen(struct ice_hw *hw, u16 scen_id, struct ice_sq_cd *cd)
 /**
  * ice_aq_update_query_scen - update or query ACL scenario
  * @hw: pointer to the HW struct
- * @opcode: aq command opcode for either query or update scenario
+ * @opcode: AQ command opcode for either query or update scenario
  * @scen_id: scen_id to be updated or queried
  * @buf: address of indirect data buffer
  * @cd: pointer to command details structure or NULL

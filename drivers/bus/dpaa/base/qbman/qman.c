@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0)
  *
  * Copyright 2008-2016 Freescale Semiconductor Inc.
- * Copyright 2017,2019 NXP
+ * Copyright 2017,2019-2023 NXP
  *
  */
 
 #include "qman.h"
 #include <rte_branch_prediction.h>
-#include <rte_dpaa_bus.h>
+#include <bus_dpaa_driver.h>
 #include <rte_eventdev.h>
 #include <rte_byteorder.h>
 
@@ -39,6 +39,8 @@
 		if (fq_isset(__fq478, QMAN_FQ_FLAG_LOCKED)) \
 			spin_unlock(&__fq478->fqlock); \
 	} while (0)
+
+static qman_cb_free_mbuf qman_free_mbuf_cb;
 
 static inline void fq_set(struct qman_fq *fq, u32 mask)
 {
@@ -790,6 +792,47 @@ static inline void fq_state_change(struct qman_portal *p, struct qman_fq *fq,
 	FQUNLOCK(fq);
 }
 
+void
+qman_ern_register_cb(qman_cb_free_mbuf cb)
+{
+	qman_free_mbuf_cb = cb;
+}
+
+
+void
+qman_ern_poll_free(void)
+{
+	struct qman_portal *p = get_affine_portal();
+	u8 verb, num = 0;
+	const struct qm_mr_entry *msg;
+	const struct qm_fd *fd;
+	struct qm_mr_entry swapped_msg;
+
+	qm_mr_pvb_update(&p->p);
+	msg = qm_mr_current(&p->p);
+
+	while (msg != NULL) {
+		swapped_msg = *msg;
+		hw_fd_to_cpu(&swapped_msg.ern.fd);
+		verb = msg->ern.verb & QM_MR_VERB_TYPE_MASK;
+		fd = &swapped_msg.ern.fd;
+
+		if (unlikely(verb & 0x20)) {
+			printf("HW ERN notification, Nothing to do\n");
+		} else {
+			if ((fd->bpid & 0xff) != 0xff)
+				qman_free_mbuf_cb(fd);
+		}
+
+		num++;
+		qm_mr_next(&p->p);
+		qm_mr_pvb_update(&p->p);
+		msg = qm_mr_current(&p->p);
+	}
+
+	qm_mr_cci_consume(&p->p, num);
+}
+
 static u32 __poll_portal_slow(struct qman_portal *p, u32 is)
 {
 	const struct qm_mr_entry *msg;
@@ -854,7 +897,7 @@ mr_loop:
 				/* Lookup in the retirement table */
 				fq = table_find_fq(p,
 						   be32_to_cpu(msg->fq.fqid));
-				DPAA_BUG_ON(!fq);
+				DPAA_BUG_ON(fq != NULL);
 				fq_state_change(p, fq, &swapped_msg, verb);
 				if (fq->cb.fqs)
 					fq->cb.fqs(p, fq, &swapped_msg);
@@ -866,6 +909,7 @@ mr_loop:
 #else
 				fq = (void *)(uintptr_t)msg->fq.contextB;
 #endif
+				DPAA_BUG_ON(fq != NULL);
 				fq_state_change(p, fq, msg, verb);
 				if (fq->cb.fqs)
 					fq->cb.fqs(p, fq, &swapped_msg);

@@ -16,9 +16,14 @@
 #include <rte_log.h>
 #include <rte_byteorder.h>
 #include <rte_io.h>
+#include <rte_ip.h>
 
 #include "../ixgbe_logs.h"
 #include "../ixgbe_bypass_defines.h"
+
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP 132
+#endif
 
 #define ASSERT(x) if(!(x)) rte_panic("IXGBE: x")
 
@@ -43,12 +48,16 @@
 
 #define false               0
 #define true                1
+#ifndef RTE_EXEC_ENV_WINDOWS
 #define min(a,b)	RTE_MIN(a,b) 
+#endif
 
 #define EWARN(hw, S, args...)     DEBUGOUT1(S, ##args)
 
 /* Bunch of defines for shared code bogosity */
+#ifndef UNREFERENCED_PARAMETER
 #define UNREFERENCED_PARAMETER(_p)  
+#endif
 #define UNREFERENCED_1PARAMETER(_p) 
 #define UNREFERENCED_2PARAMETER(_p, _q)
 #define UNREFERENCED_3PARAMETER(_p, _q, _r) 
@@ -104,6 +113,12 @@ static inline uint32_t ixgbe_read_addr(volatile void* addr)
 
 #define IXGBE_PCI_REG_WRITE_RELAXED(reg, value)		\
 	rte_write32_relaxed((rte_cpu_to_le_32(value)), reg)
+
+#define IXGBE_PCI_REG_WC_WRITE(reg, value)			\
+	rte_write32_wc((rte_cpu_to_le_32(value)), reg)
+
+#define IXGBE_PCI_REG_WC_WRITE_RELAXED(reg, value)		\
+	rte_write32_wc_relaxed((rte_cpu_to_le_32(value)), reg)
 
 #define IXGBE_PCI_REG_ADDR(hw, reg) \
 	((volatile uint32_t *)((char *)(hw)->hw_addr + (reg)))

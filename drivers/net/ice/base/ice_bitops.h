@@ -1,19 +1,29 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #ifndef _ICE_BITOPS_H_
 #define _ICE_BITOPS_H_
 
+#include "ice_defs.h"
+#include "ice_osdep.h"
+
 /* Define the size of the bitmap chunk */
 typedef u32 ice_bitmap_t;
+
+/* NOTE!
+ * Do not use any of the functions declared in this file
+ * on memory that was not declared with ice_declare_bitmap.
+ * Not following this rule might cause issues like split
+ * locks.
+ */
 
 /* Number of bits per bitmap chunk */
 #define BITS_PER_CHUNK		(BITS_PER_BYTE * sizeof(ice_bitmap_t))
 /* Determine which chunk a bit belongs in */
 #define BIT_CHUNK(nr)		((nr) / BITS_PER_CHUNK)
 /* How many chunks are required to store this many bits */
-#define BITS_TO_CHUNKS(sz)	DIVIDE_AND_ROUND_UP((sz), BITS_PER_CHUNK)
+#define BITS_TO_CHUNKS(sz)	(((sz) + BITS_PER_CHUNK - 1) / BITS_PER_CHUNK)
 /* Which bit inside a chunk this bit corresponds to */
 #define BIT_IN_CHUNK(nr)	((nr) % BITS_PER_CHUNK)
 /* How many bits are valid in the last chunk, assumes nr > 0 */
@@ -214,7 +224,7 @@ ice_or_bitmap(ice_bitmap_t *dst, const ice_bitmap_t *bmp1,
 	ice_bitmap_t mask;
 	u16 i;
 
-	/* Handle all but last chunk*/
+	/* Handle all but last chunk */
 	for (i = 0; i < BITS_TO_CHUNKS(size) - 1; i++)
 		dst[i] = bmp1[i] | bmp2[i];
 
@@ -245,7 +255,7 @@ ice_xor_bitmap(ice_bitmap_t *dst, const ice_bitmap_t *bmp1,
 	ice_bitmap_t mask;
 	u16 i;
 
-	/* Handle all but last chunk*/
+	/* Handle all but last chunk */
 	for (i = 0; i < BITS_TO_CHUNKS(size) - 1; i++)
 		dst[i] = bmp1[i] ^ bmp2[i];
 
@@ -276,7 +286,7 @@ ice_andnot_bitmap(ice_bitmap_t *dst, const ice_bitmap_t *bmp1,
 	ice_bitmap_t mask;
 	u16 i;
 
-	/* Handle all but last chunk*/
+	/* Handle all but last chunk */
 	for (i = 0; i < BITS_TO_CHUNKS(size) - 1; i++)
 		dst[i] = bmp1[i] & ~bmp2[i];
 
@@ -346,6 +356,11 @@ static inline u16 ice_find_first_bit(const ice_bitmap_t *bitmap, u16 size)
 	return ice_find_next_bit(bitmap, size, 0);
 }
 
+#define ice_for_each_set_bit(_bitpos, _addr, _maxlen)	\
+	for ((_bitpos) = ice_find_first_bit((_addr), (_maxlen)); \
+	     (_bitpos) < (_maxlen); \
+	     (_bitpos) = ice_find_next_bit((_addr), (_maxlen), (_bitpos) + 1))
+
 /**
  * ice_is_any_bit_set - Return true of any bit in the bitmap is set
  * @bitmap: the bitmap to check
@@ -376,7 +391,49 @@ static inline void ice_cp_bitmap(ice_bitmap_t *dst, ice_bitmap_t *src, u16 size)
 }
 
 /**
- * ice_cmp_bitmaps - compares two bitmaps.
+ * ice_bitmap_set - set a number of bits in bitmap from a starting position
+ * @dst: bitmap destination
+ * @pos: first bit position to set
+ * @num_bits: number of bits to set
+ *
+ * This function sets bits in a bitmap from pos to (pos + num_bits) - 1.
+ * Note that this function assumes it is operating on a bitmap declared using
+ * ice_declare_bitmap.
+ */
+static inline void
+ice_bitmap_set(ice_bitmap_t *dst, u16 pos, u16 num_bits)
+{
+	u16 i;
+
+	for (i = pos; i < pos + num_bits; i++)
+		ice_set_bit(i, dst);
+}
+
+/**
+ * ice_bitmap_hweight - hamming weight of bitmap
+ * @bm: bitmap pointer
+ * @size: size of bitmap (in bits)
+ *
+ * This function determines the number of set bits in a bitmap.
+ * Note that this function assumes it is operating on a bitmap declared using
+ * ice_declare_bitmap.
+ */
+static inline int
+ice_bitmap_hweight(ice_bitmap_t *bm, u16 size)
+{
+	int count = 0;
+	u16 bit = 0;
+
+	while (size > (bit = ice_find_next_bit(bm, size, bit))) {
+		count++;
+		bit++;
+	}
+
+	return count;
+}
+
+/**
+ * ice_cmp_bitmap - compares two bitmaps.
  * @bmp1: the bitmap to compare
  * @bmp2: the bitmap to compare with bmp1
  * @size: Size of the bitmaps in bits
@@ -389,17 +446,62 @@ ice_cmp_bitmap(ice_bitmap_t *bmp1, ice_bitmap_t *bmp2, u16 size)
 	ice_bitmap_t mask;
 	u16 i;
 
-	/* Handle all but last chunk*/
+	/* Handle all but last chunk */
 	for (i = 0; i < BITS_TO_CHUNKS(size) - 1; i++)
 		if (bmp1[i] != bmp2[i])
 			return false;
 
-	/* We want to only compare bits within the size.*/
+	/* We want to only compare bits within the size */
 	mask = LAST_CHUNK_MASK(size);
 	if ((bmp1[i] & mask) != (bmp2[i] & mask))
 		return false;
 
 	return true;
+}
+
+/**
+ * ice_bitmap_from_array32 - copies u32 array source into bitmap destination
+ * @dst: the destination bitmap
+ * @src: the source u32 array
+ * @size: size of the bitmap (in bits)
+ *
+ * This function copies the src bitmap stored in an u32 array into the dst
+ * bitmap stored as an ice_bitmap_t.
+ */
+static inline void
+ice_bitmap_from_array32(ice_bitmap_t *dst, u32 *src, u16 size)
+{
+	u32 remaining_bits, i;
+
+#define BITS_PER_U32	(sizeof(u32) * BITS_PER_BYTE)
+	/* clear bitmap so we only have to set when iterating */
+	ice_zero_bitmap(dst, size);
+
+	for (i = 0; i < (u32)(size / BITS_PER_U32); i++) {
+		u32 bit_offset = i * BITS_PER_U32;
+		u32 entry = src[i];
+		u32 j;
+
+		for (j = 0; j < BITS_PER_U32; j++) {
+			if (entry & BIT(j))
+				ice_set_bit((u16)(j + bit_offset), dst);
+		}
+	}
+
+	/* still need to check the leftover bits (i.e. if size isn't evenly
+	 * divisible by BITS_PER_U32
+	 **/
+	remaining_bits = size % BITS_PER_U32;
+	if (remaining_bits) {
+		u32 bit_offset = i * BITS_PER_U32;
+		u32 entry = src[i];
+		u32 j;
+
+		for (j = 0; j < remaining_bits; j++) {
+			if (entry & BIT(j))
+				ice_set_bit((u16)(j + bit_offset), dst);
+		}
+	}
 }
 
 #endif /* _ICE_BITOPS_H_ */

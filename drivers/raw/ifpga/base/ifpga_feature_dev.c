@@ -59,7 +59,7 @@ int __fpga_port_disable(struct ifpga_port_hw *port)
 	if (fpga_wait_register_field(port_sftrst_ack, control,
 				     &port_hdr->control, RST_POLL_TIMEOUT,
 				     RST_POLL_INVL)) {
-		dev_err(port, "timeout, fail to reset device\n");
+		dev_err(port, "timeout, fail to reset FIM port\n");
 		return -ETIMEDOUT;
 	}
 
@@ -80,6 +80,27 @@ int fpga_get_afu_uuid(struct ifpga_port_hw *port, struct uuid *uuid)
 	guidl = readq(&port_hdr->afu_header.guid.b[0]);
 	guidh = readq(&port_hdr->afu_header.guid.b[8]);
 	spinlock_unlock(&port->lock);
+
+	opae_memcpy(uuid->b, &guidl, sizeof(u64));
+	opae_memcpy(uuid->b + 8, &guidh, sizeof(u64));
+
+	return 0;
+}
+
+int fpga_get_pr_uuid(struct ifpga_fme_hw *fme, struct uuid *uuid)
+{
+	struct feature_fme_pr *fme_pr;
+	u64 guidl, guidh;
+
+	if (!fme || !uuid)
+		return -EINVAL;
+
+	fme_pr = get_fme_feature_ioaddr_by_index(fme, FME_FEATURE_ID_PR_MGMT);
+
+	spinlock_lock(&fme->lock);
+	guidl = readq(&fme_pr->fme_pr_intfc_id_l);
+	guidh = readq(&fme_pr->fme_pr_intfc_id_h);
+	spinlock_unlock(&fme->lock);
 
 	opae_memcpy(uuid->b, &guidl, sizeof(u64));
 	opae_memcpy(uuid->b + 8, &guidh, sizeof(u64));
@@ -206,6 +227,8 @@ static struct feature_driver fme_feature_drvs[] = {
 	&fme_i2c_master_ops),},
 	{FEATURE_DRV(FME_FEATURE_ID_ETH_GROUP, FME_FEATURE_ETH_GROUP,
 	&fme_eth_group_ops),},
+	{FEATURE_DRV(FME_FEATURE_ID_PMCI, FME_FEATURE_PMCI,
+	&fme_pmci_ops),},
 	{0, NULL, NULL}, /* end of arrary */
 };
 
@@ -256,10 +279,11 @@ static void feature_uinit(struct ifpga_feature_list *list)
 	struct ifpga_feature *feature;
 
 	TAILQ_FOREACH(feature, list, next) {
-		if (feature->state != IFPGA_FEATURE_ATTACHED)
+		if (feature->state != IFPGA_FEATURE_INITED)
 			continue;
 		if (feature->ops && feature->ops->uinit)
 			feature->ops->uinit(feature);
+		feature->state = IFPGA_FEATURE_ATTACHED;
 	}
 }
 
@@ -280,6 +304,9 @@ static int feature_init(struct feature_driver *drv,
 					ret = feature->ops->init(feature);
 					if (ret)
 						goto error;
+					else
+						feature->state =
+							IFPGA_FEATURE_INITED;
 				}
 			}
 		}
@@ -294,14 +321,8 @@ error:
 
 int fme_hw_init(struct ifpga_fme_hw *fme)
 {
-	int ret;
-
-	if (fme->state != IFPGA_FME_IMPLEMENTED)
-		return -ENODEV;
-
-	ret = feature_init(fme_feature_drvs, &fme->feature_list);
-	if (ret)
-		return ret;
+	if (fme->state == IFPGA_FME_IMPLEMENTED)
+		return feature_init(fme_feature_drvs, &fme->feature_list);
 
 	return 0;
 }

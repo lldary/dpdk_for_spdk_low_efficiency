@@ -8,8 +8,7 @@
 #include <rte_version.h>
 #include <rte_ethdev.h>
 #include <rte_ether.h>
-#include <rte_bus_pci.h>
-#ifdef RTE_LIBRTE_IXGBE_PMD
+#ifdef RTE_NET_IXGBE
 #include <rte_pmd_ixgbe.h>
 #endif
 #include "rte_ethtool.h"
@@ -23,8 +22,6 @@ rte_ethtool_get_drvinfo(uint16_t port_id, struct ethtool_drvinfo *drvinfo)
 {
 	struct rte_eth_dev_info dev_info;
 	struct rte_dev_reg_info reg_info;
-	const struct rte_pci_device *pci_dev;
-	const struct rte_bus *bus = NULL;
 	int n;
 	int ret;
 
@@ -52,18 +49,8 @@ rte_ethtool_get_drvinfo(uint16_t port_id, struct ethtool_drvinfo *drvinfo)
 	strlcpy(drvinfo->driver, dev_info.driver_name,
 		sizeof(drvinfo->driver));
 	strlcpy(drvinfo->version, rte_version(), sizeof(drvinfo->version));
-	/* TODO: replace bus_info by rte_devargs.name */
-	if (dev_info.device)
-		bus = rte_bus_find_by_device(dev_info.device);
-	if (bus && !strcmp(bus->name, "pci")) {
-		pci_dev = RTE_DEV_TO_PCI(dev_info.device);
-		snprintf(drvinfo->bus_info, sizeof(drvinfo->bus_info),
-			"%04x:%02x:%02x.%x",
-			pci_dev->addr.domain, pci_dev->addr.bus,
-			pci_dev->addr.devid, pci_dev->addr.function);
-	} else {
-		snprintf(drvinfo->bus_info, sizeof(drvinfo->bus_info), "N/A");
-	}
+	strlcpy(drvinfo->bus_info, rte_dev_name(dev_info.device),
+		sizeof(drvinfo->bus_info));
 
 	memset(&reg_info, 0, sizeof(reg_info));
 	rte_eth_dev_get_reg_info(port_id, &reg_info);
@@ -233,13 +220,13 @@ rte_ethtool_get_pauseparam(uint16_t port_id,
 	pause_param->tx_pause = 0;
 	pause_param->rx_pause = 0;
 	switch (fc_conf.mode) {
-	case RTE_FC_RX_PAUSE:
+	case RTE_ETH_FC_RX_PAUSE:
 		pause_param->rx_pause = 1;
 		break;
-	case RTE_FC_TX_PAUSE:
+	case RTE_ETH_FC_TX_PAUSE:
 		pause_param->tx_pause = 1;
 		break;
-	case RTE_FC_FULL:
+	case RTE_ETH_FC_FULL:
 		pause_param->rx_pause = 1;
 		pause_param->tx_pause = 1;
 	default:
@@ -277,14 +264,14 @@ rte_ethtool_set_pauseparam(uint16_t port_id,
 
 	if (pause_param->tx_pause) {
 		if (pause_param->rx_pause)
-			fc_conf.mode = RTE_FC_FULL;
+			fc_conf.mode = RTE_ETH_FC_FULL;
 		else
-			fc_conf.mode = RTE_FC_TX_PAUSE;
+			fc_conf.mode = RTE_ETH_FC_TX_PAUSE;
 	} else {
 		if (pause_param->rx_pause)
-			fc_conf.mode = RTE_FC_RX_PAUSE;
+			fc_conf.mode = RTE_ETH_FC_RX_PAUSE;
 		else
-			fc_conf.mode = RTE_FC_NONE;
+			fc_conf.mode = RTE_ETH_FC_NONE;
 	}
 
 	status = rte_eth_dev_flow_ctrl_set(port_id, &fc_conf);
@@ -297,18 +284,13 @@ rte_ethtool_set_pauseparam(uint16_t port_id,
 int
 rte_ethtool_net_open(uint16_t port_id)
 {
-	rte_eth_dev_stop(port_id);
-
 	return rte_eth_dev_start(port_id);
 }
 
 int
 rte_ethtool_net_stop(uint16_t port_id)
 {
-	RTE_ETH_VALID_PORTID_OR_ERR_RET(port_id, -ENODEV);
-	rte_eth_dev_stop(port_id);
-
-	return 0;
+	return rte_eth_dev_stop(port_id);
 }
 
 int
@@ -395,14 +377,14 @@ rte_ethtool_net_set_rx_mode(uint16_t port_id)
 
 	/* Set VF vf_rx_mode, VF unsupport status is discard */
 	for (vf = 0; vf < num_vfs; vf++) {
-#ifdef RTE_LIBRTE_IXGBE_PMD
+#ifdef RTE_NET_IXGBE
 		rte_pmd_ixgbe_set_vf_rxmode(port_id, vf,
-			ETH_VMDQ_ACCEPT_UNTAG, 0);
+			RTE_ETH_VMDQ_ACCEPT_UNTAG, 0);
 #endif
 	}
 
-	/* Enable Rx vlan filter, VF unspport status is discard */
-	ret = rte_eth_dev_set_vlan_offload(port_id, ETH_VLAN_FILTER_MASK);
+	/* Enable Rx vlan filter, VF unsupported status is discard */
+	ret = rte_eth_dev_set_vlan_offload(port_id, RTE_ETH_VLAN_FILTER_MASK);
 	if (ret != 0)
 		return ret;
 
@@ -459,15 +441,17 @@ rte_ethtool_set_ringparam(uint16_t port_id,
 	if (stat != 0)
 		return stat;
 
-	rte_eth_dev_stop(port_id);
+	stat = rte_eth_dev_stop(port_id);
+	if (stat != 0)
+		return stat;
 
 	stat = rte_eth_tx_queue_setup(port_id, 0, ring_param->tx_pending,
-		rte_socket_id(), NULL);
+		rte_eth_dev_socket_id(port_id), NULL);
 	if (stat != 0)
 		return stat;
 
 	stat = rte_eth_rx_queue_setup(port_id, 0, ring_param->rx_pending,
-		rte_socket_id(), NULL, rx_qinfo.mp);
+		rte_eth_dev_socket_id(port_id), NULL, rx_qinfo.mp);
 	if (stat != 0)
 		return stat;
 

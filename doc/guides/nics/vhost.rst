@@ -25,8 +25,8 @@ Currently, the vhost PMD provides the basic functionality of packet reception, t
 
 *   Don't need to stop RX/TX, when the user wants to stop a guest or a virtio-net driver on guest.
 
-Vhost PMD arguments
--------------------
+Runtime Configuration
+---------------------
 
 The user can specify below arguments in `--vdev` option.
 
@@ -64,6 +64,12 @@ The user can specify below arguments in `--vdev` option.
     It is used to enable external buffer support in vhost library.
     (Default: 0 (disabled))
 
+#.  ``legacy-ol-flags``:
+
+    It is used to restore legacy behavior for offloading that was not
+    compliant with offloading API.
+    (Default: 0 (disabled))
+
 Vhost PMD event handling
 ------------------------
 
@@ -90,7 +96,7 @@ This section demonstrates vhost PMD with testpmd DPDK sample application.
 
     .. code-block:: console
 
-        ./testpmd -l 0-3 -n 4 --vdev 'net_vhost0,iface=/tmp/sock0,queues=1' -- -i
+        ./dpdk-testpmd -l 0-3 -n 4 --vdev 'net_vhost0,iface=/tmp/sock0,queues=1' -- -i
 
     Other basic DPDK preparations like hugepage enabling here.
     Please refer to the *DPDK Getting Started Guide* for detailed instructions.

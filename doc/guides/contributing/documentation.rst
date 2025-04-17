@@ -8,7 +8,7 @@ DPDK Documentation Guidelines
 
 This document outlines the guidelines for writing the DPDK Guides and API documentation in RST and Doxygen format.
 
-It also explains the structure of the DPDK documentation and shows how to build the Html and PDF versions of the documents.
+It also explains the structure of the DPDK documentation and how to build it.
 
 
 Structure of the Documentation
@@ -19,10 +19,10 @@ The DPDK source code repository contains input files to build the API documentat
 The main directories that contain files related to documentation are shown below::
 
    lib
-   |-- librte_acl
-   |-- librte_cfgfile
-   |-- librte_cmdline
-   |-- librte_eal
+   |-- acl
+   |-- cfgfile
+   |-- cmdline
+   |-- eal
    |   |-- ...
    ...
    doc
@@ -40,7 +40,7 @@ The main directories that contain files related to documentation are shown below
 
 
 The API documentation is built from `Doxygen <http://www.doxygen.nl>`_ comments in the header files.
-These files are mainly in the ``lib/librte_*`` directories although some of the Poll Mode Drivers in ``drivers/net``
+These files are mainly in the ``lib/*`` directories although some of the Poll Mode Drivers in ``drivers/net``
 are also documented with Doxygen.
 
 The configuration files that are used to control the Doxygen output are in the ``doc/api`` directory.
@@ -95,7 +95,7 @@ added to by the developer.
 * **The Programmers Guide**
 
   The Programmers Guide explains how the API components of DPDK such as the EAL, Memzone, Rings and the Hash Library work.
-  It also explains how some higher level functionality such as Packet Distributor, Packet Framework and KNI work.
+  It also describes some of the higher level functionality such as Packet Distributor and Packet Framework.
   It also shows the build system and explains how to add applications.
 
   The Programmers Guide should be expanded when new functionality is added to DPDK.
@@ -136,16 +136,10 @@ Building the Documentation
 Dependencies
 ~~~~~~~~~~~~
 
-
 The following dependencies must be installed to build the documentation:
 
 * Doxygen.
-
 * Sphinx (also called python-sphinx).
-
-* TexLive (at least TexLive-core and the extra Latex support).
-
-* Inkscape.
 
 `Doxygen`_ generates documentation from commented source code.
 It can be installed as follows:
@@ -158,20 +152,16 @@ It can be installed as follows:
    # Red Hat/Fedora.
    sudo dnf     -y install doxygen
 
-`Sphinx`_ is a Python documentation tool for converting RST files to Html or to PDF (via LaTeX).
+`Sphinx`_ is a Python documentation tool for converting RST files to HTML.
 For full support with figure and table captioning the latest version of Sphinx can be installed as follows:
 
 .. code-block:: console
 
    # Ubuntu/Debian.
-   sudo apt-get -y install python-pip
-   sudo pip install --upgrade sphinx
-   sudo pip install --upgrade sphinx_rtd_theme
+   sudo apt-get -y install python3-sphinx python3-sphinx-rtd-theme
 
    # Red Hat/Fedora.
-   sudo dnf     -y install python-pip
-   sudo pip install --upgrade sphinx
-   sudo pip install --upgrade sphinx_rtd_theme
+   sudo dnf     -y install python3-sphinx python3-sphinx_rtd_theme
 
 For further information on getting started with Sphinx see the
 `Sphinx Getting Started <http://www.sphinx-doc.org/en/master/usage/quickstart.html>`_.
@@ -181,83 +171,32 @@ For further information on getting started with Sphinx see the
    To get full support for Figure and Table numbering it is best to install Sphinx 1.3.1 or later.
 
 
-`Inkscape`_ is a vector based graphics program which is used to create SVG images and also to convert SVG images to PDF images.
-It can be installed as follows:
-
-.. code-block:: console
-
-   # Ubuntu/Debian.
-   sudo apt-get -y install inkscape
-
-   # Red Hat/Fedora.
-   sudo dnf     -y install inkscape
-
-`TexLive <http://www.tug.org/texlive/>`_ is an installation package for Tex/LaTeX.
-It is used to generate the PDF versions of the documentation.
-The main required packages can be installed as follows:
-
-.. code-block:: console
-
-   # Ubuntu/Debian.
-   sudo apt-get -y install texlive-latex-extra texlive-lang-greek
-
-   # Red Hat/Fedora, selective install.
-   sudo dnf     -y install texlive-collection-latexextra texlive-greek-fontenc
-
-`Latexmk <http://personal.psu.edu/jcc8/software/latexmk-jcc/>`_ is a perl script
-for running LaTeX for resolving cross references,
-and it also runs auxiliary programs like bibtex, makeindex if necessary, and dvips.
-It has also a number of other useful capabilities (see man 1 latexmk).
-
-.. code-block:: console
-
-   # Ubuntu/Debian.
-   sudo apt-get -y install latexmk
-
-   # Red Hat/Fedora.
-   sudo dnf     -y install latexmk
-
-
 Build commands
 ~~~~~~~~~~~~~~
 
 The documentation is built using the standard DPDK build system.
-Some examples are shown below:
 
-* Generate all the documentation targets::
+To build the documentation::
 
-     make doc
+   ninja -C build doc
 
-* Generate the Doxygen API documentation in Html::
+See :doc:`../linux_gsg/build_dpdk` for more detail on compiling DPDK with meson.
 
-     make doc-api-html
+The output is generated in the directory ``build/doc/``, with:
 
-* Generate the guides documentation in Html::
+* HTML versions of the guide docs, e.g. Getting Started Guides, Programmers Guide, in ``build/doc/guides/html``
+* HTML version of the API documentation in ``build/doc/api/html``
+* Man-page version of the API documentation in ``build/doc/api/man``.
+  If not installing DPDK system-wise, these pages can be accessed by adding this directory to the ``MANPATH`` environment variable.
+  For example:
 
-     make doc-guides-html
+.. code-block:: console
 
-* Generate the guides documentation in Pdf::
-
-     make doc-guides-pdf
-
-The output of these commands is generated in the ``build`` directory::
-
-   build/doc
-         |-- html
-         |   |-- api
-         |   +-- guides
-         |
-         +-- pdf
-             +-- guides
-
+   export MANPATH=:/path/to/build/doc/api/man
 
 .. Note::
 
    Make sure to fix any Sphinx or Doxygen warnings when adding or updating documentation.
-
-The documentation output files can be removed as follows::
-
-   make doc-clean
 
 
 Document Guidelines
@@ -278,7 +217,8 @@ Here are some guidelines in relation to the style of the documentation:
 RST Guidelines
 --------------
 
-The RST (reStructuredText) format is a plain text markup format that can be converted to Html, PDF or other formats.
+The RST (reStructuredText) format is a plain text markup format
+that can be converted to HTML or other formats.
 It is most closely associated with Python but it can be used to document any language.
 It is used in DPDK to document everything apart from the API.
 
@@ -294,21 +234,26 @@ The most common guidelines for writing RST text are detailed in the
 The additional guidelines below reiterate or expand upon those guidelines.
 
 
-Line Length
-~~~~~~~~~~~
+Line Length and Wrapping
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-* Lines in sentences should be less than 80 characters and wrapped at
-  words. Multiple sentences which are not separated by a blank line are joined
-  automatically into paragraphs.
+* Documentation lines should be less than 100 characters.
 
-* Lines in literal blocks **must** be less than 80 characters since
-  they are not wrapped by the document formatters and can exceed the page width
-  in PDF documents.
+* Each sentence should start on a new line.
+  Multiple sentences, which are not separated by a blank line,
+  are joined automatically into paragraphs.
+
+* Wrap sentences at punctuation points, for example, at a comma.
+  If no punctuation, put the newline at a logical point in the sentence,
+  for example, at the end of a clause before an "and" or "but".
+
+* Lines in literal blocks should be less than 80 characters
+  since they are not wrapped by the document formatters.
 
   Long literal command lines can be shown wrapped with backslashes. For
   example::
 
-     testpmd -l 2-3 -n 4 \
+     dpdk-testpmd -l 2-3 -n 4 \
              --vdev=virtio_user0,path=/dev/vhost-net,queues=2,queue_size=1024 \
              -- -i --tx-offloads=0x0000002c --enable-lro --txq=2 --rxq=2 \
              --txd=1024 --rxd=1024
@@ -452,15 +397,71 @@ Code and Literal block sections
          return 0;
       }
 
+* Code snippets can also be included directly from the code using the ``literalinclude`` block.
+  Using this block instead of a code block will ensure that the code snippets
+  shown in the documentation are always up to date with the code.
+
+  The following will include a snippet from the skeleton sample app::
+
+      .. literalinclude:: ../../../examples/skeleton/basicfwd.c
+         :language: c
+         :start-after: Display the port MAC address.
+         :end-before: Enable RX in promiscuous mode for the Ethernet device.
+         :dedent: 1
+
+  This would be rendered as:
+
+  .. literalinclude:: ../../../examples/skeleton/basicfwd.c
+     :language: c
+     :start-after: Display the port MAC address.
+     :end-before: Enable RX in promiscuous mode for the Ethernet device.
+     :dedent: 1
+
+  Specifying ``:language:`` will enable syntax highlighting for the specified language.
+  ``:dedent:`` is used in this example to remove 1 leading tab from each line of the snippet.
+
+* ``start-after`` and ``end-before`` can use any text within a given file,
+  however it may be difficult to find unique text within your code to mark the
+  start and end of your snippets. In these cases, it is recommended to include
+  explicit tags in your code to denote these locations for documentation purposes.
+  The accepted format for these comments is:
+
+     * Before the code snippet, create a new comment which is a sentence explaining
+       what the code snippet contains. The comment is terminated with a scissors ``8<``.
+     * After the code snippet, create another new comment which starts with a
+       scissors ``>8``, then ``End of`` and the first comment repeated.
+     * The scissors should be orientated as shown to make it clear what code is being snipped.
+
+  This can be done as follows:
+
+  .. code-block:: c
+
+    /* Example feature being documented. 8< */
+    foo(bar);
+    /* >8 End of example feature being documented. */
+
+  ``foo(bar);`` could then be included in the docs using::
+
+      .. literalinclude:: ../../../examples/sample_app/main.c
+         :language: c
+         :start-after: Example feature being documented. 8<
+         :end-before: >8 End of example feature being documented.
+
+  If a multiline comment is needed before the snippet,
+  then the last line of the multiline comment should be in the same format as
+  the first comment shown in the example.
+
+* More information about the ``literalinclude`` block can be found within the
+  `Sphinx Documentation <https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html?highlight=literalinclude#directive-literalinclude>`_.
 
 * The default encoding for a literal block using the simplified ``::``
   directive is ``none``.
 
-* Lines in literal blocks must be less than 80 characters since they can exceed the page width when converted to PDF documentation.
-  For long literal lines that exceed that limit try to wrap the text at sensible locations.
+* Lines in literal blocks should be less than 80 characters.
+  For long literal lines, try to wrap the text at sensible locations.
   For example a long command line could be documented like this and still work if copied directly from the docs::
 
-     build/app/testpmd -l 0-2 -n3 --vdev=net_pcap0,iface=eth0     \
+     ./<build_dir>/app/dpdk-testpmd -l 0-2 -n3 --vdev=net_pcap0,iface=eth0    \
                                --vdev=net_pcap1,iface=eth1     \
                                -- -i --nb-cores=2 --nb-ports=2 \
                                   --total-num-mbufs=2048
@@ -522,7 +523,7 @@ Tables
 ~~~~~~
 
 * RST tables should be used sparingly.
-  They are hard to format and to edit, they are often rendered incorrectly in PDF format, and the same information
+  They are hard to format and to edit, and the same information
   can usually be shown just as clearly with a definition or bullet list.
 
 * Tables in the documentation should be formatted as follows:
@@ -551,8 +552,6 @@ Tables
   For example::
 
      The QOS configuration is shown in :numref:`table_qos_pipes`.
-
-* Tables should not include merged cells since they are not supported by the PDF renderer.
 
 
 .. _links:
@@ -715,14 +714,14 @@ The following are some guidelines for use of Doxygen in the DPDK API documentati
   .. code-block:: c
 
      /** Number of elements in the elt_pa array. */
-     uint32_t    pg_num __rte_cache_aligned;
+     alignas(RTE_CACHE_LINE_SIZE) uint32_t    pg_num;
      uint32_t    pg_shift;     /**< LOG2 of the physical pages. */
      uintptr_t   pg_mask;      /**< Physical page mask value. */
      uintptr_t   elt_va_start;
      /**< Virtual address of the first mempool object. */
      uintptr_t   elt_va_end;
      /**< Virtual address of the <size + 1> mempool object. */
-     phys_addr_t elt_pa[MEMPOOL_PG_NUM_DEFAULT];
+     phys_addr_t elt_pa[1];
      /**< Array of physical page addresses for the mempool buffer. */
 
   This doesn't have an effect on the rendered documentation but it is confusing for the developer reading the code.
@@ -731,7 +730,7 @@ The following are some guidelines for use of Doxygen in the DPDK API documentati
   .. code-block:: c
 
      /** Number of elements in the elt_pa array. */
-     uint32_t    pg_num __rte_cache_aligned;
+     alignas(RTE_CACHE_LINE_SIZE) uint32_t    pg_num;
      /** LOG2 of the physical pages. */
      uint32_t    pg_shift;
      /** Physical page mask value. */
@@ -741,11 +740,7 @@ The following are some guidelines for use of Doxygen in the DPDK API documentati
      /** Virtual address of the <size + 1> mempool object. */
      uintptr_t   elt_va_end;
      /** Array of physical page addresses for the mempool buffer. */
-     phys_addr_t elt_pa[MEMPOOL_PG_NUM_DEFAULT];
-
-* Check for Doxygen warnings in new code by checking the API documentation build::
-
-     make doc-api-html >/dev/null
+     phys_addr_t elt_pa[1];
 
 * Read the rendered section of the documentation that you have added for correctness, clarity and consistency
   with the surrounding text.

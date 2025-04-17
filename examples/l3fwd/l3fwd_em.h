@@ -5,6 +5,8 @@
 #ifndef __L3FWD_EM_H__
 #define __L3FWD_EM_H__
 
+#include <rte_common.h>
+
 static __rte_always_inline uint16_t
 l3fwd_em_handle_ipv4(struct rte_mbuf *m, uint16_t portid,
 		     struct rte_ether_hdr *eth_hdr, struct lcore_conf *qconf)
@@ -18,7 +20,7 @@ l3fwd_em_handle_ipv4(struct rte_mbuf *m, uint16_t portid,
 
 #ifdef DO_RFC_1812_CHECKS
 	/* Check to make sure the packet is valid (RFC1812) */
-	if (is_valid_ipv4_pkt(ipv4_hdr, m->pkt_len) < 0) {
+	if (is_valid_ipv4_pkt(ipv4_hdr, m->pkt_len, m->ol_flags) < 0) {
 		rte_pktmbuf_free(m);
 		return BAD_PORT;
 	}
@@ -36,11 +38,11 @@ l3fwd_em_handle_ipv4(struct rte_mbuf *m, uint16_t portid,
 	++(ipv4_hdr->hdr_checksum);
 #endif
 	/* dst addr */
-	*(uint64_t *)&eth_hdr->d_addr = dest_eth_addr[dst_port];
+	*(uint64_t *)&eth_hdr->dst_addr = dest_eth_addr[dst_port];
 
 	/* src addr */
 	rte_ether_addr_copy(&ports_eth_addr[dst_port],
-			&eth_hdr->s_addr);
+			&eth_hdr->src_addr);
 
 	return dst_port;
 }
@@ -64,11 +66,11 @@ l3fwd_em_handle_ipv6(struct rte_mbuf *m, uint16_t portid,
 		dst_port = portid;
 
 	/* dst addr */
-	*(uint64_t *)&eth_hdr->d_addr = dest_eth_addr[dst_port];
+	*(uint64_t *)&eth_hdr->dst_addr = dest_eth_addr[dst_port];
 
 	/* src addr */
 	rte_ether_addr_copy(&ports_eth_addr[dst_port],
-			&eth_hdr->s_addr);
+			&eth_hdr->src_addr);
 
 	return dst_port;
 }
@@ -98,7 +100,7 @@ l3fwd_em_simple_forward(struct rte_mbuf *m, uint16_t portid,
 	}
 }
 
-static __rte_always_inline void
+static __rte_always_inline uint16_t
 l3fwd_em_simple_process(struct rte_mbuf *m, struct lcore_conf *qconf)
 {
 	struct rte_ether_hdr *eth_hdr;
@@ -115,6 +117,8 @@ l3fwd_em_simple_process(struct rte_mbuf *m, struct lcore_conf *qconf)
 		m->port = l3fwd_em_handle_ipv6(m, m->port, eth_hdr, qconf);
 	else
 		m->port = BAD_PORT;
+
+	return m->port;
 }
 
 /*
@@ -173,6 +177,34 @@ l3fwd_em_no_opt_process_events(int nb_rx, struct rte_event **events,
 	/* Forward remaining prefetched packets */
 	for (; j < nb_rx; j++)
 		l3fwd_em_simple_process(events[j]->mbuf, qconf);
+}
+
+static inline void
+l3fwd_em_no_opt_process_event_vector(struct rte_event_vector *vec,
+				     struct lcore_conf *qconf,
+				     uint16_t *dst_ports)
+{
+	struct rte_mbuf **mbufs = vec->mbufs;
+	int32_t i;
+
+	/* Prefetch first packets */
+	for (i = 0; i < PREFETCH_OFFSET && i < vec->nb_elem; i++)
+		rte_prefetch0(rte_pktmbuf_mtod(mbufs[i], void *));
+
+	/*
+	 * Prefetch and forward already prefetched packets.
+	 */
+	for (i = 0; i < (vec->nb_elem - PREFETCH_OFFSET); i++) {
+		rte_prefetch0(
+			rte_pktmbuf_mtod(mbufs[i + PREFETCH_OFFSET], void *));
+		dst_ports[i] = l3fwd_em_simple_process(mbufs[i], qconf);
+	}
+
+	/* Forward remaining prefetched packets */
+	for (; i < vec->nb_elem; i++)
+		dst_ports[i] = l3fwd_em_simple_process(mbufs[i], qconf);
+
+	process_event_vector(vec, dst_ports);
 }
 
 #endif /* __L3FWD_EM_H__ */

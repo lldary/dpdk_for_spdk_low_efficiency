@@ -2,6 +2,7 @@
  * Copyright(c) 2018 Intel Corporation
  */
 
+#include <stdlib.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -56,29 +57,56 @@ comp_perf_check_capabilities(struct comp_test_data *test_data, uint8_t cdev_id)
 {
 	const struct rte_compressdev_capabilities *cap;
 
-	cap = rte_compressdev_capability_get(cdev_id,
-					     RTE_COMP_ALGO_DEFLATE);
+	cap = rte_compressdev_capability_get(cdev_id, test_data->test_algo);
 
 	if (cap == NULL) {
 		RTE_LOG(ERR, USER1,
-			"Compress device does not support DEFLATE\n");
+			"Compress device does not support %u algorithm\n",
+			test_data->test_algo);
 		return -1;
 	}
 
 	uint64_t comp_flags = cap->comp_feature_flags;
 
-	/* Huffman enconding */
-	if (test_data->huffman_enc == RTE_COMP_HUFFMAN_FIXED &&
-			(comp_flags & RTE_COMP_FF_HUFFMAN_FIXED) == 0) {
-		RTE_LOG(ERR, USER1,
-			"Compress device does not supported Fixed Huffman\n");
-		return -1;
-	}
+	/* Algorithm type */
+	switch (test_data->test_algo) {
+	case RTE_COMP_ALGO_DEFLATE:
+		/* Huffman encoding */
+		if (test_data->huffman_enc == RTE_COMP_HUFFMAN_FIXED &&
+		    (comp_flags & RTE_COMP_FF_HUFFMAN_FIXED) == 0) {
+			RTE_LOG(ERR, USER1,
+				"Compress device does not supported Fixed Huffman\n");
+			return -1;
+		}
 
-	if (test_data->huffman_enc == RTE_COMP_HUFFMAN_DYNAMIC &&
-			(comp_flags & RTE_COMP_FF_HUFFMAN_DYNAMIC) == 0) {
-		RTE_LOG(ERR, USER1,
-			"Compress device does not supported Dynamic Huffman\n");
+		if (test_data->huffman_enc == RTE_COMP_HUFFMAN_DYNAMIC &&
+		    (comp_flags & RTE_COMP_FF_HUFFMAN_DYNAMIC) == 0) {
+			RTE_LOG(ERR, USER1,
+				"Compress device does not supported Dynamic Huffman\n");
+			return -1;
+		}
+		break;
+	case RTE_COMP_ALGO_LZ4:
+		/* LZ4 flags */
+		if ((test_data->lz4_flags & RTE_COMP_LZ4_FLAG_BLOCK_CHECKSUM) &&
+		    (comp_flags & RTE_COMP_FF_LZ4_BLOCK_WITH_CHECKSUM) == 0) {
+			RTE_LOG(ERR, USER1,
+				"Compress device does not support LZ4 block with checksum\n");
+			return -1;
+		}
+
+		if ((test_data->lz4_flags &
+		     RTE_COMP_LZ4_FLAG_BLOCK_INDEPENDENCE) &&
+		    (comp_flags & RTE_COMP_FF_LZ4_BLOCK_INDEPENDENCE) == 0) {
+			RTE_LOG(ERR, USER1,
+				"Compress device does not support LZ4 independent blocks\n");
+			return -1;
+		}
+		break;
+	case RTE_COMP_ALGO_LZS:
+	case RTE_COMP_ALGO_NULL:
+		break;
+	default:
 		return -1;
 	}
 
@@ -168,7 +196,7 @@ comp_perf_initialize_compressdev(struct comp_test_data *test_data,
 		cdev_id = enabled_cdevs[i];
 
 		struct rte_compressdev_info cdev_info;
-		uint8_t socket_id = rte_compressdev_socket_id(cdev_id);
+		int socket_id = rte_compressdev_socket_id(cdev_id);
 
 		rte_compressdev_info_get(cdev_id, &cdev_info);
 		if (cdev_info.max_nb_queue_pairs &&
@@ -194,6 +222,7 @@ comp_perf_initialize_compressdev(struct comp_test_data *test_data,
 			.max_nb_priv_xforms = NUM_MAX_XFORMS,
 			.max_nb_streams = 0
 		};
+		test_data->nb_qps = config.nb_queue_pairs;
 
 		if (rte_compressdev_configure(cdev_id, &config) < 0) {
 			RTE_LOG(ERR, USER1, "Device configuration failed\n");
@@ -249,6 +278,14 @@ comp_perf_dump_input_data(struct comp_test_data *test_data)
 	if (test_data->input_data_sz <= 0 || actual_file_sz <= 0 ||
 			fseek(f, 0, SEEK_SET) != 0) {
 		RTE_LOG(ERR, USER1, "Size of input could not be calculated\n");
+		goto end;
+	}
+
+	if (!(test_data->test_op & COMPRESS) &&
+	    test_data->input_data_sz >
+	    (size_t) test_data->seg_sz * (size_t) test_data->max_sgl_segs) {
+		RTE_LOG(ERR, USER1,
+			"Size of input must be less than total segments\n");
 		goto end;
 	}
 
@@ -389,7 +426,7 @@ main(int argc, char **argv)
 	i = 0;
 	uint8_t qp_id = 0, cdev_index = 0;
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 
 		if (i == total_nb_qps)
 			break;
@@ -413,7 +450,7 @@ main(int argc, char **argv)
 	while (test_data->level <= test_data->level_lst.max) {
 
 		i = 0;
-		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
 
 			if (i == total_nb_qps)
 				break;
@@ -424,7 +461,7 @@ main(int argc, char **argv)
 			i++;
 		}
 		i = 0;
-		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
 
 			if (i == total_nb_qps)
 				break;
@@ -449,7 +486,7 @@ end:
 
 	case ST_DURING_TEST:
 		i = 0;
-		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
 			if (i == total_nb_qps)
 				break;
 

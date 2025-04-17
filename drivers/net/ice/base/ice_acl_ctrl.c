@@ -1,17 +1,18 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #include "ice_acl.h"
 #include "ice_flow.h"
 
 /* Determine the TCAM index of entry 'e' within the ACL table */
-#define ICE_ACL_TBL_TCAM_IDX(e) ((e) / ICE_AQC_ACL_TCAM_DEPTH)
+#define ICE_ACL_TBL_TCAM_IDX(e) ((u8)((e) / ICE_AQC_ACL_TCAM_DEPTH))
 
 /* Determine the entry index within the TCAM */
-#define ICE_ACL_TBL_TCAM_ENTRY_IDX(e) ((e) % ICE_AQC_ACL_TCAM_DEPTH)
+#define ICE_ACL_TBL_TCAM_ENTRY_IDX(e) ((u16)((e) % ICE_AQC_ACL_TCAM_DEPTH))
 
 #define ICE_ACL_SCEN_ENTRY_INVAL 0xFFFF
+
 /**
  * ice_acl_init_entry
  * @scen: pointer to the scenario struct
@@ -20,41 +21,43 @@
  */
 static void ice_acl_init_entry(struct ice_acl_scen *scen)
 {
-	/**
-	 * low priority: start from the highest index, 25% of total entries
+	/* low priority: start from the highest index, 25% of total entries
 	 * normal priority: start from the highest index, 50% of total entries
 	 * high priority: start from the lowest index, 25% of total entries
 	 */
-	scen->first_idx[ICE_LOW] = scen->num_entry - 1;
-	scen->first_idx[ICE_NORMAL] = scen->num_entry - scen->num_entry / 4 - 1;
-	scen->first_idx[ICE_HIGH] = 0;
+	scen->first_idx[ICE_ACL_PRIO_LOW] = scen->num_entry - 1;
+	scen->first_idx[ICE_ACL_PRIO_NORMAL] = scen->num_entry -
+		scen->num_entry / 4 - 1;
+	scen->first_idx[ICE_ACL_PRIO_HIGH] = 0;
 
-	scen->last_idx[ICE_LOW] = scen->num_entry - scen->num_entry / 4;
-	scen->last_idx[ICE_NORMAL] = scen->num_entry / 4;
-	scen->last_idx[ICE_HIGH] = scen->num_entry / 4 - 1;
+	scen->last_idx[ICE_ACL_PRIO_LOW] = scen->num_entry -
+		scen->num_entry / 4;
+	scen->last_idx[ICE_ACL_PRIO_NORMAL] = scen->num_entry / 4;
+	scen->last_idx[ICE_ACL_PRIO_HIGH] = scen->num_entry / 4 - 1;
 }
 
 /**
  * ice_acl_scen_assign_entry_idx
  * @scen: pointer to the scenario struct
- * @prior: the priority of the flow entry being allocated
+ * @prio: the priority of the flow entry being allocated
  *
  * To find the index of an available entry in scenario
  *
  * Returns ICE_ACL_SCEN_ENTRY_INVAL if fails
  * Returns index on success
  */
-static u16 ice_acl_scen_assign_entry_idx(struct ice_acl_scen *scen,
-					 enum ice_acl_entry_prior prior)
+static u16
+ice_acl_scen_assign_entry_idx(struct ice_acl_scen *scen,
+			      enum ice_acl_entry_prio prio)
 {
 	u16 first_idx, last_idx, i;
 	s8 step;
 
-	if (prior >= ICE_MAX_PRIOR)
+	if (prio >= ICE_ACL_MAX_PRIO)
 		return ICE_ACL_SCEN_ENTRY_INVAL;
 
-	first_idx = scen->first_idx[prior];
-	last_idx = scen->last_idx[prior];
+	first_idx = scen->first_idx[prio];
+	last_idx = scen->last_idx[prio];
 	step = first_idx <= last_idx ? 1 : -1;
 
 	for (i = first_idx; i != last_idx + step; i += step)
@@ -148,10 +151,8 @@ static enum ice_status ice_acl_init_tbl(struct ice_hw *hw)
 	u16 idx;
 
 	tbl = hw->acl_tbl;
-	if (!tbl) {
-		status = ICE_ERR_CFG;
-		return status;
-	}
+	if (!tbl)
+		return ICE_ERR_CFG;
 
 	ice_memset(&buf, 0, sizeof(buf), ICE_NONDMA_MEM);
 	ice_memset(&act_buf, 0, sizeof(act_buf), ICE_NONDMA_MEM);
@@ -198,7 +199,7 @@ static enum ice_status ice_acl_init_tbl(struct ice_hw *hw)
 
 /**
  * ice_acl_assign_act_mems_to_tcam
- * @tbl: pointer to acl table structure
+ * @tbl: pointer to ACL table structure
  * @cur_tcam: Index of current TCAM. Value = 0 to (ICE_AQC_ACL_SLICES - 1)
  * @cur_mem_idx: Index of current action memory bank. Value = 0 to
  *		 (ICE_AQC_MAX_ACTION_MEMORIES - 1)
@@ -229,7 +230,7 @@ ice_acl_assign_act_mems_to_tcam(struct ice_acl_tbl *tbl, u8 cur_tcam,
 
 /**
  * ice_acl_divide_act_mems_to_tcams
- * @tbl: pointer to acl table structure
+ * @tbl: pointer to ACL table structure
  *
  * Figure out how to divide given action memory banks to given TCAMs. This
  * division is for SW book keeping. In the time when scenario is created,
@@ -250,10 +251,8 @@ ice_acl_assign_act_mems_to_tcam(struct ice_acl_tbl *tbl, u8 cur_tcam,
  */
 static void ice_acl_divide_act_mems_to_tcams(struct ice_acl_tbl *tbl)
 {
-	u16 num_cscd, stack_level, stack_idx, min_act_mem;
-	u8 tcam_idx = tbl->first_tcam;
-	u16 max_idx_to_get_extra;
-	u8 mem_idx = 0;
+	u16 num_cscd, stack_level, stack_idx, max_idx_to_get_extra;
+	u8 min_act_mem, tcam_idx = tbl->first_tcam, mem_idx = 0;
 
 	/* Determine number of stacked TCAMs */
 	stack_level = DIVIDE_AND_ROUND_UP(tbl->info.depth,
@@ -325,7 +324,8 @@ ice_acl_create_tbl(struct ice_hw *hw, struct ice_acl_tbl_params *params)
 	depth = ICE_ALIGN(params->depth, ICE_ACL_ENTRY_ALLOC_UNIT);
 
 	if (params->entry_act_pairs < width / ICE_AQC_ACL_KEY_WIDTH_BYTES) {
-		params->entry_act_pairs = width / ICE_AQC_ACL_KEY_WIDTH_BYTES;
+		params->entry_act_pairs =
+			(u8)(width / ICE_AQC_ACL_KEY_WIDTH_BYTES);
 
 		if (params->entry_act_pairs > ICE_AQC_TBL_MAX_ACTION_PAIRS)
 			params->entry_act_pairs = ICE_AQC_TBL_MAX_ACTION_PAIRS;
@@ -351,18 +351,15 @@ ice_acl_create_tbl(struct ice_hw *hw, struct ice_acl_tbl_params *params)
 				CPU_TO_LE16(params->dep_tbls[i]);
 	}
 
-	/* call the aq command to create the ACL table with these values */
+	/* call the AQ command to create the ACL table with these values */
 	status = ice_aq_alloc_acl_tbl(hw, &tbl_alloc, NULL);
-
 	if (status) {
 		if (LE16_TO_CPU(tbl_alloc.buf.resp_buf.alloc_id) <
 		    ICE_AQC_ALLOC_ID_LESS_THAN_4K)
-			ice_debug(hw, ICE_DBG_ACL,
-				  "Alloc ACL table failed. Unavailable resource.\n");
+			ice_debug(hw, ICE_DBG_ACL, "Alloc ACL table failed. Unavailable resource.\n");
 		else
-			ice_debug(hw, ICE_DBG_ACL,
-				  "AQ allocation of ACL failed with error. status: %d\n",
-				   status);
+			ice_debug(hw, ICE_DBG_ACL, "AQ allocation of ACL failed with error. status: %d\n",
+				  status);
 		return status;
 	}
 
@@ -402,8 +399,7 @@ ice_acl_create_tbl(struct ice_hw *hw, struct ice_acl_tbl_params *params)
 	if (status) {
 		ice_free(hw, tbl);
 		hw->acl_tbl = NULL;
-		ice_debug(hw, ICE_DBG_ACL,
-			  "Initialization of TCAM entries failed. status: %d\n",
+		ice_debug(hw, ICE_DBG_ACL, "Initialization of TCAM entries failed. status: %d\n",
 			  status);
 		goto out;
 	}
@@ -414,8 +410,7 @@ ice_acl_create_tbl(struct ice_hw *hw, struct ice_acl_tbl_params *params)
 		(tbl->last_entry / ICE_ACL_ENTRY_ALLOC_UNIT);
 
 	/* Indicate available entries in the table */
-	for (i = first_e; i <= last_e; i++)
-		ice_set_bit(i, tbl->avail);
+	ice_bitmap_set(tbl->avail, first_e, last_e - first_e + 1);
 
 	INIT_LIST_HEAD(&tbl->scens);
 out:
@@ -530,7 +525,7 @@ ice_acl_alloc_partition(struct ice_hw *hw, struct ice_acl_scen *req)
 			break;
 		}
 
-		row = (dir > 0) ? (row + width) : (row - width);
+		row = dir > 0 ? row + width : row - width;
 		if (row > hw->acl_tbl->last_tcam ||
 		    row < hw->acl_tbl->first_tcam) {
 			/* All rows have been checked. Increment 'off' that
@@ -591,7 +586,7 @@ ice_acl_fill_tcam_select(struct ice_aqc_acl_scen *scen_buf,
 	 */
 	for (j = 0; j < ICE_AQC_ACL_KEY_WIDTH_BYTES; j++) {
 		/* PKT DIR uses the 1st location of Byte Selection Base: + 1 */
-		u8 val = ICE_AQC_ACL_BYTE_SEL_BASE + 1 + idx;
+		u8 val = (u8)(ICE_AQC_ACL_BYTE_SEL_BASE + 1 + idx);
 
 		if (tcam_idx_in_cascade == cascade_cnt - 1) {
 			if (j == ICE_ACL_SCEN_RNG_CHK_IDX_IN_TCAM)
@@ -660,7 +655,7 @@ ice_acl_set_scen_chnk_msk(struct ice_aqc_acl_scen *scen_buf,
 
 /**
  * ice_acl_assign_act_mem_for_scen
- * @tbl: pointer to acl table structure
+ * @tbl: pointer to ACL table structure
  * @scen: pointer to the scenario struct
  * @scen_buf: pointer to the available space for the scenario
  * @current_tcam_idx: theoretical index of the TCAM that we associated those
@@ -672,8 +667,7 @@ static void
 ice_acl_assign_act_mem_for_scen(struct ice_acl_tbl *tbl,
 				struct ice_acl_scen *scen,
 				struct ice_aqc_acl_scen *scen_buf,
-				u8 current_tcam_idx,
-				u8 target_tcam_idx)
+				u8 current_tcam_idx, u8 target_tcam_idx)
 {
 	u8 i;
 
@@ -765,10 +759,8 @@ ice_acl_create_scen(struct ice_hw *hw, u16 match_width, u16 num_entries,
 	scen->num_entry = num_entries;
 
 	status = ice_acl_alloc_partition(hw, scen);
-	if (status) {
-		ice_free(hw, scen);
-		return status;
-	}
+	if (status)
+		goto out;
 
 	ice_memset(&scen_buf, 0, sizeof(scen_buf), ICE_NONDMA_MEM);
 
@@ -800,7 +792,7 @@ ice_acl_create_scen(struct ice_hw *hw, u16 match_width, u16 num_entries,
 	/* set the START_SET bit at the beginning of the stack */
 	scen_buf.tcam_cfg[k].start_cmp_set |= ICE_AQC_ACL_ALLOC_SCE_START_SET;
 	while (k <= last_tcam) {
-		u8 last_tcam_idx_cascade = cascade_cnt + k - 1;
+		u16 last_tcam_idx_cascade = cascade_cnt + k - 1;
 
 		/* set start_cmp for the first cascaded TCAM */
 		scen_buf.tcam_cfg[k].start_cmp_set |=
@@ -831,11 +823,9 @@ ice_acl_create_scen(struct ice_hw *hw, u16 match_width, u16 num_entries,
 
 	status = ice_aq_alloc_acl_scen(hw, scen_id, &scen_buf, NULL);
 	if (status) {
-		ice_debug(hw, ICE_DBG_ACL,
-			  "AQ allocation of ACL scenario failed. status: %d\n",
+		ice_debug(hw, ICE_DBG_ACL, "AQ allocation of ACL scenario failed. status: %d\n",
 			  status);
-		ice_free(hw, scen);
-		return status;
+		goto out;
 	}
 
 	scen->id = *scen_id;
@@ -843,7 +833,56 @@ ice_acl_create_scen(struct ice_hw *hw, u16 match_width, u16 num_entries,
 	ice_acl_init_entry(scen);
 	LIST_ADD(&scen->list_entry, &hw->acl_tbl->scens);
 
+out:
+	if (status)
+		ice_free(hw, scen);
+
 	return status;
+}
+
+/**
+ * ice_acl_destroy_scen - Destroy an ACL scenario
+ * @hw: pointer to the HW struct
+ * @scen_id: ID of the remove scenario
+ */
+static enum ice_status ice_acl_destroy_scen(struct ice_hw *hw, u16 scen_id)
+{
+	struct ice_acl_scen *scen, *tmp_scen;
+	struct ice_flow_prof *p, *tmp;
+	enum ice_status status;
+
+	if (!hw->acl_tbl)
+		return ICE_ERR_DOES_NOT_EXIST;
+
+	/* Remove profiles that use "scen_id" scenario */
+	LIST_FOR_EACH_ENTRY_SAFE(p, tmp, &hw->fl_profs[ICE_BLK_ACL],
+				 ice_flow_prof, l_entry)
+		if (p->cfg.scen && p->cfg.scen->id == scen_id) {
+			status = ice_flow_rem_prof(hw, ICE_BLK_ACL, p->id);
+			if (status) {
+				ice_debug(hw, ICE_DBG_ACL, "ice_flow_rem_prof failed. status: %d\n",
+					  status);
+				return status;
+			}
+		}
+
+	/* Call the AQ command to destroy the targeted scenario */
+	status = ice_aq_dealloc_acl_scen(hw, scen_id, NULL);
+	if (status) {
+		ice_debug(hw, ICE_DBG_ACL, "AQ de-allocation of scenario failed. status: %d\n",
+			  status);
+		return status;
+	}
+
+	/* Remove scenario from hw->acl_tbl->scens */
+	LIST_FOR_EACH_ENTRY_SAFE(scen, tmp_scen, &hw->acl_tbl->scens,
+				 ice_acl_scen, list_entry)
+		if (scen->id == scen_id) {
+			LIST_DEL(&scen->list_entry);
+			ice_free(hw, scen);
+		}
+
+	return ICE_SUCCESS;
 }
 
 /**
@@ -897,12 +936,10 @@ enum ice_status ice_acl_destroy_tbl(struct ice_hw *hw)
 		}
 	}
 
-	/* call the aq command to destroy the ACL table */
+	/* call the AQ command to destroy the ACL table */
 	status = ice_aq_dealloc_acl_tbl(hw, hw->acl_tbl->id, &resp_buf, NULL);
-
 	if (status) {
-		ice_debug(hw, ICE_DBG_ACL,
-			  "AQ de-allocation of ACL failed. status: %d\n",
+		ice_debug(hw, ICE_DBG_ACL, "AQ de-allocation of ACL failed. status: %d\n",
 			  status);
 		return status;
 	}
@@ -917,7 +954,7 @@ enum ice_status ice_acl_destroy_tbl(struct ice_hw *hw)
  * ice_acl_add_entry - Add a flow entry to an ACL scenario
  * @hw: pointer to the HW struct
  * @scen: scenario to add the entry to
- * @prior: priority level of the entry being added
+ * @prio: priority level of the entry being added
  * @keys: buffer of the value of the key to be programmed to the ACL entry
  * @inverts: buffer of the value of the key inverts to be programmed
  * @acts: pointer to a buffer containing formatted actions
@@ -931,17 +968,18 @@ enum ice_status ice_acl_destroy_tbl(struct ice_hw *hw)
  */
 enum ice_status
 ice_acl_add_entry(struct ice_hw *hw, struct ice_acl_scen *scen,
-		  enum ice_acl_entry_prior prior, u8 *keys, u8 *inverts,
+		  enum ice_acl_entry_prio prio, u8 *keys, u8 *inverts,
 		  struct ice_acl_act_entry *acts, u8 acts_cnt, u16 *entry_idx)
 {
-	u8 i, entry_tcam, num_cscd, idx, offset;
 	struct ice_aqc_acl_data buf;
+	u8 entry_tcam, offset;
+	u16 i, num_cscd, idx;
 	enum ice_status status = ICE_SUCCESS;
 
 	if (!scen)
 		return ICE_ERR_DOES_NOT_EXIST;
 
-	*entry_idx = ice_acl_scen_assign_entry_idx(scen, prior);
+	*entry_idx = ice_acl_scen_assign_entry_idx(scen, prio);
 	if (*entry_idx >= scen->num_entry) {
 		*entry_idx = 0;
 		return ICE_ERR_MAX_LIMIT;
@@ -966,7 +1004,7 @@ ice_acl_add_entry(struct ice_hw *hw, struct ice_acl_scen *scen,
 		 * be programmed first; the TCAM entry of the leftmost TCAM
 		 * should be programmed last.
 		 */
-		offset = num_cscd - i - 1;
+		offset = (u8)(num_cscd - i - 1);
 		ice_memcpy(&buf.entry_key.val,
 			   &keys[offset * sizeof(buf.entry_key.val)],
 			   sizeof(buf.entry_key.val), ICE_NONDMA_TO_NONDMA);
@@ -977,8 +1015,7 @@ ice_acl_add_entry(struct ice_hw *hw, struct ice_acl_scen *scen,
 		status = ice_aq_program_acl_entry(hw, entry_tcam + offset, idx,
 						  &buf, NULL);
 		if (status) {
-			ice_debug(hw, ICE_DBG_ACL,
-				  "aq program acl entry failed status: %d\n",
+			ice_debug(hw, ICE_DBG_ACL, "aq program acl entry failed status: %d\n",
 				  status);
 			goto out;
 		}
@@ -1011,10 +1048,9 @@ ice_acl_prog_act(struct ice_hw *hw, struct ice_acl_scen *scen,
 		 struct ice_acl_act_entry *acts, u8 acts_cnt,
 		 u16 entry_idx)
 {
-	u8 entry_tcam, num_cscd, i, actx_idx = 0;
+	u16 idx, entry_tcam, num_cscd, i, actx_idx = 0;
 	struct ice_aqc_actpair act_buf;
 	enum ice_status status = ICE_SUCCESS;
-	u16 idx;
 
 	if (entry_idx >= scen->num_entry)
 		return ICE_ERR_MAX_LIMIT;
@@ -1028,9 +1064,8 @@ ice_acl_prog_act(struct ice_hw *hw, struct ice_acl_scen *scen,
 	entry_tcam = ICE_ACL_TBL_TCAM_IDX(scen->start);
 	idx = ICE_ACL_TBL_TCAM_ENTRY_IDX(scen->start + entry_idx);
 
-	i = ice_find_first_bit(scen->act_mem_bitmap,
-			       ICE_AQC_MAX_ACTION_MEMORIES);
-	while (i < ICE_AQC_MAX_ACTION_MEMORIES) {
+	ice_for_each_set_bit(i, scen->act_mem_bitmap,
+			     ICE_AQC_MAX_ACTION_MEMORIES) {
 		struct ice_acl_act_mem *mem = &hw->acl_tbl->act_mems[i];
 
 		if (actx_idx >= acts_cnt)
@@ -1050,16 +1085,12 @@ ice_acl_prog_act(struct ice_hw *hw, struct ice_acl_scen *scen,
 			status = ice_aq_program_actpair(hw, i, idx, &act_buf,
 							NULL);
 			if (status) {
-				ice_debug(hw, ICE_DBG_ACL,
-					  "program actpair failed status: %d\n",
+				ice_debug(hw, ICE_DBG_ACL, "program actpair failed status: %d\n",
 					  status);
 				break;
 			}
 			actx_idx++;
 		}
-
-		i = ice_find_next_bit(scen->act_mem_bitmap,
-				      ICE_AQC_MAX_ACTION_MEMORIES, i + 1);
 	}
 
 	if (!status && actx_idx < acts_cnt)
@@ -1079,9 +1110,9 @@ ice_acl_rem_entry(struct ice_hw *hw, struct ice_acl_scen *scen, u16 entry_idx)
 {
 	struct ice_aqc_actpair act_buf;
 	struct ice_aqc_acl_data buf;
-	u8 entry_tcam, num_cscd, i;
 	enum ice_status status = ICE_SUCCESS;
-	u16 idx;
+	u16 num_cscd, idx, i;
+	u8 entry_tcam;
 
 	if (!scen)
 		return ICE_ERR_DOES_NOT_EXIST;
@@ -1102,18 +1133,17 @@ ice_acl_rem_entry(struct ice_hw *hw, struct ice_acl_scen *scen, u16 entry_idx)
 	/* invalidate the flow entry */
 	ice_memset(&buf, 0, sizeof(buf), ICE_NONDMA_MEM);
 	for (i = 0; i < num_cscd; i++) {
-		status = ice_aq_program_acl_entry(hw, entry_tcam + i, idx, &buf,
-						  NULL);
+		status = ice_aq_program_acl_entry(hw, (u8)(entry_tcam + i),
+						  idx, &buf, NULL);
 		if (status)
-			ice_debug(hw, ICE_DBG_ACL,
-				  "aq program acl entry failed status: %d\n",
+			ice_debug(hw, ICE_DBG_ACL, "AQ program ACL entry failed status: %d\n",
 				  status);
 	}
 
 	ice_memset(&act_buf, 0, sizeof(act_buf), ICE_NONDMA_MEM);
-	i = ice_find_first_bit(scen->act_mem_bitmap,
-			       ICE_AQC_MAX_ACTION_MEMORIES);
-	while (i < ICE_AQC_MAX_ACTION_MEMORIES) {
+
+	ice_for_each_set_bit(i, scen->act_mem_bitmap,
+			     ICE_AQC_MAX_ACTION_MEMORIES) {
 		struct ice_acl_act_mem *mem = &hw->acl_tbl->act_mems[i];
 
 		if (mem->member_of_tcam >= entry_tcam &&
@@ -1122,64 +1152,12 @@ ice_acl_rem_entry(struct ice_hw *hw, struct ice_acl_scen *scen, u16 entry_idx)
 			status = ice_aq_program_actpair(hw, i, idx, &act_buf,
 							NULL);
 			if (status)
-				ice_debug(hw, ICE_DBG_ACL,
-					  "program actpair failed.status: %d\n",
+				ice_debug(hw, ICE_DBG_ACL, "program actpair failed status: %d\n",
 					  status);
 		}
-
-		i = ice_find_next_bit(scen->act_mem_bitmap,
-				      ICE_AQC_MAX_ACTION_MEMORIES, i + 1);
 	}
 
 	ice_acl_scen_free_entry_idx(scen, entry_idx);
 
-	return status;
-}
-
-/**
- * ice_acl_destroy_scen - Destroy an ACL scenario
- * @hw: pointer to the HW struct
- * @scen_id: ID of the remove scenario
- */
-enum ice_status ice_acl_destroy_scen(struct ice_hw *hw, u16 scen_id)
-{
-	struct ice_acl_scen *scen, *tmp_scen;
-	struct ice_flow_prof *p, *tmp;
-	enum ice_status status;
-
-	if (!hw->acl_tbl)
-		return ICE_ERR_DOES_NOT_EXIST;
-
-	/* Remove profiles that use "scen_id" scenario */
-	LIST_FOR_EACH_ENTRY_SAFE(p, tmp, &hw->fl_profs[ICE_BLK_ACL],
-				 ice_flow_prof, l_entry)
-		if (p->cfg.scen && p->cfg.scen->id == scen_id) {
-			status = ice_flow_rem_prof(hw, ICE_BLK_ACL, p->id);
-			if (status) {
-				ice_debug(hw, ICE_DBG_ACL,
-					  "ice_flow_rem_prof failed. status: %d\n",
-					  status);
-				goto exit;
-			}
-		}
-
-	/* Call the aq command to destroy the targeted scenario */
-	status = ice_aq_dealloc_acl_scen(hw, scen_id, NULL);
-
-	if (status) {
-		ice_debug(hw, ICE_DBG_ACL,
-			  "AQ de-allocation of scenario failed. status: %d\n",
-			  status);
-		goto exit;
-	}
-
-	/* Remove scenario from hw->acl_tbl->scens */
-	LIST_FOR_EACH_ENTRY_SAFE(scen, tmp_scen, &hw->acl_tbl->scens,
-				 ice_acl_scen, list_entry)
-		if (scen->id == scen_id) {
-			LIST_DEL(&scen->list_entry);
-			ice_free(hw, scen);
-		}
-exit:
 	return status;
 }

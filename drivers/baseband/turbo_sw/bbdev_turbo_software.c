@@ -2,14 +2,16 @@
  * Copyright(c) 2017 Intel Corporation
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <rte_common.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_ring.h>
 #include <rte_kvargs.h>
 #include <rte_cycles.h>
+#include <rte_errno.h>
 
 #include <rte_bbdev.h>
 #include <rte_bbdev_pmd.h>
@@ -34,8 +36,7 @@
 
 #define DRIVER_NAME baseband_turbo_sw
 
-/* Turbo SW PMD logging ID */
-static int bbdev_turbo_sw_logtype;
+RTE_LOG_REGISTER_DEFAULT(bbdev_turbo_sw_logtype, NOTICE);
 
 /* Helper macro for logging */
 #define rte_bbdev_log(level, fmt, ...) \
@@ -61,7 +62,7 @@ struct turbo_sw_params {
 	uint16_t queues_num;  /*< Turbo SW device queues number */
 };
 
-/* Accecptable params for Turbo SW devices */
+/* Acceptable params for Turbo SW devices */
 #define TURBO_SW_MAX_NB_QUEUES_ARG  "max_nb_queues"
 #define TURBO_SW_SOCKET_ID_ARG      "socket_id"
 
@@ -157,6 +158,8 @@ static void
 info_get(struct rte_bbdev *dev, struct rte_bbdev_driver_info *dev_info)
 {
 	struct bbdev_private *internals = dev->data->dev_private;
+	const struct rte_bbdev_op_cap *op_cap;
+	int num_op_type = 0;
 
 	static const struct rte_bbdev_op_cap bbdev_capabilities[] = {
 #ifdef RTE_BBDEV_SDK_AVX2
@@ -199,6 +202,7 @@ info_get(struct rte_bbdev *dev, struct rte_bbdev_driver_info *dev_info)
 			.cap.ldpc_enc = {
 				.capability_flags =
 						RTE_BBDEV_LDPC_RATE_MATCH |
+						RTE_BBDEV_LDPC_CRC_16_ATTACH |
 						RTE_BBDEV_LDPC_CRC_24A_ATTACH |
 						RTE_BBDEV_LDPC_CRC_24B_ATTACH,
 				.num_buffers_src =
@@ -211,6 +215,7 @@ info_get(struct rte_bbdev *dev, struct rte_bbdev_driver_info *dev_info)
 		.type   = RTE_BBDEV_OP_LDPC_DEC,
 		.cap.ldpc_dec = {
 			.capability_flags =
+					RTE_BBDEV_LDPC_CRC_TYPE_16_CHECK |
 					RTE_BBDEV_LDPC_CRC_TYPE_24B_CHECK |
 					RTE_BBDEV_LDPC_CRC_TYPE_24A_CHECK |
 					RTE_BBDEV_LDPC_CRC_TYPE_24B_DROP |
@@ -251,6 +256,18 @@ info_get(struct rte_bbdev *dev, struct rte_bbdev_driver_info *dev_info)
 	dev_info->capabilities = bbdev_capabilities;
 	dev_info->min_alignment = 64;
 	dev_info->harq_buffer_size = 0;
+	dev_info->data_endianness = RTE_LITTLE_ENDIAN;
+	dev_info->device_status = RTE_BBDEV_DEV_NOT_SUPPORTED;
+
+	op_cap = bbdev_capabilities;
+	for (; op_cap->type != RTE_BBDEV_OP_NONE; ++op_cap)
+		num_op_type++;
+	op_cap = bbdev_capabilities;
+	if (num_op_type > 0) {
+		int num_queue_per_type = dev_info->max_num_queues / num_op_type;
+		for (; op_cap->type != RTE_BBDEV_OP_NONE; ++op_cap)
+			dev_info->num_queues[op_cap->type] = num_queue_per_type;
+	}
 
 	rte_bbdev_log_debug("got device info from %u\n", dev->data->dev_id);
 }
@@ -303,7 +320,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->enc_out = rte_zmalloc_socket(name,
 			((RTE_BBDEV_TURBO_MAX_TB_SIZE >> 3) + 3) *
@@ -312,6 +330,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->enc_out == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -323,7 +342,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->enc_in = rte_zmalloc_socket(name,
 			(RTE_BBDEV_LDPC_MAX_CB_SIZE >> 3) * sizeof(*q->enc_in),
@@ -331,6 +351,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->enc_in == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -341,7 +362,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->ag = rte_zmalloc_socket(name,
 			RTE_BBDEV_TURBO_MAX_CB_SIZE * 10 * sizeof(*q->ag),
@@ -349,6 +371,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->ag == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -359,7 +382,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->code_block = rte_zmalloc_socket(name,
 			RTE_BBDEV_TURBO_MAX_CB_SIZE * sizeof(*q->code_block),
@@ -367,6 +391,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->code_block == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -378,7 +403,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->deint_input = rte_zmalloc_socket(name,
 			DEINT_INPUT_BUF_SIZE * sizeof(*q->deint_input),
@@ -386,6 +412,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->deint_input == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -397,7 +424,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->deint_output = rte_zmalloc_socket(NULL,
 			DEINT_OUTPUT_BUF_SIZE * sizeof(*q->deint_output),
@@ -405,6 +433,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->deint_output == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -416,7 +445,8 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->adapter_output = rte_zmalloc_socket(NULL,
 			ADAPTER_OUTPUT_BUF_SIZE * sizeof(*q->adapter_output),
@@ -424,6 +454,7 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 	if (q->adapter_output == NULL) {
 		rte_bbdev_log(ERR,
 			"Failed to allocate queue memory for %s", name);
+		ret = -ENOMEM;
 		goto free_q;
 	}
 
@@ -434,12 +465,14 @@ q_setup(struct rte_bbdev *dev, uint16_t q_id,
 		rte_bbdev_log(ERR,
 				"Creating queue name for device %u queue %u failed",
 				dev->data->dev_id, q_id);
-		return -ENAMETOOLONG;
+		ret = -ENAMETOOLONG;
+		goto free_q;
 	}
 	q->processed_pkts = rte_ring_create(name, queue_conf->queue_size,
 			queue_conf->socket, RING_F_SP_ENQ | RING_F_SC_DEQ);
 	if (q->processed_pkts == NULL) {
 		rte_bbdev_log(ERR, "Failed to create ring for %s", name);
+		ret = -rte_errno;
 		goto free_q;
 	}
 
@@ -459,7 +492,7 @@ free_q:
 	rte_free(q->deint_output);
 	rte_free(q->adapter_output);
 	rte_free(q);
-	return -EFAULT;
+	return ret;
 }
 
 static const struct rte_bbdev_ops pmd_ops = {
@@ -551,18 +584,14 @@ process_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 	struct bblib_turbo_encoder_response turbo_resp;
 	struct bblib_rate_match_dl_request rm_req;
 	struct bblib_rate_match_dl_response rm_resp;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time;
-#else
-	RTE_SET_USED(q_stats);
-#endif
 
 	k_idx = compute_idx(k);
 	in = rte_pktmbuf_mtod_offset(m_in, uint8_t *, in_offset);
 
 	/* CRC24A (for TB) */
 	if ((enc->op_flags & RTE_BBDEV_TURBO_CRC_24A_ATTACH) &&
-		(enc->code_block_mode == 1)) {
+		(enc->code_block_mode == RTE_BBDEV_CODE_BLOCK)) {
 #ifdef RTE_LIBRTE_BBDEV_DEBUG
 		ret = is_enc_input_valid(k - 24, k_idx, in_length);
 		if (ret != 0) {
@@ -589,14 +618,10 @@ process_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		}
 
 		crc_resp.data = in;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 		start_time = rte_rdtsc_precise();
-#endif
 		/* CRC24A generation */
 		bblib_lte_crc24a_gen(&crc_req, &crc_resp);
-#ifdef RTE_BBDEV_OFFLOAD_COST
 		q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 	} else if (enc->op_flags & RTE_BBDEV_TURBO_CRC_24B_ATTACH) {
 		/* CRC24B */
 #ifdef RTE_LIBRTE_BBDEV_DEBUG
@@ -625,14 +650,10 @@ process_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		}
 
 		crc_resp.data = in;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 		start_time = rte_rdtsc_precise();
-#endif
 		/* CRC24B generation */
 		bblib_lte_crc24b_gen(&crc_req, &crc_resp);
-#ifdef RTE_BBDEV_OFFLOAD_COST
 		q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 	}
 #ifdef RTE_LIBRTE_BBDEV_DEBUG
 	else {
@@ -684,18 +705,16 @@ process_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 	turbo_resp.output_win_1 = out1;
 	turbo_resp.output_win_2 = out2;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	start_time = rte_rdtsc_precise();
-#endif
+
 	/* Turbo encoding */
 	if (bblib_turbo_encoder(&turbo_req, &turbo_resp) != 0) {
 		op->status |= 1 << RTE_BBDEV_DRV_ERROR;
 		rte_bbdev_log(ERR, "Turbo Encoder failed");
 		return;
 	}
-#ifdef RTE_BBDEV_OFFLOAD_COST
+
 	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 
 	/* Restore 3 first bytes of next CB if they were overwritten by CRC*/
 	if (first_3_bytes != 0)
@@ -758,18 +777,16 @@ process_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		else
 			rm_req.bypass_rvidx = 0;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 		start_time = rte_rdtsc_precise();
-#endif
+
 		/* Rate-Matching */
 		if (bblib_rate_match_dl(&rm_req, &rm_resp) != 0) {
 			op->status |= 1 << RTE_BBDEV_DRV_ERROR;
 			rte_bbdev_log(ERR, "Rate matching failed");
 			return;
 		}
-#ifdef RTE_BBDEV_OFFLOAD_COST
+
 		q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 
 		/* SW fills an entire last byte even if E%8 != 0. Clear the
 		 * superfluous data bits for consistency with HW device.
@@ -840,11 +857,7 @@ process_ldpc_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 	uint16_t in_length_in_bits = K - enc->n_filler;
 	uint16_t in_length_in_bytes = (in_length_in_bits + 7) >> 3;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time = rte_rdtsc_precise();
-#else
-	RTE_SET_USED(q_stats);
-#endif
 
 	in = rte_pktmbuf_mtod_offset(m_in, uint8_t *, in_offset);
 
@@ -864,6 +877,12 @@ process_ldpc_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		crc_req.len = in_length_in_bits - 24;
 		crc_resp.data = q->enc_in;
 		bblib_lte_crc24b_gen(&crc_req, &crc_resp);
+	} else if (enc->op_flags & RTE_BBDEV_LDPC_CRC_16_ATTACH) {
+		rte_memcpy(q->enc_in, in, in_length_in_bytes - 2);
+		crc_req.data = in;
+		crc_req.len = in_length_in_bits - 16;
+		crc_resp.data = q->enc_in;
+		bblib_lte_crc16_gen(&crc_req, &crc_resp);
 	} else
 		rte_memcpy(q->enc_in, in, in_length_in_bytes);
 
@@ -938,9 +957,7 @@ process_ldpc_enc_cb(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 	rte_memcpy(rm_out, q->deint_output, out_len);
 	enc->output.length += out_len;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 #else
 	RTE_SET_USED(q);
 	RTE_SET_USED(op);
@@ -991,7 +1008,7 @@ enqueue_enc_one_op(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		(enc->op_flags & RTE_BBDEV_TURBO_CRC_24A_ATTACH))
 		crc24_bits = 24;
 
-	if (enc->code_block_mode == 0) { /* For Transport Block mode */
+	if (enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		c = enc->tb_params.c;
 		r = enc->tb_params.r;
 	} else {/* For Code Block mode */
@@ -1003,7 +1020,7 @@ enqueue_enc_one_op(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 
 		seg_total_left = rte_pktmbuf_data_len(m_in) - in_offset;
 
-		if (enc->code_block_mode == 0) {
+		if (enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			k = (r < enc->tb_params.c_neg) ?
 				enc->tb_params.k_neg : enc->tb_params.k_pos;
 			ncb = (r < enc->tb_params.c_neg) ?
@@ -1085,7 +1102,7 @@ enqueue_ldpc_enc_one_op(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 		(enc->op_flags & RTE_BBDEV_TURBO_CRC_24A_ATTACH))
 		crc24_bits = 24;
 
-	if (enc->code_block_mode == 0) { /* For Transport Block mode */
+	if (enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		c = enc->tb_params.c;
 		r = enc->tb_params.r;
 	} else { /* For Code Block mode */
@@ -1097,7 +1114,7 @@ enqueue_ldpc_enc_one_op(struct turbo_sw_queue *q, struct rte_bbdev_enc_op *op,
 
 		seg_total_left = rte_pktmbuf_data_len(m_in) - in_offset;
 
-		if (enc->code_block_mode == 0) {
+		if (enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 			e = (r < enc->tb_params.cab) ?
 				enc->tb_params.ea : enc->tb_params.eb;
 		} else {
@@ -1140,9 +1157,7 @@ enqueue_enc_all_ops(struct turbo_sw_queue *q, struct rte_bbdev_enc_op **ops,
 		uint16_t nb_ops, struct rte_bbdev_stats *queue_stats)
 {
 	uint16_t i;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	queue_stats->acc_offload_cycles = 0;
-#endif
 
 	for (i = 0; i < nb_ops; ++i)
 		enqueue_enc_one_op(q, ops[i], queue_stats);
@@ -1157,9 +1172,7 @@ enqueue_ldpc_enc_all_ops(struct turbo_sw_queue *q,
 		uint16_t nb_ops, struct rte_bbdev_stats *queue_stats)
 {
 	uint16_t i;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	queue_stats->acc_offload_cycles = 0;
-#endif
 
 	for (i = 0; i < nb_ops; ++i)
 		enqueue_ldpc_enc_one_op(q, ops[i], queue_stats);
@@ -1206,11 +1219,7 @@ process_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 	struct bblib_turbo_decoder_request turbo_req;
 	struct bblib_turbo_decoder_response turbo_resp;
 	struct rte_bbdev_op_turbo_dec *dec = &op->turbo_dec;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time;
-#else
-	RTE_SET_USED(q_stats);
-#endif
 
 	k_idx = compute_idx(k);
 
@@ -1235,14 +1244,11 @@ process_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 		deint_req.ncb = ncb;
 		deint_resp.pinteleavebuffer = q->deint_output;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
-	start_time = rte_rdtsc_precise();
-#endif
+		start_time = rte_rdtsc_precise();
 		/* Sub-block De-Interleaving */
 		bblib_deinterleave_ul(&deint_req, &deint_resp);
-#ifdef RTE_BBDEV_OFFLOAD_COST
-	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
+
+		q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
 	} else
 		move_padding_bytes(in, q->deint_output, k, ncb);
 
@@ -1262,14 +1268,12 @@ process_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 	adapter_req.pinteleavebuffer = adapter_input;
 	adapter_resp.pharqout = q->adapter_output;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	start_time = rte_rdtsc_precise();
-#endif
+
 	/* Turbo decode adaptation */
 	bblib_turbo_adapter_ul(&adapter_req, &adapter_resp);
-#ifdef RTE_BBDEV_OFFLOAD_COST
+
 	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 
 	out = (uint8_t *)mbuf_append(m_out_head, m_out,
 			((k - crc24_overlap) >> 3));
@@ -1296,14 +1300,12 @@ process_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 	turbo_resp.cb_buf = q->code_block;
 	turbo_resp.output = out;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	start_time = rte_rdtsc_precise();
-#endif
+
 	/* Turbo decode */
 	iter_cnt = bblib_turbo_decoder(&turbo_req, &turbo_resp);
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
+
 	dec->hard_output.length += (k >> 3);
 
 	if (iter_cnt > 0) {
@@ -1366,11 +1368,7 @@ process_ldpc_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 	K = sys_cols * dec->z_c;
 	parity_offset = K - 2 * dec->z_c;
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time = rte_rdtsc_precise();
-#else
-	RTE_SET_USED(q_stats);
-#endif
 
 	in = rte_pktmbuf_mtod_offset(m_in, uint8_t *, in_offset);
 
@@ -1475,11 +1473,18 @@ process_ldpc_dec_cb(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 			bblib_lte_crc24a_check(&crc_req, &crc_resp);
 		if (!crc_resp.check_passed)
 			op->status |= 1 << RTE_BBDEV_CRC_ERROR;
+	} else if (check_bit(dec->op_flags, RTE_BBDEV_LDPC_CRC_TYPE_16_CHECK)) {
+		crc_req.data = adapter_input;
+		crc_req.len  = K - dec->n_filler - 16;
+		crc_resp.check_passed = false;
+		crc_resp.data = adapter_input;
+		bblib_lte_crc16_check(&crc_req, &crc_resp);
+		if (!crc_resp.check_passed)
+			op->status |= 1 << RTE_BBDEV_CRC_ERROR;
 	}
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	q_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
+
 	if (check_bit(dec->op_flags, RTE_BBDEV_LDPC_HQ_COMBINE_OUT_ENABLE)) {
 		harq_out = NULL;
 		if (m_harq_out != NULL) {
@@ -1554,7 +1559,7 @@ enqueue_dec_one_op(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 		return;
 	}
 
-	if (dec->code_block_mode == 0) { /* For Transport Block mode */
+	if (dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		c = dec->tb_params.c;
 	} else { /* For Code Block mode */
 		k = dec->cb_params.k;
@@ -1566,7 +1571,7 @@ enqueue_dec_one_op(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 		crc24_overlap = 24;
 
 	while (mbuf_total_left > 0) {
-		if (dec->code_block_mode == 0)
+		if (dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK)
 			k = (r < dec->tb_params.c_neg) ?
 				dec->tb_params.k_neg : dec->tb_params.k_pos;
 
@@ -1642,7 +1647,7 @@ enqueue_ldpc_dec_one_op(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 		return;
 	}
 
-	if (dec->code_block_mode == 0) { /* For Transport Block mode */
+	if (dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		c = dec->tb_params.c;
 		e = dec->tb_params.ea;
 	} else { /* For Code Block mode */
@@ -1657,7 +1662,7 @@ enqueue_ldpc_dec_one_op(struct turbo_sw_queue *q, struct rte_bbdev_dec_op *op,
 	out_length = ((out_length - crc24_overlap - dec->n_filler) >> 3);
 
 	while (mbuf_total_left > 0) {
-		if (dec->code_block_mode == 0)
+		if (dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK)
 			e = (r < dec->tb_params.cab) ?
 				dec->tb_params.ea : dec->tb_params.eb;
 		/* Special case handling when overusing mbuf */
@@ -1710,9 +1715,7 @@ enqueue_dec_all_ops(struct turbo_sw_queue *q, struct rte_bbdev_dec_op **ops,
 		uint16_t nb_ops, struct rte_bbdev_stats *queue_stats)
 {
 	uint16_t i;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	queue_stats->acc_offload_cycles = 0;
-#endif
 
 	for (i = 0; i < nb_ops; ++i)
 		enqueue_dec_one_op(q, ops[i], queue_stats);
@@ -1727,9 +1730,7 @@ enqueue_ldpc_dec_all_ops(struct turbo_sw_queue *q,
 		uint16_t nb_ops, struct rte_bbdev_stats *queue_stats)
 {
 	uint16_t i;
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	queue_stats->acc_offload_cycles = 0;
-#endif
 
 	for (i = 0; i < nb_ops; ++i)
 		enqueue_ldpc_dec_one_op(q, ops[i], queue_stats);
@@ -1885,8 +1886,7 @@ parse_turbo_sw_params(struct turbo_sw_params *params, const char *input_args)
 	}
 
 exit:
-	if (kvlist)
-		rte_kvargs_free(kvlist);
+	rte_kvargs_free(kvlist);
 	return ret;
 }
 
@@ -1990,10 +1990,3 @@ RTE_PMD_REGISTER_PARAM_STRING(DRIVER_NAME,
 	TURBO_SW_MAX_NB_QUEUES_ARG"=<int> "
 	TURBO_SW_SOCKET_ID_ARG"=<int>");
 RTE_PMD_REGISTER_ALIAS(DRIVER_NAME, turbo_sw);
-
-RTE_INIT(turbo_sw_bbdev_init_log)
-{
-	bbdev_turbo_sw_logtype = rte_log_register("pmd.bb.turbo_sw");
-	if (bbdev_turbo_sw_logtype >= 0)
-		rte_log_set_level(bbdev_turbo_sw_logtype, RTE_LOG_NOTICE);
-}

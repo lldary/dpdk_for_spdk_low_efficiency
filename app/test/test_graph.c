@@ -1,20 +1,34 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(C) 2020 Marvell International Ltd.
  */
+
+#include "test.h"
+
 #include <assert.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <stdalign.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #include <rte_errno.h>
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_node_list_dump(void)
+{
+	printf("node_list_dump not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
+
 #include <rte_graph.h>
 #include <rte_graph_worker.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_dyn.h>
 #include <rte_random.h>
-
-#include "test.h"
 
 static uint16_t test_node_worker_source(struct rte_graph *graph,
 					struct rte_node *node, void **objs,
@@ -38,6 +52,16 @@ static uint16_t test_node3_worker(struct rte_graph *graph,
 
 #define MBUFF_SIZE 512
 #define MAX_NODES  4
+
+typedef uint64_t graph_dynfield_t;
+static int graph_dynfield_offset = -1;
+
+static inline graph_dynfield_t *
+graph_field(struct rte_mbuf *mbuf)
+{
+	return RTE_MBUF_DYNFIELD(mbuf, \
+			graph_dynfield_offset, graph_dynfield_t *);
+}
 
 static struct rte_mbuf mbuf[MAX_NODES + 1][MBUFF_SIZE];
 static void *mbuf_p[MAX_NODES + 1][MBUFF_SIZE];
@@ -162,9 +186,9 @@ test_node_worker_source(struct rte_graph *graph, struct rte_node *node,
 	next_stream = rte_node_next_stream_get(graph, node, next, obj_node0);
 	for (i = 0; i < obj_node0; i++) {
 		data = &mbuf[0][i];
-		data->udata64 = ((uint64_t)tm->test_node[0].idx << 32) | i;
+		*graph_field(data) = ((uint64_t)tm->test_node[0].idx << 32) | i;
 		if ((i + 1) == obj_node0)
-			data->udata64 |= (1 << 16);
+			*graph_field(data) |= (1 << 16);
 		next_stream[i] = &mbuf[0][i];
 	}
 	rte_node_next_stream_put(graph, node, next, obj_node0);
@@ -175,9 +199,9 @@ test_node_worker_source(struct rte_graph *graph, struct rte_node *node,
 	next_stream = rte_node_next_stream_get(graph, node, next, obj_node1);
 	for (i = 0; i < obj_node1; i++) {
 		data = &mbuf[0][obj_node0 + i];
-		data->udata64 = ((uint64_t)tm->test_node[1].idx << 32) | i;
+		*graph_field(data) = ((uint64_t)tm->test_node[1].idx << 32) | i;
 		if ((i + 1) == obj_node1)
-			data->udata64 |= (1 << 16);
+			*graph_field(data) |= (1 << 16);
 		next_stream[i] = &mbuf[0][obj_node0 + i];
 	}
 
@@ -205,23 +229,23 @@ test_node0_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 
 		for (i = 0; i < nb_objs; i++) {
 			data = (struct rte_mbuf *)objs[i];
-			if ((data->udata64 >> 32) != tm->test_node[0].idx) {
+			if ((*graph_field(data) >> 32) != tm->test_node[0].idx) {
 				printf("Data idx miss match at node 0, expected"
 				       " = %u got = %u\n",
 				       tm->test_node[0].idx,
-				       (uint32_t)(data->udata64 >> 32));
+				       (uint32_t)(*graph_field(data) >> 32));
 				goto end;
 			}
 
-			if ((data->udata64 & 0xffff) != (i - count)) {
+			if ((*graph_field(data) & 0xffff) != (i - count)) {
 				printf("Expected buff count miss match at "
 				       "node 0\n");
 				goto end;
 			}
 
-			if (data->udata64 & (0x1 << 16))
+			if (*graph_field(data) & (0x1 << 16))
 				count = i + 1;
-			if (data->udata64 & (0x1 << 17))
+			if (*graph_field(data) & (0x1 << 17))
 				second_pass = 1;
 		}
 
@@ -233,12 +257,12 @@ test_node0_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 		obj_node0 = nb_objs * obj_node0 * 0.01;
 		for (i = 0; i < obj_node0; i++) {
 			data = &mbuf[1][i];
-			data->udata64 =
+			*graph_field(data) =
 				((uint64_t)tm->test_node[1].idx << 32) | i;
 			if ((i + 1) == obj_node0)
-				data->udata64 |= (1 << 16);
+				*graph_field(data) |= (1 << 16);
 			if (second_pass)
-				data->udata64 |= (1 << 17);
+				*graph_field(data) |= (1 << 17);
 		}
 		rte_node_enqueue(graph, node, 0, (void **)&mbuf_p[1][0],
 				 obj_node0);
@@ -246,12 +270,12 @@ test_node0_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 		obj_node1 = nb_objs - obj_node0;
 		for (i = 0; i < obj_node1; i++) {
 			data = &mbuf[1][obj_node0 + i];
-			data->udata64 =
+			*graph_field(data) =
 				((uint64_t)tm->test_node[2].idx << 32) | i;
 			if ((i + 1) == obj_node1)
-				data->udata64 |= (1 << 16);
+				*graph_field(data) |= (1 << 16);
 			if (second_pass)
-				data->udata64 |= (1 << 17);
+				*graph_field(data) |= (1 << 17);
 		}
 		rte_node_enqueue(graph, node, 1, (void **)&mbuf_p[1][obj_node0],
 				 obj_node1);
@@ -285,22 +309,22 @@ test_node1_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 	fn_calls[2] += 1;
 	for (i = 0; i < nb_objs; i++) {
 		data = (struct rte_mbuf *)objs[i];
-		if ((data->udata64 >> 32) != tm->test_node[1].idx) {
+		if ((*graph_field(data) >> 32) != tm->test_node[1].idx) {
 			printf("Data idx miss match at node 1, expected = %u"
 			       " got = %u\n",
 			       tm->test_node[1].idx,
-			       (uint32_t)(data->udata64 >> 32));
+			       (uint32_t)(*graph_field(data) >> 32));
 			goto end;
 		}
 
-		if ((data->udata64 & 0xffff) != (i - count)) {
+		if ((*graph_field(data) & 0xffff) != (i - count)) {
 			printf("Expected buff count miss match at node 1\n");
 			goto end;
 		}
 
-		if (data->udata64 & (0x1 << 16))
+		if (*graph_field(data) & (0x1 << 16))
 			count = i + 1;
-		if (data->udata64 & (0x1 << 17))
+		if (*graph_field(data) & (0x1 << 17))
 			second_pass = 1;
 	}
 
@@ -312,11 +336,11 @@ test_node1_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 	obj_node0 = nb_objs;
 	for (i = 0; i < obj_node0; i++) {
 		data = &mbuf[2][i];
-		data->udata64 = ((uint64_t)tm->test_node[2].idx << 32) | i;
+		*graph_field(data) = ((uint64_t)tm->test_node[2].idx << 32) | i;
 		if ((i + 1) == obj_node0)
-			data->udata64 |= (1 << 16);
+			*graph_field(data) |= (1 << 16);
 		if (second_pass)
-			data->udata64 |= (1 << 17);
+			*graph_field(data) |= (1 << 17);
 	}
 	rte_node_enqueue(graph, node, 0, (void **)&mbuf_p[2][0], obj_node0);
 
@@ -339,22 +363,22 @@ test_node2_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 	fn_calls[3] += 1;
 	for (i = 0; i < nb_objs; i++) {
 		data = (struct rte_mbuf *)objs[i];
-		if ((data->udata64 >> 32) != tm->test_node[2].idx) {
+		if ((*graph_field(data) >> 32) != tm->test_node[2].idx) {
 			printf("Data idx miss match at node 2, expected = %u"
 			       " got = %u\n",
 			       tm->test_node[2].idx,
-			       (uint32_t)(data->udata64 >> 32));
+			       (uint32_t)(*graph_field(data) >> 32));
 			goto end;
 		}
 
-		if ((data->udata64 & 0xffff) != (i - count)) {
+		if ((*graph_field(data) & 0xffff) != (i - count)) {
 			printf("Expected buff count miss match at node 2\n");
 			goto end;
 		}
 
-		if (data->udata64 & (0x1 << 16))
+		if (*graph_field(data) & (0x1 << 16))
 			count = i + 1;
-		if (data->udata64 & (0x1 << 17))
+		if (*graph_field(data) & (0x1 << 17))
 			second_pass = 1;
 	}
 
@@ -367,10 +391,10 @@ test_node2_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 		obj_node0 = nb_objs;
 		for (i = 0; i < obj_node0; i++) {
 			data = &mbuf[3][i];
-			data->udata64 =
+			*graph_field(data) =
 				((uint64_t)tm->test_node[3].idx << 32) | i;
 			if ((i + 1) == obj_node0)
-				data->udata64 |= (1 << 16);
+				*graph_field(data) |= (1 << 16);
 		}
 		rte_node_enqueue(graph, node, 0, (void **)&mbuf_p[3][0],
 				 obj_node0);
@@ -395,22 +419,22 @@ test_node3_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 	fn_calls[4] += 1;
 	for (i = 0; i < nb_objs; i++) {
 		data = (struct rte_mbuf *)objs[i];
-		if ((data->udata64 >> 32) != tm->test_node[3].idx) {
+		if ((*graph_field(data) >> 32) != tm->test_node[3].idx) {
 			printf("Data idx miss match at node 3, expected = %u"
 			       " got = %u\n",
 			       tm->test_node[3].idx,
-			       (uint32_t)(data->udata64 >> 32));
+			       (uint32_t)(*graph_field(data) >> 32));
 			goto end;
 		}
 
-		if ((data->udata64 & 0xffff) != (i - count)) {
+		if ((*graph_field(data) & 0xffff) != (i - count)) {
 			printf("Expected buff count miss match at node 3\n");
 			goto end;
 		}
 
-		if (data->udata64 & (0x1 << 16))
+		if (*graph_field(data) & (0x1 << 16))
 			count = i + 1;
-		if (data->udata64 & (0x1 << 17))
+		if (*graph_field(data) & (0x1 << 17))
 			second_pass = 1;
 	}
 
@@ -426,11 +450,11 @@ test_node3_worker(struct rte_graph *graph, struct rte_node *node, void **objs,
 		obj_node0 = nb_objs * 2;
 		for (i = 0; i < obj_node0; i++) {
 			data = &mbuf[4][i];
-			data->udata64 =
+			*graph_field(data) =
 				((uint64_t)tm->test_node[0].idx << 32) | i;
-			data->udata64 |= (1 << 17);
+			*graph_field(data) |= (1 << 17);
 			if ((i + 1) == obj_node0)
-				data->udata64 |= (1 << 16);
+				*graph_field(data) |= (1 << 16);
 		}
 		rte_node_enqueue(graph, node, 0, (void **)&mbuf_p[4][0],
 				 obj_node0);
@@ -526,6 +550,12 @@ test_node_clone(void)
 
 	node_id = rte_node_from_name("test_node00");
 	tm->test_node[0].idx = node_id;
+
+	dummy_id = rte_node_clone(node_id, "test_node00");
+	if (rte_node_is_invalid(dummy_id)) {
+		printf("Got invalid id when clone, Expecting fail\n");
+		return -1;
+	}
 
 	/* Clone with same name, should fail */
 	dummy_id = rte_node_clone(node_id, "test_node00");
@@ -629,6 +659,144 @@ test_create_graph(void)
 		return -1;
 	}
 	return 0;
+}
+
+static int
+test_graph_clone(void)
+{
+	rte_graph_t cloned_graph_id = RTE_GRAPH_ID_INVALID;
+	rte_graph_t main_graph_id = RTE_GRAPH_ID_INVALID;
+	struct rte_graph_param graph_conf = {0};
+	int ret = 0;
+
+	main_graph_id = rte_graph_from_name("worker0");
+	if (main_graph_id == RTE_GRAPH_ID_INVALID) {
+		printf("Must create main graph first\n");
+		ret = -1;
+	}
+
+	graph_conf.dispatch.mp_capacity = 1024;
+	graph_conf.dispatch.wq_size_max = 32;
+
+	cloned_graph_id = rte_graph_clone(main_graph_id, "cloned-test0", &graph_conf);
+
+	if (cloned_graph_id == RTE_GRAPH_ID_INVALID) {
+		printf("Graph creation failed with error = %d\n", rte_errno);
+		ret = -1;
+	}
+
+	if (strcmp(rte_graph_id_to_name(cloned_graph_id), "worker0-cloned-test0")) {
+		printf("Cloned graph should name as %s but get %s\n", "worker0-cloned-test",
+		       rte_graph_id_to_name(cloned_graph_id));
+		ret = -1;
+	}
+
+	rte_graph_destroy(cloned_graph_id);
+
+	return ret;
+}
+
+static int
+test_graph_model_mcore_dispatch_node_lcore_affinity_set(void)
+{
+	rte_graph_t cloned_graph_id = RTE_GRAPH_ID_INVALID;
+	unsigned int worker_lcore = RTE_MAX_LCORE;
+	struct rte_graph_param graph_conf = {0};
+	rte_node_t nid = RTE_NODE_ID_INVALID;
+	char node_name[64] = "test_node00";
+	struct rte_node *node;
+	int ret = 0;
+
+	worker_lcore = rte_get_next_lcore(worker_lcore, true, 1);
+	ret = rte_graph_model_mcore_dispatch_node_lcore_affinity_set(node_name, worker_lcore);
+	if (ret == 0)
+		printf("Set node %s affinity to lcore %u\n", node_name, worker_lcore);
+
+	nid = rte_node_from_name(node_name);
+	cloned_graph_id = rte_graph_clone(graph_id, "cloned-test1", &graph_conf);
+	node = rte_graph_node_get(cloned_graph_id, nid);
+
+	if (node->dispatch.lcore_id != worker_lcore) {
+		printf("set node affinity failed\n");
+		ret = -1;
+	}
+
+	rte_graph_destroy(cloned_graph_id);
+
+	return ret;
+}
+
+static int
+test_graph_model_mcore_dispatch_core_bind_unbind(void)
+{
+	rte_graph_t cloned_graph_id = RTE_GRAPH_ID_INVALID;
+	unsigned int worker_lcore = RTE_MAX_LCORE;
+	struct rte_graph_param graph_conf = {0};
+	struct rte_graph *graph;
+	int ret = 0;
+
+	worker_lcore = rte_get_next_lcore(worker_lcore, true, 1);
+	cloned_graph_id = rte_graph_clone(graph_id, "cloned-test2", &graph_conf);
+
+	ret = rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH);
+	if (ret != 0) {
+		printf("Set graph mcore dispatch model failed\n");
+		goto fail;
+	}
+
+	ret = rte_graph_model_mcore_dispatch_core_bind(cloned_graph_id, worker_lcore);
+	if (ret != 0) {
+		printf("bind graph %d to lcore %u failed\n", graph_id, worker_lcore);
+		goto fail;
+	}
+
+	graph = rte_graph_lookup("worker0-cloned-test2");
+
+	if (graph->dispatch.lcore_id != worker_lcore) {
+		printf("bind graph %s(id:%d) with lcore %u failed\n",
+		       graph->name, graph->id, worker_lcore);
+		ret = -1;
+		goto fail;
+	}
+
+	rte_graph_model_mcore_dispatch_core_unbind(cloned_graph_id);
+	if (graph->dispatch.lcore_id != RTE_MAX_LCORE) {
+		printf("unbind graph %s(id:%d) failed %d\n",
+		       graph->name, graph->id, graph->dispatch.lcore_id);
+		ret = -1;
+	}
+
+fail:
+	rte_graph_destroy(cloned_graph_id);
+
+	return ret;
+}
+
+static int
+test_graph_worker_model_set_get(void)
+{
+	rte_graph_t cloned_graph_id = RTE_GRAPH_ID_INVALID;
+	struct rte_graph_param graph_conf = {0};
+	struct rte_graph *graph;
+	int ret = 0;
+
+	cloned_graph_id = rte_graph_clone(graph_id, "cloned-test3", &graph_conf);
+	ret = rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH);
+	if (ret != 0) {
+		printf("Set graph mcore dispatch model failed\n");
+		goto fail;
+	}
+
+	graph = rte_graph_lookup("worker0-cloned-test3");
+	if (rte_graph_worker_model_get(graph) != RTE_GRAPH_MODEL_MCORE_DISPATCH) {
+		printf("Get graph worker model failed\n");
+		ret = -1;
+	}
+
+fail:
+	rte_graph_destroy(cloned_graph_id);
+
+	return ret;
 }
 
 static int
@@ -765,6 +933,18 @@ graph_setup(void)
 {
 	int i, j;
 
+	static const struct rte_mbuf_dynfield graph_dynfield_desc = {
+		.name = "test_graph_dynfield",
+		.size = sizeof(graph_dynfield_t),
+		.align = alignof(graph_dynfield_t),
+	};
+	graph_dynfield_offset =
+		rte_mbuf_dynfield_register(&graph_dynfield_desc);
+	if (graph_dynfield_offset < 0) {
+		printf("Cannot register mbuf field\n");
+		return TEST_FAILED;
+	}
+
 	for (i = 0; i <= MAX_NODES; i++) {
 		for (j = 0; j < MBUFF_SIZE; j++)
 			mbuf_p[i][j] = &mbuf[i][j];
@@ -796,6 +976,10 @@ static struct unit_test_suite graph_testsuite = {
 		TEST_CASE(test_update_edges),
 		TEST_CASE(test_lookup_functions),
 		TEST_CASE(test_create_graph),
+		TEST_CASE(test_graph_clone),
+		TEST_CASE(test_graph_model_mcore_dispatch_node_lcore_affinity_set),
+		TEST_CASE(test_graph_model_mcore_dispatch_core_bind_unbind),
+		TEST_CASE(test_graph_worker_model_set_get),
 		TEST_CASE(test_graph_lookup_functions),
 		TEST_CASE(test_graph_walk),
 		TEST_CASE(test_print_stats),
@@ -809,7 +993,7 @@ graph_autotest_fn(void)
 	return unit_test_suite_runner(&graph_testsuite);
 }
 
-REGISTER_TEST_COMMAND(graph_autotest, graph_autotest_fn);
+REGISTER_FAST_TEST(graph_autotest, true, true, graph_autotest_fn);
 
 static int
 test_node_list_dump(void)
@@ -818,4 +1002,7 @@ test_node_list_dump(void)
 
 	return TEST_SUCCESS;
 }
-REGISTER_TEST_COMMAND(node_list_dump, test_node_list_dump);
+
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_FAST_TEST(node_list_dump, true, true, test_node_list_dump);

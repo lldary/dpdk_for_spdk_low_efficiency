@@ -20,7 +20,6 @@
 #include <rte_cycles.h>
 #include <rte_per_lcore.h>
 #include <rte_lcore.h>
-#include <rte_atomic.h>
 #include <rte_branch_prediction.h>
 #include <rte_memory.h>
 #include <rte_mempool.h>
@@ -54,7 +53,7 @@ arp_op_name(uint16_t arp_op)
 	default:
 		break;
 	}
-	return "Unkwown ARP op";
+	return "Unknown ARP op";
 }
 
 static const char *
@@ -270,7 +269,7 @@ ipv4_hdr_cksum(struct rte_ipv4_hdr *ip_h)
  * Receive a burst of packets, lookup for ICMP echo requests, and, if any,
  * send back ICMP echo replies.
  */
-static void
+static bool
 reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 {
 	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
@@ -281,10 +280,8 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 	struct rte_ipv4_hdr *ip_h;
 	struct rte_icmp_hdr *icmp_h;
 	struct rte_ether_addr eth_addr;
-	uint32_t retry;
 	uint32_t ip_addr;
 	uint16_t nb_rx;
-	uint16_t nb_tx;
 	uint16_t nb_replies;
 	uint16_t eth_type;
 	uint16_t vlan_id;
@@ -293,28 +290,14 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 	uint32_t cksum;
 	uint8_t  i;
 	int l2_len;
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	uint64_t start_tsc;
-	uint64_t end_tsc;
-	uint64_t core_cycles;
-#endif
-
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	start_tsc = rte_rdtsc();
-#endif
 
 	/*
 	 * First, receive a burst of packets.
 	 */
-	nb_rx = rte_eth_rx_burst(fs->rx_port, fs->rx_queue, pkts_burst,
-				 nb_pkt_per_burst);
+	nb_rx = common_fwd_stream_receive(fs, pkts_burst, nb_pkt_per_burst);
 	if (unlikely(nb_rx == 0))
-		return;
+		return false;
 
-#ifdef RTE_TEST_PMD_RECORD_BURST_STATS
-	fs->rx_burst_stats.pkt_burst_spread[nb_rx]++;
-#endif
-	fs->rx_packets += nb_rx;
 	nb_replies = 0;
 	for (i = 0; i < nb_rx; i++) {
 		if (likely(i < nb_rx - 1))
@@ -327,8 +310,8 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 		if (verbose_level > 0) {
 			printf("\nPort %d pkt-len=%u nb-segs=%u\n",
 			       fs->rx_port, pkt->pkt_len, pkt->nb_segs);
-			ether_addr_dump("  ETH:  src=", &eth_h->s_addr);
-			ether_addr_dump(" dst=", &eth_h->d_addr);
+			ether_addr_dump("  ETH:  src=", &eth_h->src_addr);
+			ether_addr_dump(" dst=", &eth_h->dst_addr);
 		}
 		if (eth_type == RTE_ETHER_TYPE_VLAN) {
 			vlan_h = (struct rte_vlan_hdr *)
@@ -393,17 +376,17 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 			 */
 
 			/* Use source MAC address as destination MAC address. */
-			rte_ether_addr_copy(&eth_h->s_addr, &eth_h->d_addr);
+			rte_ether_addr_copy(&eth_h->src_addr, &eth_h->dst_addr);
 			/* Set source MAC address with MAC address of TX port */
 			rte_ether_addr_copy(&ports[fs->tx_port].eth_addr,
-					&eth_h->s_addr);
+					&eth_h->src_addr);
 
 			arp_h->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
 			rte_ether_addr_copy(&arp_h->arp_data.arp_tha,
 					&eth_addr);
 			rte_ether_addr_copy(&arp_h->arp_data.arp_sha,
 					&arp_h->arp_data.arp_tha);
-			rte_ether_addr_copy(&eth_h->s_addr,
+			rte_ether_addr_copy(&eth_h->src_addr,
 					&arp_h->arp_data.arp_sha);
 
 			/* Swap IP addresses in ARP payload */
@@ -461,9 +444,9 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 		 * ICMP checksum is computed by assuming it is valid in the
 		 * echo request and not verified.
 		 */
-		rte_ether_addr_copy(&eth_h->s_addr, &eth_addr);
-		rte_ether_addr_copy(&eth_h->d_addr, &eth_h->s_addr);
-		rte_ether_addr_copy(&eth_addr, &eth_h->d_addr);
+		rte_ether_addr_copy(&eth_h->src_addr, &eth_addr);
+		rte_ether_addr_copy(&eth_h->dst_addr, &eth_h->src_addr);
+		rte_ether_addr_copy(&eth_addr, &eth_h->dst_addr);
 		ip_addr = ip_h->src_addr;
 		if (is_multicast_ipv4_addr(ip_h->dst_addr)) {
 			uint32_t ip_src;
@@ -482,8 +465,8 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 		}
 		icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
 		cksum = ~icmp_h->icmp_cksum & 0xffff;
-		cksum += ~htons(RTE_IP_ICMP_ECHO_REQUEST << 8) & 0xffff;
-		cksum += htons(RTE_IP_ICMP_ECHO_REPLY << 8);
+		cksum += ~RTE_BE16(RTE_IP_ICMP_ECHO_REQUEST << 8) & 0xffff;
+		cksum += RTE_BE16(RTE_IP_ICMP_ECHO_REPLY << 8);
 		cksum = (cksum & 0xffff) + (cksum >> 16);
 		cksum = (cksum & 0xffff) + (cksum >> 16);
 		icmp_h->icmp_cksum = ~cksum;
@@ -491,45 +474,14 @@ reply_to_icmp_echo_rqsts(struct fwd_stream *fs)
 	}
 
 	/* Send back ICMP echo replies, if any. */
-	if (nb_replies > 0) {
-		nb_tx = rte_eth_tx_burst(fs->tx_port, fs->tx_queue, pkts_burst,
-					 nb_replies);
-		/*
-		 * Retry if necessary
-		 */
-		if (unlikely(nb_tx < nb_replies) && fs->retry_enabled) {
-			retry = 0;
-			while (nb_tx < nb_replies &&
-					retry++ < burst_tx_retry_num) {
-				rte_delay_us(burst_tx_delay_time);
-				nb_tx += rte_eth_tx_burst(fs->tx_port,
-						fs->tx_queue,
-						&pkts_burst[nb_tx],
-						nb_replies - nb_tx);
-			}
-		}
-		fs->tx_packets += nb_tx;
-#ifdef RTE_TEST_PMD_RECORD_BURST_STATS
-		fs->tx_burst_stats.pkt_burst_spread[nb_tx]++;
-#endif
-		if (unlikely(nb_tx < nb_replies)) {
-			fs->fwd_dropped += (nb_replies - nb_tx);
-			do {
-				rte_pktmbuf_free(pkts_burst[nb_tx]);
-			} while (++nb_tx < nb_replies);
-		}
-	}
+	if (nb_replies > 0)
+		common_fwd_stream_transmit(fs, pkts_burst, nb_replies);
 
-#ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
-	end_tsc = rte_rdtsc();
-	core_cycles = (end_tsc - start_tsc);
-	fs->core_cycles = (uint64_t) (fs->core_cycles + core_cycles);
-#endif
+	return true;
 }
 
 struct fwd_engine icmp_echo_engine = {
 	.fwd_mode_name  = "icmpecho",
-	.port_fwd_begin = NULL,
-	.port_fwd_end   = NULL,
+	.stream_init    = common_fwd_stream_init,
 	.packet_fwd     = reply_to_icmp_echo_rqsts,
 };

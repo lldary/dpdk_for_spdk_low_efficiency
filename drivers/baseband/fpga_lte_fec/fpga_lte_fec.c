@@ -6,24 +6,25 @@
 
 #include <rte_common.h>
 #include <rte_log.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_malloc.h>
 #include <rte_mempool.h>
 #include <rte_errno.h>
 #include <rte_pci.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_byteorder.h>
-#ifdef RTE_BBDEV_OFFLOAD_COST
 #include <rte_cycles.h>
-#endif
 
 #include <rte_bbdev.h>
 #include <rte_bbdev_pmd.h>
 
 #include "fpga_lte_fec.h"
 
-/* Turbo SW PMD logging ID */
-static int fpga_lte_fec_logtype;
+#ifdef RTE_LIBRTE_BBDEV_DEBUG
+RTE_LOG_REGISTER_DEFAULT(fpga_lte_fec_logtype, DEBUG);
+#else
+RTE_LOG_REGISTER_DEFAULT(fpga_lte_fec_logtype, NOTICE);
+#endif
 
 /* Helper macro for logging */
 #define rte_bbdev_log(level, fmt, ...) \
@@ -641,6 +642,8 @@ fpga_dev_info_get(struct rte_bbdev *dev,
 	dev_info->default_queue_conf = default_queue_conf;
 	dev_info->capabilities = bbdev_capabilities;
 	dev_info->cpu_flag_reqs = NULL;
+	dev_info->data_endianness = RTE_LITTLE_ENDIAN;
+	dev_info->device_status = RTE_BBDEV_DEV_NOT_SUPPORTED;
 
 	/* Calculates number of queues assigned to device */
 	dev_info->max_num_queues = 0;
@@ -650,6 +653,14 @@ fpga_dev_info_get(struct rte_bbdev *dev,
 		if (hw_q_id != FPGA_INVALID_HW_QUEUE_ID)
 			dev_info->max_num_queues++;
 	}
+	/* Expose number of queue per operation type */
+	dev_info->num_queues[RTE_BBDEV_OP_NONE] = 0;
+	dev_info->num_queues[RTE_BBDEV_OP_TURBO_DEC] = dev_info->max_num_queues / 2;
+	dev_info->num_queues[RTE_BBDEV_OP_TURBO_ENC] = dev_info->max_num_queues / 2;
+	dev_info->num_queues[RTE_BBDEV_OP_LDPC_DEC] = 0;
+	dev_info->num_queues[RTE_BBDEV_OP_LDPC_ENC] = 0;
+	dev_info->queue_priority[RTE_BBDEV_OP_TURBO_DEC] = 1;
+	dev_info->queue_priority[RTE_BBDEV_OP_TURBO_ENC] = 1;
 }
 
 /**
@@ -1010,17 +1021,17 @@ fpga_intr_enable(struct rte_bbdev *dev)
 	 * It ensures that callback function assigned to that descriptor will
 	 * invoked when any FPGA queue issues interrupt.
 	 */
-	for (i = 0; i < FPGA_NUM_INTR_VEC; ++i)
-		dev->intr_handle->efds[i] = dev->intr_handle->fd;
+	for (i = 0; i < FPGA_NUM_INTR_VEC; ++i) {
+		if (rte_intr_efds_index_set(dev->intr_handle, i,
+				rte_intr_fd_get(dev->intr_handle)))
+			return -rte_errno;
+	}
 
-	if (!dev->intr_handle->intr_vec) {
-		dev->intr_handle->intr_vec = rte_zmalloc("intr_vec",
-				dev->data->num_queues * sizeof(int), 0);
-		if (!dev->intr_handle->intr_vec) {
-			rte_bbdev_log(ERR, "Failed to allocate %u vectors",
-					dev->data->num_queues);
-			return -ENOMEM;
-		}
+	if (rte_intr_vec_list_alloc(dev->intr_handle, "intr_vec",
+			dev->data->num_queues)) {
+		rte_bbdev_log(ERR, "Failed to allocate %u vectors",
+				dev->data->num_queues);
+		return -ENOMEM;
 	}
 
 	ret = rte_intr_enable(dev->intr_handle);
@@ -1060,28 +1071,20 @@ static inline void
 fpga_dma_enqueue(struct fpga_queue *q, uint16_t num_desc,
 		struct rte_bbdev_stats *queue_stats)
 {
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	uint64_t start_time = 0;
 	queue_stats->acc_offload_cycles = 0;
-#else
-	RTE_SET_USED(queue_stats);
-#endif
 
 	/* Update tail and shadow_tail register */
 	q->tail = (q->tail + num_desc) & q->sw_ring_wrap_mask;
 
 	rte_wmb();
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	/* Start time measurement for enqueue function offload. */
 	start_time = rte_rdtsc_precise();
-#endif
 	mmio_write_16(q->shadow_tail_addr, q->tail);
 
-#ifdef RTE_BBDEV_OFFLOAD_COST
 	rte_wmb();
 	queue_stats->acc_offload_cycles += rte_rdtsc_precise() - start_time;
-#endif
 }
 
 /* Calculates number of CBs in processed encoder TB based on 'r' and input
@@ -1248,14 +1251,14 @@ fpga_dma_desc_te_fill(struct rte_bbdev_enc_op *op,
 	desc->offset = desc_offset;
 	/* Set inbound data buffer address */
 	desc->in_addr_hi = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(input, in_offset) >> 32);
+			rte_pktmbuf_iova_offset(input, in_offset) >> 32);
 	desc->in_addr_lw = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(input, in_offset));
+			rte_pktmbuf_iova_offset(input, in_offset));
 
 	desc->out_addr_hi = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(output, out_offset) >> 32);
+			rte_pktmbuf_iova_offset(output, out_offset) >> 32);
 	desc->out_addr_lw = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(output, out_offset));
+			rte_pktmbuf_iova_offset(output, out_offset));
 
 	/* Save software context needed for dequeue */
 	desc->op_addr = op;
@@ -1299,23 +1302,23 @@ fpga_dma_desc_td_fill(struct rte_bbdev_dec_op *op,
 	desc->done = 0;
 	/* Set inbound data buffer address */
 	desc->in_addr_hi = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(input, in_offset) >> 32);
+			rte_pktmbuf_iova_offset(input, in_offset) >> 32);
 	desc->in_addr_lw = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(input, in_offset));
+			rte_pktmbuf_iova_offset(input, in_offset));
 	desc->in_len = in_length;
 	desc->k = k;
 	desc->crc_type = !check_bit(op->turbo_dec.op_flags,
 			RTE_BBDEV_TURBO_CRC_TYPE_24B);
-	if ((op->turbo_dec.code_block_mode == 0)
+	if ((op->turbo_dec.code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK)
 		&& !check_bit(op->turbo_dec.op_flags,
 		RTE_BBDEV_TURBO_DEC_TB_CRC_24B_KEEP))
 		desc->drop_crc = 1;
 	desc->max_iter = op->turbo_dec.iter_max * 2;
 	desc->offset = desc_offset;
 	desc->out_addr_hi = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(output, out_offset) >> 32);
+			rte_pktmbuf_iova_offset(output, out_offset) >> 32);
 	desc->out_addr_lw = (uint32_t)(
-			rte_pktmbuf_mtophys_offset(output, out_offset));
+			rte_pktmbuf_iova_offset(output, out_offset));
 
 	/* Save software context needed for dequeue */
 	desc->op_addr = op;
@@ -1363,15 +1366,15 @@ validate_enc_op(struct rte_bbdev_enc_op *op)
 				turbo_enc->rv_index);
 		return -1;
 	}
-	if (turbo_enc->code_block_mode != 0 &&
-			turbo_enc->code_block_mode != 1) {
+	if (turbo_enc->code_block_mode != RTE_BBDEV_TRANSPORT_BLOCK &&
+			turbo_enc->code_block_mode != RTE_BBDEV_CODE_BLOCK) {
 		rte_bbdev_log(ERR,
 				"code_block_mode (%u) is out of range 0 <= value <= 1",
 				turbo_enc->code_block_mode);
 		return -1;
 	}
 
-	if (turbo_enc->code_block_mode == 0) {
+	if (turbo_enc->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 		tb = &turbo_enc->tb_params;
 		if ((tb->k_neg < RTE_BBDEV_TURBO_MIN_CB_SIZE
 				|| tb->k_neg > RTE_BBDEV_TURBO_MAX_CB_SIZE)
@@ -1695,15 +1698,15 @@ validate_dec_op(struct rte_bbdev_dec_op *op)
 				turbo_dec->iter_min, turbo_dec->iter_max);
 		return -1;
 	}
-	if (turbo_dec->code_block_mode != 0 &&
-			turbo_dec->code_block_mode != 1) {
+	if (turbo_dec->code_block_mode != RTE_BBDEV_TRANSPORT_BLOCK &&
+			turbo_dec->code_block_mode != RTE_BBDEV_CODE_BLOCK) {
 		rte_bbdev_log(ERR,
 				"code_block_mode (%u) is out of range 0 <= value <= 1",
 				turbo_dec->code_block_mode);
 		return -1;
 	}
 
-	if (turbo_dec->code_block_mode == 0) {
+	if (turbo_dec->code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK) {
 
 		if ((turbo_dec->op_flags &
 			RTE_BBDEV_TURBO_DEC_TB_CRC_24B_KEEP) &&
@@ -1954,7 +1957,8 @@ fpga_enqueue_enc(struct rte_bbdev_queue_data *q_data,
 		q->ring_ctrl_reg.ring_size + q->head_free_desc - q->tail - 1;
 
 	for (i = 0; i < num; ++i) {
-		if (ops[i]->turbo_enc.code_block_mode == 0) {
+		if (ops[i]->turbo_enc.code_block_mode ==
+				RTE_BBDEV_TRANSPORT_BLOCK) {
 			cbs_in_op = get_num_cbs_in_op_enc(&ops[i]->turbo_enc);
 			/* Check if there is available space for further
 			 * processing
@@ -2023,7 +2027,8 @@ fpga_enqueue_dec(struct rte_bbdev_queue_data *q_data,
 		q->ring_ctrl_reg.ring_size + q->head_free_desc - q->tail - 1;
 
 	for (i = 0; i < num; ++i) {
-		if (ops[i]->turbo_dec.code_block_mode == 0) {
+		if (ops[i]->turbo_dec.code_block_mode ==
+				RTE_BBDEV_TRANSPORT_BLOCK) {
 			cbs_in_op = get_num_cbs_in_op_dec(&ops[i]->turbo_dec);
 			/* Check if there is available space for further
 			 * processing
@@ -2091,7 +2096,7 @@ dequeue_enc_one_op_cb(struct fpga_queue *q, struct rte_bbdev_enc_op **op,
 	rte_bbdev_log_debug("DMA response desc %p", desc);
 
 	*op = desc->enc_req.op_addr;
-	/* Check the decriptor error field, return 1 on error */
+	/* Check the descriptor error field, return 1 on error */
 	desc_error = check_desc_error(desc->enc_req.error);
 	(*op)->status = desc_error << RTE_BBDEV_DATA_ERROR;
 
@@ -2133,7 +2138,7 @@ dequeue_enc_one_op_tb(struct fpga_queue *q, struct rte_bbdev_enc_op **op,
 	for (cb_idx = 0; cb_idx < cbs_in_op; ++cb_idx) {
 		desc = q->ring_addr + ((q->head_free_desc + desc_offset +
 				cb_idx) & q->sw_ring_wrap_mask);
-		/* Check the decriptor error field, return 1 on error */
+		/* Check the descriptor error field, return 1 on error */
 		desc_error = check_desc_error(desc->enc_req.error);
 		status |=  desc_error << RTE_BBDEV_DATA_ERROR;
 		rte_bbdev_log_debug("DMA response desc %p", desc);
@@ -2171,7 +2176,7 @@ dequeue_dec_one_op_cb(struct fpga_queue *q, struct rte_bbdev_dec_op **op,
 	(*op)->turbo_dec.iter_count = (desc->dec_req.iter + 2) >> 1;
 	/* crc_pass = 0 when decoder fails */
 	(*op)->status = !(desc->dec_req.crc_pass) << RTE_BBDEV_CRC_ERROR;
-	/* Check the decriptor error field, return 1 on error */
+	/* Check the descriptor error field, return 1 on error */
 	desc_error = check_desc_error(desc->enc_req.error);
 	(*op)->status |= desc_error << RTE_BBDEV_DATA_ERROR;
 	return 1;
@@ -2215,7 +2220,7 @@ dequeue_dec_one_op_tb(struct fpga_queue *q, struct rte_bbdev_dec_op **op,
 		iter_count = RTE_MAX(iter_count, (uint8_t) desc->dec_req.iter);
 		/* crc_pass = 0 when decoder fails, one fails all */
 		status |= !(desc->dec_req.crc_pass) << RTE_BBDEV_CRC_ERROR;
-		/* Check the decriptor error field, return 1 on error */
+		/* Check the descriptor error field, return 1 on error */
 		desc_error = check_desc_error(desc->enc_req.error);
 		status |= desc_error << RTE_BBDEV_DATA_ERROR;
 		rte_bbdev_log_debug("DMA response desc %p", desc);
@@ -2243,7 +2248,7 @@ fpga_dequeue_enc(struct rte_bbdev_queue_data *q_data,
 	for (i = 0; (i < num) && (dequeued_cbs < avail); ++i) {
 		op = (q->ring_addr + ((q->head_free_desc + dequeued_cbs)
 			& q->sw_ring_wrap_mask))->enc_req.op_addr;
-		if (op->turbo_enc.code_block_mode == 0)
+		if (op->turbo_enc.code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK)
 			ret = dequeue_enc_one_op_tb(q, &ops[i], dequeued_cbs);
 		else
 			ret = dequeue_enc_one_op_cb(q, &ops[i], dequeued_cbs);
@@ -2281,7 +2286,7 @@ fpga_dequeue_dec(struct rte_bbdev_queue_data *q_data,
 	for (i = 0; (i < num) && (dequeued_cbs < avail); ++i) {
 		op = (q->ring_addr + ((q->head_free_desc + dequeued_cbs)
 			& q->sw_ring_wrap_mask))->dec_req.op_addr;
-		if (op->turbo_dec.code_block_mode == 0)
+		if (op->turbo_dec.code_block_mode == RTE_BBDEV_TRANSPORT_BLOCK)
 			ret = dequeue_dec_one_op_tb(q, &ops[i], dequeued_cbs);
 		else
 			ret = dequeue_dec_one_op_cb(q, &ops[i], dequeued_cbs);
@@ -2325,7 +2330,7 @@ fpga_lte_fec_init(struct rte_bbdev *dev, struct rte_pci_driver *drv)
 
 	rte_bbdev_log_debug(
 			"Init device %s [%s] @ virtaddr %p phyaddr %#"PRIx64,
-			dev->device->driver->name, dev->data->name,
+			drv->driver.name, dev->data->name,
 			(void *)pci_dev->mem_resource[0].addr,
 			pci_dev->mem_resource[0].phys_addr);
 }
@@ -2364,7 +2369,7 @@ fpga_lte_fec_probe(struct rte_pci_driver *pci_drv,
 
 	/* Fill HW specific part of device structure */
 	bbdev->device = &pci_dev->device;
-	bbdev->intr_handle = &pci_dev->intr_handle;
+	bbdev->intr_handle = pci_dev->intr_handle;
 	bbdev->data->socket_id = pci_dev->device.numa_node;
 
 	/* Invoke FEC FPGA device initialization function */
@@ -2380,7 +2385,7 @@ fpga_lte_fec_probe(struct rte_pci_driver *pci_drv,
 		((uint16_t)(version_id >> 16)), ((uint16_t)version_id));
 
 #ifdef RTE_LIBRTE_BBDEV_DEBUG
-	if (!strcmp(bbdev->device->driver->name,
+	if (!strcmp(pci_drv->driver.name,
 			RTE_STR(FPGA_LTE_FEC_PF_DRIVER_NAME)))
 		print_static_reg_debug_info(d->mmio_base);
 #endif
@@ -2429,10 +2434,10 @@ fpga_lte_fec_remove(struct rte_pci_device *pci_dev)
 }
 
 static inline void
-set_default_fpga_conf(struct fpga_lte_fec_conf *def_conf)
+set_default_fpga_conf(struct rte_fpga_lte_fec_conf *def_conf)
 {
 	/* clear default configuration before initialization */
-	memset(def_conf, 0, sizeof(struct fpga_lte_fec_conf));
+	memset(def_conf, 0, sizeof(struct rte_fpga_lte_fec_conf));
 	/* Set pf mode to true */
 	def_conf->pf_mode_en = true;
 
@@ -2447,15 +2452,15 @@ set_default_fpga_conf(struct fpga_lte_fec_conf *def_conf)
 
 /* Initial configuration of FPGA LTE FEC device */
 int
-fpga_lte_fec_configure(const char *dev_name,
-		const struct fpga_lte_fec_conf *conf)
+rte_fpga_lte_fec_configure(const char *dev_name,
+		const struct rte_fpga_lte_fec_conf *conf)
 {
 	uint32_t payload_32, address;
 	uint16_t payload_16;
 	uint8_t payload_8;
 	uint16_t q_id, vf_id, total_q_id, total_ul_q_id, total_dl_q_id;
 	struct rte_bbdev *bbdev = rte_bbdev_get_named_dev(dev_name);
-	struct fpga_lte_fec_conf def_conf;
+	struct rte_fpga_lte_fec_conf def_conf;
 
 	if (bbdev == NULL) {
 		rte_bbdev_log(ERR,
@@ -2662,14 +2667,3 @@ RTE_PMD_REGISTER_PCI_TABLE(FPGA_LTE_FEC_PF_DRIVER_NAME,
 RTE_PMD_REGISTER_PCI(FPGA_LTE_FEC_VF_DRIVER_NAME, fpga_lte_fec_pci_vf_driver);
 RTE_PMD_REGISTER_PCI_TABLE(FPGA_LTE_FEC_VF_DRIVER_NAME,
 		pci_id_fpga_lte_fec_vf_map);
-
-RTE_INIT(fpga_lte_fec_init_log)
-{
-	fpga_lte_fec_logtype = rte_log_register("pmd.bb.fpga_lte_fec");
-	if (fpga_lte_fec_logtype >= 0)
-#ifdef RTE_LIBRTE_BBDEV_DEBUG
-		rte_log_set_level(fpga_lte_fec_logtype, RTE_LOG_DEBUG);
-#else
-		rte_log_set_level(fpga_lte_fec_logtype, RTE_LOG_NOTICE);
-#endif
-}

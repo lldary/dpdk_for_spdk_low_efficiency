@@ -171,6 +171,9 @@ parse_device_id(const char *key __rte_unused, const char *value,
 	struct pdump_tuples *pt = extra_args;
 
 	pt->device_id = strdup(value);
+	if (pt->device_id == NULL)
+		return -1;
+
 	pt->dump_by_type = DEVICE_ID;
 
 	return 0;
@@ -477,10 +480,10 @@ pdump_rxtx(struct rte_ring *ring, uint16_t vdev_id, struct pdump_stats *stats)
 		stats->tx_pkts += nb_in_txd;
 
 		if (unlikely(nb_in_txd < nb_in_deq)) {
-			do {
-				rte_pktmbuf_free(rxtx_bufs[nb_in_txd]);
-				stats->freed_pkts++;
-			} while (++nb_in_txd < nb_in_deq);
+			unsigned int drops = nb_in_deq - nb_in_txd;
+
+			rte_pktmbuf_free_bulk(&rxtx_bufs[nb_in_txd], drops);
+			stats->freed_pkts += drops;
 		}
 	}
 }
@@ -502,14 +505,12 @@ cleanup_rings(void)
 	for (i = 0; i < num_tuples; i++) {
 		pt = &pdump_t[i];
 
-		if (pt->device_id)
-			free(pt->device_id);
+		free(pt->device_id);
 
 		/* free the rings */
-		if (pt->rx_ring)
-			rte_ring_free(pt->rx_ring);
-		if (pt->tx_ring)
-			rte_ring_free(pt->tx_ring);
+		rte_ring_free(pt->rx_ring);
+		rte_ring_free(pt->tx_ring);
+		rte_mempool_free(pt->mp);
 	}
 }
 
@@ -573,8 +574,6 @@ static void
 signal_handler(int sig_num)
 {
 	if (sig_num == SIGINT) {
-		printf("\n\nSignal %d received, preparing to exit...\n",
-				sig_num);
 		quit_signal = 1;
 	}
 }
@@ -612,10 +611,7 @@ configure_vdev(uint16_t port_id)
 
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
-			port_id,
-			addr.addr_bytes[0], addr.addr_bytes[1],
-			addr.addr_bytes[2], addr.addr_bytes[3],
-			addr.addr_bytes[4], addr.addr_bytes[5]);
+			port_id, RTE_ETHER_ADDR_BYTES(&addr));
 
 	ret = rte_eth_promiscuous_enable(port_id);
 	if (ret != 0) {
@@ -906,11 +902,24 @@ dump_packets_core(void *arg)
 	return 0;
 }
 
+static unsigned int
+get_next_core(unsigned int lcore)
+{
+	lcore = rte_get_next_lcore(lcore, 1, 0);
+	if (lcore == RTE_MAX_LCORE)
+		rte_exit(EXIT_FAILURE,
+				"Max core limit %u reached for packet capture", lcore);
+	return lcore;
+}
+
 static inline void
 dump_packets(void)
 {
 	int i;
-	uint32_t lcore_id = 0;
+	unsigned int lcore_id = 0;
+
+	if (num_tuples == 0)
+		rte_exit(EXIT_FAILURE, "No device specified for capture\n");
 
 	if (!multiple_core_capture) {
 		printf(" core (%u), capture for (%d) tuples\n",
@@ -936,18 +945,18 @@ dump_packets(void)
 		return;
 	}
 
-	lcore_id = rte_get_next_lcore(lcore_id, 1, 0);
+	lcore_id = get_next_core(lcore_id);
 
 	for (i = 0; i < num_tuples; i++) {
 		rte_eal_remote_launch(dump_packets_core,
 				&pdump_t[i], lcore_id);
-		lcore_id = rte_get_next_lcore(lcore_id, 1, 0);
+		lcore_id = get_next_core(lcore_id);
 
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			rte_exit(EXIT_FAILURE, "failed to wait\n");
 	}
 
-	/* master core */
+	/* main core */
 	while (!quit_signal)
 		;
 }

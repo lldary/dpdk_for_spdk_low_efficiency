@@ -7,6 +7,7 @@
 #include <getopt.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -617,7 +618,7 @@ main(int argc, char **argv)
 {
 	int ret;
 	struct rte_ipsec_sad *sad;
-	struct rte_ipsec_sad_conf conf;
+	struct rte_ipsec_sad_conf conf = {0};
 	unsigned int lcore_id;
 
 	ret = rte_eal_init(argc, argv);
@@ -657,11 +658,11 @@ main(int argc, char **argv)
 
 	add_rules(sad, 10);
 	if (config.parallel_lookup)
-		rte_eal_mp_remote_launch(lookup, sad, SKIP_MASTER);
+		rte_eal_mp_remote_launch(lookup, sad, SKIP_MAIN);
 
 	lookup(sad);
 	if (config.parallel_lookup)
-		RTE_LCORE_FOREACH_SLAVE(lcore_id)
+		RTE_LCORE_FOREACH_WORKER(lcore_id)
 			if (rte_eal_wait_lcore(lcore_id) < 0)
 				return -1;
 

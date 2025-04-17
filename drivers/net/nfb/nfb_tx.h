@@ -10,7 +10,7 @@
 #include <nfb/nfb.h>
 #include <nfb/ndp.h>
 
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
 
@@ -70,11 +70,13 @@ nfb_eth_tx_queue_init(struct nfb_device *nfb,
 /**
  * DPDK callback to release a RX queue.
  *
- * @param dpdk_rxq
- *   Generic RX queue pointer.
+ * @param dev
+ *   Pointer to Ethernet device structure.
+ * @param qid
+ *   Receive queue index.
  */
 void
-nfb_eth_tx_queue_release(void *q);
+nfb_eth_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid);
 
 /**
  * Start traffic on Tx queue.
@@ -134,8 +136,11 @@ nfb_eth_ndp_tx(void *queue,
 
 	struct ndp_packet packets[nb_pkts];
 
-	if (unlikely(ndp->queue == NULL || nb_pkts == 0)) {
-		RTE_LOG(ERR, PMD, "TX invalid arguments!\n");
+	if (unlikely(nb_pkts == 0))
+		return 0;
+
+	if (unlikely(ndp->queue == NULL)) {
+		NFB_LOG(ERR, "TX invalid arguments");
 		return 0;
 	}
 

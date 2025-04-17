@@ -7,6 +7,16 @@
 #include <rte_string_fns.h>
 #include <string.h>
 #include "test.h"
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_table(void)
+{
+	printf("table not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+#else
+
 #include "test_table.h"
 #include "test_table_pipeline.h"
 #include "test_table_ports.h"
@@ -180,7 +190,7 @@ test_table(void)
 		}
 	}
 
-#ifdef RTE_LIBRTE_ACL
+#ifdef RTE_LIB_ACL
 	printf("\n\n\n\n************ACL tests************\n");
 	if (test_table_acl() < 0) {
 		ret = TEST_FAILED;
@@ -194,4 +204,6 @@ end:
 	return ret;
 }
 
-REGISTER_TEST_COMMAND(table_autotest, test_table);
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_FAST_TEST(table_autotest, true, true, test_table);

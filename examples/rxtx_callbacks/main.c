@@ -2,7 +2,9 @@
  * Copyright(c) 2010-2015 Intel Corporation
  */
 
+#include <stdalign.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <getopt.h>
 #include <rte_eal.h>
@@ -10,6 +12,7 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_dyn.h>
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -18,14 +21,26 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
+static int hwts_dynfield_offset = -1;
+
+static inline rte_mbuf_timestamp_t *
+hwts_field(struct rte_mbuf *mbuf)
+{
+	return RTE_MBUF_DYNFIELD(mbuf,
+			hwts_dynfield_offset, rte_mbuf_timestamp_t *);
+}
+
+typedef uint64_t tsc_t;
+static int tsc_dynfield_offset = -1;
+
+static inline tsc_t *
+tsc_field(struct rte_mbuf *mbuf)
+{
+	return RTE_MBUF_DYNFIELD(mbuf, tsc_dynfield_offset, tsc_t *);
+}
+
 static const char usage[] =
 	"%s EAL_ARGS -- [-t]\n";
-
-static const struct rte_eth_conf port_conf_default = {
-	.rxmode = {
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
-	},
-};
 
 static struct {
 	uint64_t total_cycles;
@@ -38,6 +53,7 @@ int hw_timestamping;
 #define TICKS_PER_CYCLE_SHIFT 16
 static uint64_t ticks_per_cycle_mult;
 
+/* Callback added to the RX port and applied to packets. 8< */
 static uint16_t
 add_timestamps(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
 		struct rte_mbuf **pkts, uint16_t nb_pkts,
@@ -47,10 +63,12 @@ add_timestamps(uint16_t port __rte_unused, uint16_t qidx __rte_unused,
 	uint64_t now = rte_rdtsc();
 
 	for (i = 0; i < nb_pkts; i++)
-		pkts[i]->udata64 = now;
+		*tsc_field(pkts[i]) = now;
 	return nb_pkts;
 }
+/* >8 End of callback addition and application. */
 
+/* Callback is added to the TX port. 8< */
 static uint16_t
 calc_latency(uint16_t port, uint16_t qidx __rte_unused,
 		struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
@@ -65,9 +83,9 @@ calc_latency(uint16_t port, uint16_t qidx __rte_unused,
 		rte_eth_read_clock(port, &ticks);
 
 	for (i = 0; i < nb_pkts; i++) {
-		cycles += now - pkts[i]->udata64;
+		cycles += now - *tsc_field(pkts[i]);
 		if (hw_timestamping)
-			queue_ticks += ticks - pkts[i]->timestamp;
+			queue_ticks += ticks - *hwts_field(pkts[i]);
 	}
 
 	latency_numbers.total_cycles += cycles;
@@ -91,15 +109,18 @@ calc_latency(uint16_t port, uint16_t qidx __rte_unused,
 	}
 	return nb_pkts;
 }
+/* >8 End of callback addition. */
 
 /*
  * Initialises a given port using global settings and with the rx buffers
  * coming from the mbuf_pool passed as parameter
  */
+
+ /* Port initialization. 8< */
 static inline int
 port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
-	struct rte_eth_conf port_conf = port_conf_default;
+	struct rte_eth_conf port_conf;
 	const uint16_t rx_rings = 1, tx_rings = 1;
 	uint16_t nb_rxd = RX_RING_SIZE;
 	uint16_t nb_txd = TX_RING_SIZE;
@@ -112,6 +133,8 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	if (!rte_eth_dev_is_valid_port(port))
 		return -1;
 
+	memset(&port_conf, 0, sizeof(struct rte_eth_conf));
+
 	retval = rte_eth_dev_info_get(port, &dev_info);
 	if (retval != 0) {
 		printf("Error during getting device (port %u) info: %s\n",
@@ -120,17 +143,22 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 	}
 
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+	if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 		port_conf.txmode.offloads |=
-			DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+			RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 	if (hw_timestamping) {
-		if (!(dev_info.rx_offload_capa & DEV_RX_OFFLOAD_TIMESTAMP)) {
+		if (!(dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP)) {
 			printf("\nERROR: Port %u does not support hardware timestamping\n"
 					, port);
 			return -1;
 		}
-		port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_TIMESTAMP;
+		port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+		rte_mbuf_dyn_rx_timestamp_register(&hwts_dynfield_offset, NULL);
+		if (hwts_dynfield_offset < 0) {
+			printf("ERROR: Failed to register timestamp field\n");
+			return -rte_errno;
+		}
 	}
 
 	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
@@ -197,19 +225,20 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	printf("Port %u MAC: %02"PRIx8" %02"PRIx8" %02"PRIx8
 			" %02"PRIx8" %02"PRIx8" %02"PRIx8"\n",
 			(unsigned)port,
-			addr.addr_bytes[0], addr.addr_bytes[1],
-			addr.addr_bytes[2], addr.addr_bytes[3],
-			addr.addr_bytes[4], addr.addr_bytes[5]);
+			RTE_ETHER_ADDR_BYTES(&addr));
 
 	retval = rte_eth_promiscuous_enable(port);
 	if (retval != 0)
 		return retval;
 
+	/* RX and TX callbacks are added to the ports. 8< */
 	rte_eth_add_rx_callback(port, 0, add_timestamps, NULL);
 	rte_eth_add_tx_callback(port, 0, calc_latency, NULL);
+	/* >8 End of RX and TX callbacks. */
 
 	return 0;
 }
+/* >8 End of port initialization. */
 
 /*
  * Main thread that does the work, reading from INPUT_PORT
@@ -221,7 +250,7 @@ lcore_main(void)
 	uint16_t port;
 
 	RTE_ETH_FOREACH_DEV(port)
-		if (rte_eth_dev_socket_id(port) > 0 &&
+		if (rte_eth_dev_socket_id(port) >= 0 &&
 				rte_eth_dev_socket_id(port) !=
 						(int)rte_socket_id())
 			printf("WARNING, port %u is on remote NUMA node to "
@@ -261,6 +290,11 @@ main(int argc, char *argv[])
 	};
 	int opt, option_index;
 
+	static const struct rte_mbuf_dynfield tsc_dynfield_desc = {
+		.name = "example_bbdev_dynfield_tsc",
+		.size = sizeof(tsc_t),
+		.align = alignof(tsc_t),
+	};
 
 	/* init EAL */
 	int ret = rte_eal_init(argc, argv);
@@ -292,17 +326,26 @@ main(int argc, char *argv[])
 	if (mbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
+	tsc_dynfield_offset =
+		rte_mbuf_dynfield_register(&tsc_dynfield_desc);
+	if (tsc_dynfield_offset < 0)
+		rte_exit(EXIT_FAILURE, "Cannot register mbuf field\n");
+
 	/* initialize all ports */
 	RTE_ETH_FOREACH_DEV(portid)
 		if (port_init(portid, mbuf_pool) != 0)
-			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8"\n",
+			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16"\n",
 					portid);
 
 	if (rte_lcore_count() > 1)
 		printf("\nWARNING: Too much enabled lcores - "
 			"App uses only 1 lcore\n");
 
-	/* call lcore_main on master core only */
+	/* call lcore_main on main core only */
 	lcore_main();
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
+
 	return 0;
 }

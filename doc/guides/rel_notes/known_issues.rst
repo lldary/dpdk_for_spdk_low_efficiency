@@ -118,8 +118,8 @@ HPET timers do not work on the Osage customer reference platform
    On Osage boards, the implementation of the ``rte_delay_us()`` function must be changed to not use the HPET timer.
 
 **Resolution/Workaround**:
-   This can be addressed by building the system with the ``CONFIG_RTE_LIBEAL_USE_HPET=n``
-   configuration option or by using the ``--no-hpet`` EAL option.
+   This can be addressed by building the system with ``RTE_LIBEAL_USE_HPET`` unset
+   or by using the ``--no-hpet`` EAL option.
 
 **Affected Environment/Platform**:
    The Osage customer reference platform.
@@ -127,7 +127,7 @@ HPET timers do not work on the Osage customer reference platform
    work correctly, provided the BIOS supports HPET.
 
 **Driver/Module**:
-   ``lib/librte_eal/include/rte_cycles.h``
+   ``lib/eal/include/rte_cycles.h``
 
 
 Not all variants of supported NIC types have been used in testing
@@ -249,11 +249,18 @@ PMD does not work with --no-huge EAL command line parameter
 -----------------------------------------------------------
 
 **Description**:
-   Currently, the DPDK does not store any information about memory allocated by ``malloc()` (for example, NUMA node,
-   physical address), hence PMD drivers do not work when the ``--no-huge`` command line parameter is supplied to EAL.
+   Currently, the DPDK does not store any information about memory allocated by ``malloc()``
+   (for example, NUMA node, physical address),
+   hence PMDs do not work when the ``--no-huge`` command line parameter is supplied to EAL.
+   This happens when using non-IOMMU based UIO drivers (i.e. ``igb_uio`` or ``uio_pci_generic``)
+   or when IOVA mode is explicitly set to use physical addresses
+   (via the ``--iova-mode=pa`` EAL parameter).
 
 **Implication**:
    Sending and receiving data with PMD will not work.
+   Unit tests checking ``--no-huge`` operation will fail if there is a device bound to the PMD
+   (``eal_flags_n_opt_autotest``, ``eal_flags_no_huge_autotest``,
+   ``eal_flags_vdev_opt_autotest``, ``eal_flags_misc_autotest``).
 
 **Resolution/Workaround**:
    Use huge page memory or use VFIO to map devices.
@@ -413,27 +420,6 @@ Differences in how different Intel NICs handle maximum packet length for jumbo f
 
 **Driver/Module**:
    Poll Mode Driver (PMD).
-
-
-Binding PCI devices to igb_uio fails on Linux kernel 3.9 when more than one device is used
-------------------------------------------------------------------------------------------
-
-**Description**:
-   A known bug in the uio driver included in Linux kernel version 3.9 prevents more than one PCI device to be
-   bound to the igb_uio driver.
-
-**Implication**:
-   The Poll Mode Driver (PMD) will crash on initialization.
-
-**Resolution/Workaround**:
-   Use earlier or later kernel versions, or apply the following
-   `patch  <https://github.com/torvalds/linux/commit/5ed0505c713805f89473cdc0bbfb5110dfd840cb>`_.
-
-**Affected Environment/Platform**:
-   Linux systems with kernel version 3.9
-
-**Driver/Module**:
-   igb_uio module
 
 
 GCC might generate Intel® AVX instructions for processors without Intel® AVX support
@@ -614,7 +600,7 @@ I40e VF may not receive packets in the promiscuous mode
    Poll Mode Driver (PMD).
 
 
-uio pci generic module bind failed in X710/XL710/XXV710
+uio_pci_generic module bind failed in X710/XL710/XXV710
 -------------------------------------------------------
 
 **Description**:
@@ -671,7 +657,7 @@ virtio tx_burst() function cannot do TSO on shared packets
    Poll Mode Driver (PMD).
 
 
-igb uio legacy mode can not be used in X710/XL710/XXV710
+igb_uio legacy mode can not be used in X710/XL710/XXV710
 --------------------------------------------------------
 
 **Description**:
@@ -752,7 +738,7 @@ Netvsc driver and application restart
    handshake sequence with the host.
 
 **Resolution/Workaround**:
-   Either reboot the guest or remove and reinsert the hv_uio_generic module.
+   Either reboot the guest or remove and reinsert the uio_hv_generic module.
 
 **Affected Environment/Platform**:
    Linux Hyper-V.
@@ -816,7 +802,7 @@ Kernel crash when hot-unplug igb_uio device while DPDK application is running
 
 **Reason**:
    When device is hot-unplugged, igb_uio driver will be removed which will destroy UIO resources.
-   Later trying to access any uio resource will cause kernel crash.
+   Later trying to access any UIO resource will cause kernel crash.
 
 **Resolution/Workaround**:
    If using DPDK for PCI HW hot-unplug, prefer to bind device with VFIO instead of IGB_UIO.
@@ -833,10 +819,6 @@ AVX-512 support disabled
 
 **Description**:
    ``AVX-512`` support has been disabled on some conditions.
-   This shouldn't be confused with ``CONFIG_RTE_ENABLE_AVX512`` config option which is already
-   disabled by default. This config option defines if ``AVX-512`` specific implementations of
-   some file to be used or not. What has been disabled is compiler feature to produce ``AVX-512``
-   instructions from any source code.
 
    On DPDK v18.11 ``AVX-512`` is disabled for all ``GCC`` builds which reported to cause a performance
    drop.
@@ -888,3 +870,25 @@ Unsuitable IOVA mode may be picked as the default
 
 **Driver/Module**:
    ALL.
+
+Vhost multi-queue reconnection failed with QEMU version 4.2.0 to 5.1.0
+----------------------------------------------------------------------
+
+**Description**
+   It's a QEMU regression bug (bad commit: c6beefd674ff). QEMU only saves
+   acked features for one vhost-net when vhost quits. When vhost reconnects
+   to virtio-net/virtio-pmd in multi-queue situations, the features been
+   set multiple times are not consistent. QEMU-5.2.0 fixes this issue in commit
+   f66337bdbfda ("vhost-user: save features of multiqueues if chardev is closed").
+
+**Implication**
+   Vhost cannot reconnect back to virtio-net/virtio-pmd normally.
+
+**Resolution/Workaround**:
+   It is possible to filter the incorrect acked features at vhost-user side.
+
+**Affected Environment/Platform**:
+   ALL.
+
+**Driver/Module**:
+   Virtual Device Poll Mode Driver (PMD).

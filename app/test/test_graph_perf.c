@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(C) 2020 Marvell International Ltd.
  */
+
+#include "test.h"
+
 #include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
@@ -9,13 +12,21 @@
 #include <rte_common.h>
 #include <rte_cycles.h>
 #include <rte_errno.h>
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_graph_perf_func(void)
+{
+	printf("graph_perf not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
+
 #include <rte_graph.h>
 #include <rte_graph_worker.h>
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 #include <rte_mbuf.h>
-
-#include "test.h"
 
 #define TEST_GRAPH_PERF_MZ	     "graph_perf_data"
 #define TEST_GRAPH_SRC_NAME	     "test_graph_perf_source"
@@ -313,7 +324,7 @@ graph_init(const char *gname, uint8_t nb_srcs, uint8_t nb_sinks,
 	char nname[RTE_NODE_NAMESIZE / 2];
 	struct test_node_data *node_data;
 	char *ename[nodes_per_stage];
-	struct rte_graph_param gconf;
+	struct rte_graph_param gconf = {0};
 	const struct rte_memzone *mz;
 	uint8_t total_percent = 0;
 	rte_node_t *src_nodes;
@@ -1060,4 +1071,6 @@ test_graph_perf_func(void)
 	return unit_test_suite_runner(&graph_perf_testsuite);
 }
 
-REGISTER_TEST_COMMAND(graph_perf_autotest, test_graph_perf_func);
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_PERF_TEST(graph_perf_autotest, test_graph_perf_func);

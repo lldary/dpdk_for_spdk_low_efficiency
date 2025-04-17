@@ -2,11 +2,13 @@
  * Copyright(c) 2020 Intel Corporation
  */
 
+#include <stdalign.h>
+
 #include "test_ring_stress.h"
 
 /**
  * Stress test for ring enqueue/dequeue operations.
- * Performs the following pattern on each slave worker:
+ * Performs the following pattern on each worker:
  * dequeue/read-write data from the dequeued objects/enqueue.
  * Serves as both functional and performance test of ring
  * enqueue/dequeue operations under high contention
@@ -22,7 +24,7 @@ enum {
 	WRK_CMD_RUN,
 };
 
-static volatile uint32_t wrk_cmd __rte_cache_aligned;
+static uint32_t wrk_cmd __rte_cache_aligned = WRK_CMD_STOP;
 
 /* test run-time in seconds */
 static const uint32_t run_time = 60;
@@ -159,7 +161,7 @@ check_updt_elem(struct ring_elem *elm[], uint32_t num,
 				"offending object: %p\n",
 				__func__, rte_lcore_id(), num, i, elm[i]);
 			rte_memdump(stdout, "expected", check, sizeof(*check));
-			rte_memdump(stdout, "result", elm[i], sizeof(elm[i]));
+			rte_memdump(stdout, "result", elm[i], sizeof(*elm[i]));
 			rte_spinlock_unlock(&dump_lock);
 			return -EINVAL;
 		}
@@ -197,10 +199,12 @@ test_worker(void *arg, const char *fname, int32_t prcs)
 	fill_ring_elm(&def_elm, UINT32_MAX);
 	fill_ring_elm(&loc_elm, lc);
 
-	while (wrk_cmd != WRK_CMD_RUN) {
-		rte_smp_rmb();
+	/* Acquire ordering is not required as the main is not
+	 * really releasing any data through 'wrk_cmd' to
+	 * the worker.
+	 */
+	while (__atomic_load_n(&wrk_cmd, __ATOMIC_RELAXED) != WRK_CMD_RUN)
 		rte_pause();
-	}
 
 	cl = rte_rdtsc_precise();
 
@@ -242,7 +246,7 @@ test_worker(void *arg, const char *fname, int32_t prcs)
 
 		lcore_stat_update(&la->stats, 1, num, tm0 + tm1, prcs);
 
-	} while (wrk_cmd == WRK_CMD_RUN);
+	} while (__atomic_load_n(&wrk_cmd, __ATOMIC_RELAXED) == WRK_CMD_RUN);
 
 	cl = rte_rdtsc_precise() - cl;
 	if (prcs == 0)
@@ -283,7 +287,7 @@ mt1_init(struct rte_ring **rng, void **data, uint32_t num)
 	*data = NULL;
 
 	sz = num * sizeof(*elm);
-	elm = rte_zmalloc(NULL, sz, __alignof__(*elm));
+	elm = rte_zmalloc(NULL, sz, alignof(typeof(*elm)));
 	if (elm == NULL) {
 		printf("%s: alloc(%zu) for %u elems data failed",
 			__func__, sz, num);
@@ -295,7 +299,7 @@ mt1_init(struct rte_ring **rng, void **data, uint32_t num)
 	/* alloc ring */
 	nr = 2 * num;
 	sz = rte_ring_get_memsize(nr);
-	r = rte_zmalloc(NULL, sz, __alignof__(*r));
+	r = rte_zmalloc(NULL, sz, alignof(typeof(*r)));
 	if (r == NULL) {
 		printf("%s: alloc(%zu) for FIFO with %u elems failed",
 			__func__, sz, nr);
@@ -348,29 +352,27 @@ test_mt1(int (*test)(void *))
 
 	memset(arg, 0, sizeof(arg));
 
-	/* launch on all slaves */
-	RTE_LCORE_FOREACH_SLAVE(lc) {
+	/* launch on all workers */
+	RTE_LCORE_FOREACH_WORKER(lc) {
 		arg[lc].rng = r;
 		arg[lc].stats = init_stat;
 		rte_eal_remote_launch(test, &arg[lc], lc);
 	}
 
 	/* signal worker to start test */
-	wrk_cmd = WRK_CMD_RUN;
-	rte_smp_wmb();
+	__atomic_store_n(&wrk_cmd, WRK_CMD_RUN, __ATOMIC_RELEASE);
 
-	usleep(run_time * US_PER_S);
+	rte_delay_us(run_time * US_PER_S);
 
 	/* signal worker to start test */
-	wrk_cmd = WRK_CMD_STOP;
-	rte_smp_wmb();
+	__atomic_store_n(&wrk_cmd, WRK_CMD_STOP, __ATOMIC_RELEASE);
 
-	/* wait for slaves and collect stats. */
+	/* wait for workers and collect stats. */
 	mc = rte_lcore_id();
 	arg[mc].stats = init_stat;
 
 	rc = 0;
-	RTE_LCORE_FOREACH_SLAVE(lc) {
+	RTE_LCORE_FOREACH_WORKER(lc) {
 		rc |= rte_eal_wait_lcore(lc);
 		lcore_stat_aggr(&arg[mc].stats, &arg[lc].stats);
 		if (verbose != 0)

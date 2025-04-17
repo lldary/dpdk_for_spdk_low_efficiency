@@ -45,14 +45,6 @@ void
 mlx5_vdpa_steer_unset(struct mlx5_vdpa_priv *priv)
 {
 	mlx5_vdpa_rss_flows_destroy(priv);
-	if (priv->steer.tbl) {
-		claim_zero(mlx5_glue->dr_destroy_flow_tbl(priv->steer.tbl));
-		priv->steer.tbl = NULL;
-	}
-	if (priv->steer.domain) {
-		claim_zero(mlx5_glue->dr_destroy_domain(priv->steer.domain));
-		priv->steer.domain = NULL;
-	}
 	if (priv->steer.rqt) {
 		claim_zero(mlx5_devx_cmd_destroy(priv->steer.rqt));
 		priv->steer.rqt = NULL;
@@ -65,7 +57,7 @@ mlx5_vdpa_steer_unset(struct mlx5_vdpa_priv *priv)
  * -1 on error.
  */
 static int
-mlx5_vdpa_rqt_prepare(struct mlx5_vdpa_priv *priv)
+mlx5_vdpa_rqt_prepare(struct mlx5_vdpa_priv *priv, bool is_dummy)
 {
 	int i;
 	uint32_t rqt_n = RTE_MIN(MLX5_VDPA_DEFAULT_RQT_SIZE,
@@ -75,15 +67,20 @@ mlx5_vdpa_rqt_prepare(struct mlx5_vdpa_priv *priv)
 						      sizeof(uint32_t), 0);
 	uint32_t k = 0, j;
 	int ret = 0, num;
+	uint16_t nr_vring = is_dummy ?
+	(((priv->queues * 2) < priv->caps.max_num_virtio_queues) ?
+	(priv->queues * 2) : priv->caps.max_num_virtio_queues) : priv->nr_virtqs;
 
 	if (!attr) {
 		DRV_LOG(ERR, "Failed to allocate RQT attributes memory.");
 		rte_errno = ENOMEM;
 		return -ENOMEM;
 	}
-	for (i = 0; i < priv->nr_virtqs; i++) {
+	for (i = 0; i < nr_vring; i++) {
 		if (is_virtq_recvq(i, priv->nr_virtqs) &&
-		    priv->virtqs[i].enable && priv->virtqs[i].virtq) {
+			(is_dummy || (priv->virtqs[i].enable &&
+			priv->virtqs[i].configured)) &&
+			priv->virtqs[i].virtq) {
 			attr->rq_list[k] = priv->virtqs[i].virtq->id;
 			k++;
 		}
@@ -98,7 +95,8 @@ mlx5_vdpa_rqt_prepare(struct mlx5_vdpa_priv *priv)
 	attr->rqt_max_size = rqt_n;
 	attr->rqt_actual_size = rqt_n;
 	if (!priv->steer.rqt) {
-		priv->steer.rqt = mlx5_devx_cmd_create_rqt(priv->ctx, attr);
+		priv->steer.rqt = mlx5_devx_cmd_create_rqt(priv->cdev->ctx,
+							   attr);
 		if (!priv->steer.rqt) {
 			DRV_LOG(ERR, "Failed to create RQT.");
 			ret = -rte_errno;
@@ -139,10 +137,14 @@ mlx5_vdpa_rss_flows_create(struct mlx5_vdpa_priv *priv)
 		uint32_t buf[MLX5_ST_SZ_DW(fte_match_param)];
 		/**< Matcher value. This value is used as the mask or a key. */
 	} matcher_mask = {
-				.size = sizeof(matcher_mask.buf),
+				.size = sizeof(matcher_mask.buf) -
+					MLX5_ST_SZ_BYTES(fte_match_set_misc4) -
+					MLX5_ST_SZ_BYTES(fte_match_set_misc5),
 			},
 	  matcher_value = {
-				.size = sizeof(matcher_value.buf),
+				.size = sizeof(matcher_value.buf) -
+					MLX5_ST_SZ_BYTES(fte_match_set_misc4) -
+					MLX5_ST_SZ_BYTES(fte_match_set_misc5),
 			};
 	struct mlx5dv_flow_matcher_attr dv_attr = {
 		.type = IBV_FLOW_ATTR_NORMAL,
@@ -200,13 +202,13 @@ mlx5_vdpa_rss_flows_create(struct mlx5_vdpa_priv *priv)
 		tir_att.rx_hash_field_selector_outer.selected_fields =
 								  vars[i][HASH];
 		priv->steer.rss[i].matcher = mlx5_glue->dv_create_flow_matcher
-					 (priv->ctx, &dv_attr, priv->steer.tbl);
+				   (priv->cdev->ctx, &dv_attr, priv->steer.tbl);
 		if (!priv->steer.rss[i].matcher) {
 			DRV_LOG(ERR, "Failed to create matcher %d.", i);
 			goto error;
 		}
-		priv->steer.rss[i].tir = mlx5_devx_cmd_create_tir(priv->ctx,
-								  &tir_att);
+		priv->steer.rss[i].tir = mlx5_devx_cmd_create_tir
+						    (priv->cdev->ctx, &tir_att);
 		if (!priv->steer.rss[i].tir) {
 			DRV_LOG(ERR, "Failed to create TIR %d.", i);
 			goto error;
@@ -238,51 +240,36 @@ error:
 }
 
 int
-mlx5_vdpa_steer_update(struct mlx5_vdpa_priv *priv)
+mlx5_vdpa_steer_update(struct mlx5_vdpa_priv *priv, bool is_dummy)
 {
-	int ret = mlx5_vdpa_rqt_prepare(priv);
+	int ret;
 
+	pthread_mutex_lock(&priv->steer_update_lock);
+	ret = mlx5_vdpa_rqt_prepare(priv, is_dummy);
 	if (ret == 0) {
-		mlx5_vdpa_rss_flows_destroy(priv);
-		if (priv->steer.rqt) {
-			claim_zero(mlx5_devx_cmd_destroy(priv->steer.rqt));
-			priv->steer.rqt = NULL;
-		}
+		mlx5_vdpa_steer_unset(priv);
 	} else if (ret < 0) {
+		pthread_mutex_unlock(&priv->steer_update_lock);
 		return ret;
 	} else if (!priv->steer.rss[0].flow) {
 		ret = mlx5_vdpa_rss_flows_create(priv);
 		if (ret) {
 			DRV_LOG(ERR, "Cannot create RSS flows.");
+			pthread_mutex_unlock(&priv->steer_update_lock);
 			return -1;
 		}
 	}
+	pthread_mutex_unlock(&priv->steer_update_lock);
 	return 0;
 }
 
 int
 mlx5_vdpa_steer_setup(struct mlx5_vdpa_priv *priv)
 {
-#ifdef HAVE_MLX5DV_DR
-	priv->steer.domain = mlx5_glue->dr_create_domain(priv->ctx,
-						  MLX5DV_DR_DOMAIN_TYPE_NIC_RX);
-	if (!priv->steer.domain) {
-		DRV_LOG(ERR, "Failed to create Rx domain.");
-		goto error;
-	}
-	priv->steer.tbl = mlx5_glue->dr_create_flow_tbl(priv->steer.domain, 0);
-	if (!priv->steer.tbl) {
-		DRV_LOG(ERR, "Failed to create table 0 with Rx domain.");
-		goto error;
-	}
-	if (mlx5_vdpa_steer_update(priv))
+	if (mlx5_vdpa_steer_update(priv, false))
 		goto error;
 	return 0;
 error:
 	mlx5_vdpa_steer_unset(priv);
 	return -1;
-#else
-	(void)priv;
-	return -ENOTSUP;
-#endif /* HAVE_MLX5DV_DR */
 }

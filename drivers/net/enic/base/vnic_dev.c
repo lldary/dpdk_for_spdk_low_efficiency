@@ -61,6 +61,16 @@ struct vnic_dev {
 	void (*free_consistent)(void *priv,
 		size_t size, void *vaddr,
 		dma_addr_t dma_handle);
+	/*
+	 * Used to serialize devcmd access, currently from PF and its
+	 * VF representors. When there are no representors, lock is
+	 * not used.
+	 */
+	int locked;
+	void (*lock)(void *priv);
+	void (*unlock)(void *priv);
+	struct vnic_dev *pf_vdev;
+	int vf_id;
 };
 
 #define VNIC_MAX_RES_HDR_SIZE \
@@ -82,6 +92,14 @@ void vnic_register_cbacks(struct vnic_dev *vdev,
 {
 	vdev->alloc_consistent = alloc_consistent;
 	vdev->free_consistent = free_consistent;
+}
+
+void vnic_register_lock(struct vnic_dev *vdev, void (*lock)(void *priv),
+	void (*unlock)(void *priv))
+{
+	vdev->lock = lock;
+	vdev->unlock = unlock;
+	vdev->locked = 0;
 }
 
 static int vnic_dev_discover_res(struct vnic_dev *vdev,
@@ -410,11 +428,38 @@ static int vnic_dev_cmd_no_proxy(struct vnic_dev *vdev,
 	return err;
 }
 
+void vnic_dev_cmd_proxy_by_index_start(struct vnic_dev *vdev, uint16_t index)
+{
+	vdev->proxy = PROXY_BY_INDEX;
+	vdev->proxy_index = index;
+}
+
+void vnic_dev_cmd_proxy_end(struct vnic_dev *vdev)
+{
+	vdev->proxy = PROXY_NONE;
+	vdev->proxy_index = 0;
+}
+
 int vnic_dev_cmd(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 	uint64_t *a0, uint64_t *a1, int wait)
 {
 	uint64_t args[2];
+	bool vf_rep;
+	int vf_idx;
 	int err;
+
+	vf_rep = false;
+	if (vdev->pf_vdev) {
+		vf_rep = true;
+		vf_idx = vdev->vf_id;
+		/* Everything below assumes PF vdev */
+		vdev = vdev->pf_vdev;
+	}
+	if (vdev->lock)
+		vdev->lock(vdev->priv);
+	/* For VF representor, proxy devcmd to VF index */
+	if (vf_rep)
+		vnic_dev_cmd_proxy_by_index_start(vdev, vf_idx);
 
 	args[0] = *a0;
 	args[1] = *a1;
@@ -435,6 +480,10 @@ int vnic_dev_cmd(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 		break;
 	}
 
+	if (vf_rep)
+		vnic_dev_cmd_proxy_end(vdev);
+	if (vdev->unlock)
+		vdev->unlock(vdev->priv);
 	if (err == 0) {
 		*a0 = args[0];
 		*a1 = args[1];
@@ -446,17 +495,41 @@ int vnic_dev_cmd(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 int vnic_dev_cmd_args(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 		      uint64_t *args, int nargs, int wait)
 {
+	bool vf_rep;
+	int vf_idx;
+	int err;
+
+	vf_rep = false;
+	if (vdev->pf_vdev) {
+		vf_rep = true;
+		vf_idx = vdev->vf_id;
+		vdev = vdev->pf_vdev;
+	}
+	if (vdev->lock)
+		vdev->lock(vdev->priv);
+	if (vf_rep)
+		vnic_dev_cmd_proxy_by_index_start(vdev, vf_idx);
+
 	switch (vdev->proxy) {
 	case PROXY_BY_INDEX:
-		return vnic_dev_cmd_proxy(vdev, CMD_PROXY_BY_INDEX, cmd,
+		err = vnic_dev_cmd_proxy(vdev, CMD_PROXY_BY_INDEX, cmd,
 				args, nargs, wait);
+		break;
 	case PROXY_BY_BDF:
-		return vnic_dev_cmd_proxy(vdev, CMD_PROXY_BY_BDF, cmd,
+		err = vnic_dev_cmd_proxy(vdev, CMD_PROXY_BY_BDF, cmd,
 				args, nargs, wait);
+		break;
 	case PROXY_NONE:
 	default:
-		return vnic_dev_cmd_no_proxy(vdev, cmd, args, nargs, wait);
+		err = vnic_dev_cmd_no_proxy(vdev, cmd, args, nargs, wait);
+		break;
 	}
+
+	if (vf_rep)
+		vnic_dev_cmd_proxy_end(vdev);
+	if (vdev->unlock)
+		vdev->unlock(vdev->priv);
+	return err;
 }
 
 int vnic_dev_fw_info(struct vnic_dev *vdev,
@@ -521,6 +594,9 @@ static int vnic_dev_flowman_enable(struct vnic_dev *vdev, uint32_t *mode,
 	uint64_t ops;
 	static uint32_t instance;
 
+	/* Advanced filtering is a prerequisite */
+	if (!vnic_dev_capable_adv_filters(vdev))
+		return 0;
 	/* flowman devcmd available? */
 	if (!vnic_dev_capable(vdev, CMD_FLOW_MANAGER_OP))
 		return 0;
@@ -571,8 +647,8 @@ static int vnic_dev_flowman_enable(struct vnic_dev *vdev, uint32_t *mode,
 	return 1;
 }
 
-/*  Determine the "best" filtering mode VIC is capaible of. Returns one of 4
- *  value or 0 on error:
+/*  Determine the "best" filtering mode VIC is capable of. Returns one of 4
+ *  value or 0 if filtering is unavailble:
  *	FILTER_FLOWMAN- flowman api capable
  *	FILTER_DPDK_1- advanced filters availabile
  *	FILTER_USNIC_IP_FLAG - advanced filters but with the restriction that
@@ -607,6 +683,14 @@ int vnic_dev_capable_filter_mode(struct vnic_dev *vdev, uint32_t *mode,
 		args[0] = CMD_ADD_FILTER;
 		args[1] = 0;
 		err = vnic_dev_cmd_args(vdev, CMD_CAPABILITY, args, 2, 1000);
+		/*
+		 * ERR_EPERM may be returned if, for example, vNIC is
+		 * on a VF. It simply means no filtering is available
+		 */
+		if (err == -ERR_EPERM) {
+			*mode = 0;
+			return 0;
+		}
 		if (err)
 			return err;
 		max_level = args[1];
@@ -816,7 +900,7 @@ int vnic_dev_add_addr(struct vnic_dev *vdev, uint8_t *addr)
 
 	err = vnic_dev_cmd(vdev, CMD_ADDR_ADD, &a0, &a1, wait);
 	if (err)
-		pr_err("Can't add addr [%02x:%02x:%02x:%02x:%02x:%02x], %d\n",
+		pr_err("Can't add addr [" RTE_ETHER_ADDR_PRT_FMT "], %d\n",
 			addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
 			err);
 
@@ -835,7 +919,7 @@ int vnic_dev_del_addr(struct vnic_dev *vdev, uint8_t *addr)
 
 	err = vnic_dev_cmd(vdev, CMD_ADDR_DEL, &a0, &a1, wait);
 	if (err)
-		pr_err("Can't del addr [%02x:%02x:%02x:%02x:%02x:%02x], %d\n",
+		pr_err("Can't del addr [" RTE_ETHER_ADDR_PRT_FMT "], %d\n",
 			addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
 			err);
 
@@ -1012,6 +1096,22 @@ uint32_t vnic_dev_port_speed(struct vnic_dev *vdev)
 	return vdev->notify_copy.port_speed;
 }
 
+uint32_t vnic_dev_mtu(struct vnic_dev *vdev)
+{
+	if (!vnic_dev_notify_ready(vdev))
+		return 0;
+
+	return vdev->notify_copy.mtu;
+}
+
+uint32_t vnic_dev_uif(struct vnic_dev *vdev)
+{
+	if (!vnic_dev_notify_ready(vdev))
+		return 0;
+
+	return vdev->notify_copy.uif;
+}
+
 uint32_t vnic_dev_intr_coal_timer_usec_to_hw(struct vnic_dev *vdev,
 					     uint32_t usec)
 {
@@ -1098,6 +1198,23 @@ struct vnic_dev *vnic_dev_register(struct vnic_dev *vdev,
 err_out:
 	vnic_dev_unregister(vdev);
 	return NULL;
+}
+
+struct vnic_dev *vnic_vf_rep_register(void *priv, struct vnic_dev *pf_vdev,
+	int vf_id)
+{
+	struct vnic_dev *vdev;
+
+	vdev = (struct vnic_dev *)rte_zmalloc("enic-vf-rep-vdev",
+				sizeof(struct vnic_dev), RTE_CACHE_LINE_SIZE);
+	if (!vdev)
+		return NULL;
+	vdev->priv = priv;
+	vdev->pf_vdev = pf_vdev;
+	vdev->vf_id = vf_id;
+	vdev->alloc_consistent = pf_vdev->alloc_consistent;
+	vdev->free_consistent = pf_vdev->free_consistent;
+	return vdev;
 }
 
 /*
@@ -1212,5 +1329,29 @@ int vnic_dev_capable_geneve(struct vnic_dev *vdev)
 	int ret;
 
 	ret = vnic_dev_cmd(vdev, CMD_GET_SUPP_FEATURE_VER, &a0, &a1, wait);
-	return ret == 0 && (a1 & FEATURE_GENEVE_OPTIONS);
+	return ret == 0 && !!(a1 & FEATURE_GENEVE_OPTIONS);
+}
+
+uint64_t vnic_dev_capable_cq_entry_size(struct vnic_dev *vdev)
+{
+	uint64_t a0 = CMD_CQ_ENTRY_SIZE_SET;
+	uint64_t a1 = 0;
+	int wait = 1000;
+	int ret;
+
+	ret = vnic_dev_cmd(vdev, CMD_CAPABILITY, &a0, &a1, wait);
+	/* All models support 16B CQ entry by default */
+	if (!(ret == 0 && a0 == 0))
+		a1 = VNIC_RQ_CQ_ENTRY_SIZE_16_CAPABLE;
+	return a1;
+}
+
+int vnic_dev_set_cq_entry_size(struct vnic_dev *vdev, uint32_t rq_idx,
+			       uint32_t size_flag)
+{
+	uint64_t a0 = rq_idx;
+	uint64_t a1 = size_flag;
+	int wait = 1000;
+
+	return vnic_dev_cmd(vdev, CMD_CQ_ENTRY_SIZE_SET, &a0, &a1, wait);
 }

@@ -8,7 +8,6 @@ APP = ip_pipeline
 SRCS-y := action.c
 SRCS-y += cli.c
 SRCS-y += conn.c
-SRCS-y += kni.c
 SRCS-y += link.c
 SRCS-y += main.c
 SRCS-y += mempool.c
@@ -20,8 +19,12 @@ SRCS-y += thread.c
 SRCS-y += tmgr.c
 SRCS-y += cryptodev.c
 
+PKGCONF ?= pkg-config
+
 # Build using pkg-config variables if possible
-ifeq ($(shell pkg-config --exists libdpdk && echo 0),0)
+ifneq ($(shell $(PKGCONF) --exists libdpdk && echo 0),0)
+$(error "no installation of DPDK found")
+endif
 
 all: shared
 .PHONY: shared static
@@ -30,14 +33,20 @@ shared: build/$(APP)-shared
 static: build/$(APP)-static
 	ln -sf $(APP)-static build/$(APP)
 
-PKGCONF ?= pkg-config
-
 PC_FILE := $(shell $(PKGCONF) --path libdpdk 2>/dev/null)
 CFLAGS += -O3 $(shell $(PKGCONF) --cflags libdpdk)
 LDFLAGS_SHARED = $(shell $(PKGCONF) --libs libdpdk)
-LDFLAGS_STATIC = -Wl,-Bstatic $(shell $(PKGCONF) --static --libs libdpdk)
+LDFLAGS_STATIC = $(shell $(PKGCONF) --static --libs libdpdk)
 
-CFLAGS += -I.
+ifeq ($(MAKECMDGOALS),static)
+# check for broken pkg-config
+ifeq ($(shell echo $(LDFLAGS_STATIC) | grep 'whole-archive.*l:lib.*no-whole-archive'),)
+$(warning "pkg-config output list does not contain drivers between 'whole-archive'/'no-whole-archive' flags.")
+$(error "Cannot generate statically-linked binaries with this version of pkg-config")
+endif
+endif
+
+CFLAGS += -I. -DALLOW_EXPERIMENTAL_API -D_GNU_SOURCE
 
 OBJS := $(patsubst %.c,build/%.o,$(SRCS-y))
 
@@ -57,35 +66,3 @@ build:
 clean:
 	rm -f build/$(APP)* build/*.o
 	test -d build && rmdir -p build || true
-
-else
-
-ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
-endif
-
-# Default target, detect a build directory, by looking for a path with a .config
-RTE_TARGET ?= $(notdir $(abspath $(dir $(firstword $(wildcard $(RTE_SDK)/*/.config)))))
-
-include $(RTE_SDK)/mk/rte.vars.mk
-
-ifneq ($(CONFIG_RTE_EXEC_ENV_LINUX),y)
-$(info This application can only operate in a linux environment, \
-please change the definition of the RTE_TARGET environment variable)
-all:
-clean:
-else
-
-INC += $(sort $(wildcard *.h))
-
-SRCS-$(CONFIG_RTE_LIBRTE_PIPELINE) := $(SRCS-y)
-
-CFLAGS += -DALLOW_EXPERIMENTAL_API
-CFLAGS += -I$(SRCDIR)
-CFLAGS += -O3
-CFLAGS += $(WERROR_FLAGS)
-
-include $(RTE_SDK)/mk/rte.extapp.mk
-
-endif
-endif

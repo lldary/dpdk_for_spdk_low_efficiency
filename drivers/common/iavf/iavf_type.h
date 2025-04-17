@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2021 Intel Corporation
  */
 
 #ifndef _IAVF_TYPE_H_
@@ -141,6 +141,8 @@ enum iavf_debug_mask {
 #define IAVF_PHY_LED_MODE_MASK			0xFFFF
 #define IAVF_PHY_LED_MODE_ORIG			0x80000000
 
+#define IAVF_MAX_TRAFFIC_CLASS	8
+
 /* Memory types */
 enum iavf_memset_type {
 	IAVF_NONDMA_MEM = 0,
@@ -224,6 +226,7 @@ struct iavf_hw_capabilities {
 	u32 num_tx_qp;
 	u32 base_queue;
 	u32 num_msix_vectors_vf;
+	u32 max_mtu;
 	bool apm_wol_support;
 	enum iavf_acpi_programming_method acpi_prog_method;
 	bool proxy_support;
@@ -720,6 +723,7 @@ enum iavf_tx_desc_dtype_value {
 	IAVF_TX_DESC_DTYPE_NOP		= 0x1, /* same as Context desc */
 	IAVF_TX_DESC_DTYPE_CONTEXT	= 0x1,
 	IAVF_TX_DESC_DTYPE_FCOE_CTX	= 0x2,
+	IAVF_TX_DESC_DTYPE_IPSEC	= 0x3,
 	IAVF_TX_DESC_DTYPE_FILTER_PROG	= 0x8,
 	IAVF_TX_DESC_DTYPE_DDP_CTX	= 0x9,
 	IAVF_TX_DESC_DTYPE_FLEX_DATA	= 0xB,
@@ -1002,7 +1006,7 @@ struct iavf_profile_tlv_section_record {
 	u8 data[12];
 };
 
-/* Generic AQ section in proflie */
+/* Generic AQ section in profile */
 struct iavf_profile_aq_section {
 	u16 opcode;
 	u16 flags;

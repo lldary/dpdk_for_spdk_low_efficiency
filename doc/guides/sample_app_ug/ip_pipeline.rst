@@ -34,7 +34,7 @@ Running the application
 
 The application startup command line is::
 
-   ip_pipeline [EAL_ARGS] -- [-s SCRIPT_FILE] [-h HOST] [-p PORT]
+   dpdk-ip_pipeline [EAL_ARGS] -- [-s SCRIPT_FILE] [-h HOST] [-p PORT]
 
 The application startup arguments are:
 
@@ -71,7 +71,7 @@ The following is an example command to run ip pipeline application configured fo
 
 .. code-block:: console
 
-    $ ./build/ip_pipeline -c 0x3 -- -s examples/route_ecmp.cli
+    $ ./<build_dir>/examples/dpdk-ip_pipeline -c 0x3 -- -s examples/route_ecmp.cli
 
 The application should start successfully and display as follows:
 
@@ -122,15 +122,15 @@ is displayed and the application is terminated.
 Run-time
 ~~~~~~~~
 
-The master thread is creating and managing all the application objects based on CLI input.
+The main thread is creating and managing all the application objects based on CLI input.
 
 Each data plane thread runs one or several pipelines previously assigned to it in round-robin order. Each data plane thread
 executes two tasks in time-sharing mode:
 
-1. *Packet processing task*: Process bursts of input packets read from the pipeline input ports.
+#. *Packet processing task*: Process bursts of input packets read from the pipeline input ports.
 
-2. *Message handling task*: Periodically, the data plane thread pauses the packet processing task and polls for request
-   messages send by the master thread. Examples: add/remove pipeline to/from current data plane thread, add/delete rules
+#. *Message handling task*: Periodically, the data plane thread pauses the packet processing task and polls for request
+   messages send by the main thread. Examples: add/remove pipeline to/from current data plane thread, add/delete rules
    to/from given table of a specific pipeline owned by the current data plane thread, read statistics, etc.
 
 Examples
@@ -163,15 +163,6 @@ Examples
    |                       |                      |                | 7. Pipeline enable                 |
    |                       |                      |                | 8. Pipeline table rule add default |
    |                       |                      |                | 9. Pipeline table rule add         |
-   +-----------------------+----------------------+----------------+------------------------------------+
-   | KNI                   | Stub                 | Forward        | 1. Mempool create                  |
-   |                       |                      |                | 2. Link create                     |
-   |                       |                      |                | 3. Pipeline create                 |
-   |                       |                      |                | 4. Pipeline port in/out            |
-   |                       |                      |                | 5. Pipeline table                  |
-   |                       |                      |                | 6. Pipeline port in table          |
-   |                       |                      |                | 7. Pipeline enable                 |
-   |                       |                      |                | 8. Pipeline table rule add         |
    +-----------------------+----------------------+----------------+------------------------------------+
    | Firewall              | ACL                  | Allow/Drop     | 1. Mempool create                  |
    |                       |                      |                | 2. Link create                     |
@@ -253,11 +244,6 @@ Traffic manager
    <tc5_rate> <tc6_rate> <tc7_rate> <tc8_rate>
    <tc9_rate> <tc10_rate> <tc11_rate> <tc12_rate>
    <tc_period>
-   pps <n_pipes_per_subport>
-   qsize <qsize_tc0> <qsize_tc1> <qsize_tc2>
-   <qsize_tc3> <qsize_tc4> <qsize_tc5> <qsize_tc6>
-   <qsize_tc7> <qsize_tc8> <qsize_tc9> <qsize_tc10>
-   <qsize_tc11> <qsize_tc12>
 
  Add traffic manager pipe profile ::
 
@@ -275,6 +261,7 @@ Traffic manager
   tmgr <tmgr_name>
    rate <rate>
    spp <n_subports_per_port>
+   pps <n_pipes_per_subport>
    fo <frame_overhead>
    mtu <mtu>
    cpu <cpu_id>
@@ -299,17 +286,6 @@ Tap
  Create tap port ::
 
   tap <name>
-
-
-Kni
-~~~
-
-  Create kni port ::
-
-   kni <kni_name>
-    link <link_name>
-    mempool <mempool_name>
-    [thread <thread_id>]
 
 
 Cryptodev
@@ -370,7 +346,6 @@ Create pipeline input port ::
    | swq <swq_name>
    | tmgr <tmgr_name>
    | tap <tap_name> mempool <mempool_name> mtu <mtu>
-   | kni <kni_name>
    | source mempool <mempool_name> file <file_name> bpp <n_bytes_per_pkt>
    [action <port_in_action_profile_name>]
    [disabled]
@@ -383,7 +358,6 @@ Create pipeline output port ::
    | swq <swq_name>
    | tmgr <tmgr_name>
    | tap <tap_name>
-   | kni <kni_name>
    | sink [file <file_name> pkts <max_n_pkts>]
 
 Create pipeline table ::

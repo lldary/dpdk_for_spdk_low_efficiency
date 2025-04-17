@@ -3,7 +3,7 @@
  */
 
 #include <rte_string_fns.h>
-#include <rte_ethdev_pci.h>
+#include <ethdev_pci.h>
 #include <rte_alarm.h>
 
 #include "atl_ethdev.h"
@@ -15,14 +15,12 @@
 #include "hw_atl/hw_atl_b0_internal.h"
 
 static int eth_atl_dev_init(struct rte_eth_dev *eth_dev);
-static int eth_atl_dev_uninit(struct rte_eth_dev *eth_dev);
-
 static int  atl_dev_configure(struct rte_eth_dev *dev);
 static int  atl_dev_start(struct rte_eth_dev *dev);
-static void atl_dev_stop(struct rte_eth_dev *dev);
+static int atl_dev_stop(struct rte_eth_dev *dev);
 static int  atl_dev_set_link_up(struct rte_eth_dev *dev);
 static int  atl_dev_set_link_down(struct rte_eth_dev *dev);
-static void atl_dev_close(struct rte_eth_dev *dev);
+static int  atl_dev_close(struct rte_eth_dev *dev);
 static int  atl_dev_reset(struct rte_eth_dev *dev);
 static int  atl_dev_promiscuous_enable(struct rte_eth_dev *dev);
 static int  atl_dev_promiscuous_disable(struct rte_eth_dev *dev);
@@ -45,7 +43,8 @@ static int atl_dev_stats_reset(struct rte_eth_dev *dev);
 static int atl_fw_version_get(struct rte_eth_dev *dev, char *fw_version,
 			      size_t fw_size);
 
-static const uint32_t *atl_dev_supported_ptypes_get(struct rte_eth_dev *dev);
+static const uint32_t *atl_dev_supported_ptypes_get(struct rte_eth_dev *dev,
+						    size_t *no_of_elements);
 
 static int atl_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu);
 
@@ -120,9 +119,6 @@ static int eth_atl_pci_remove(struct rte_pci_device *pci_dev);
 static int atl_dev_info_get(struct rte_eth_dev *dev,
 				struct rte_eth_dev_info *dev_info);
 
-int atl_logtype_init;
-int atl_logtype_driver;
-
 /*
  * The set of PCI devices this driver supports
  */
@@ -159,21 +155,20 @@ static struct rte_pci_driver rte_atl_pmd = {
 	.remove = eth_atl_pci_remove,
 };
 
-#define ATL_RX_OFFLOADS (DEV_RX_OFFLOAD_VLAN_STRIP \
-			| DEV_RX_OFFLOAD_IPV4_CKSUM \
-			| DEV_RX_OFFLOAD_UDP_CKSUM \
-			| DEV_RX_OFFLOAD_TCP_CKSUM \
-			| DEV_RX_OFFLOAD_JUMBO_FRAME \
-			| DEV_RX_OFFLOAD_MACSEC_STRIP \
-			| DEV_RX_OFFLOAD_VLAN_FILTER)
+#define ATL_RX_OFFLOADS (RTE_ETH_RX_OFFLOAD_VLAN_STRIP \
+			| RTE_ETH_RX_OFFLOAD_IPV4_CKSUM \
+			| RTE_ETH_RX_OFFLOAD_UDP_CKSUM \
+			| RTE_ETH_RX_OFFLOAD_TCP_CKSUM \
+			| RTE_ETH_RX_OFFLOAD_MACSEC_STRIP \
+			| RTE_ETH_RX_OFFLOAD_VLAN_FILTER)
 
-#define ATL_TX_OFFLOADS (DEV_TX_OFFLOAD_VLAN_INSERT \
-			| DEV_TX_OFFLOAD_IPV4_CKSUM \
-			| DEV_TX_OFFLOAD_UDP_CKSUM \
-			| DEV_TX_OFFLOAD_TCP_CKSUM \
-			| DEV_TX_OFFLOAD_TCP_TSO \
-			| DEV_TX_OFFLOAD_MACSEC_INSERT \
-			| DEV_TX_OFFLOAD_MULTI_SEGS)
+#define ATL_TX_OFFLOADS (RTE_ETH_TX_OFFLOAD_VLAN_INSERT \
+			| RTE_ETH_TX_OFFLOAD_IPV4_CKSUM \
+			| RTE_ETH_TX_OFFLOAD_UDP_CKSUM \
+			| RTE_ETH_TX_OFFLOAD_TCP_CKSUM \
+			| RTE_ETH_TX_OFFLOAD_TCP_TSO \
+			| RTE_ETH_TX_OFFLOAD_MACSEC_INSERT \
+			| RTE_ETH_TX_OFFLOAD_MULTI_SEGS)
 
 #define SFP_EEPROM_SIZE 0x100
 
@@ -316,10 +311,6 @@ static const struct eth_dev_ops atl_eth_dev_ops = {
 	.rx_queue_intr_enable = atl_dev_rx_queue_intr_enable,
 	.rx_queue_intr_disable = atl_dev_rx_queue_intr_disable,
 
-	.rx_queue_count       = atl_rx_queue_count,
-	.rx_descriptor_status = atl_dev_rx_descriptor_status,
-	.tx_descriptor_status = atl_dev_tx_descriptor_status,
-
 	/* EEPROM */
 	.get_eeprom_length    = atl_dev_get_eeprom_length,
 	.get_eeprom           = atl_dev_get_eeprom,
@@ -369,13 +360,18 @@ eth_atl_dev_init(struct rte_eth_dev *eth_dev)
 {
 	struct atl_adapter *adapter = eth_dev->data->dev_private;
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
-	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
+	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
 	struct aq_hw_s *hw = ATL_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
 	int err = 0;
 
 	PMD_INIT_FUNC_TRACE();
 
 	eth_dev->dev_ops = &atl_eth_dev_ops;
+
+	eth_dev->rx_queue_count       = atl_rx_queue_count;
+	eth_dev->rx_descriptor_status = atl_dev_rx_descriptor_status;
+	eth_dev->tx_descriptor_status = atl_dev_tx_descriptor_status;
+
 	eth_dev->rx_pkt_burst = &atl_recv_pkts;
 	eth_dev->tx_pkt_burst = &atl_xmit_pkts;
 	eth_dev->tx_pkt_prepare = &atl_prep_pkts;
@@ -383,6 +379,8 @@ eth_atl_dev_init(struct rte_eth_dev *eth_dev)
 	/* For secondary processes, the primary process has done all the work */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return 0;
+
+	eth_dev->data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	/* Vendor and Device ID need to be set before init of shared code */
 	hw->device_id = pci_dev->id.device_id;
@@ -445,40 +443,6 @@ eth_atl_dev_init(struct rte_eth_dev *eth_dev)
 }
 
 static int
-eth_atl_dev_uninit(struct rte_eth_dev *eth_dev)
-{
-	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(eth_dev);
-	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
-	struct aq_hw_s *hw;
-
-	PMD_INIT_FUNC_TRACE();
-
-	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
-		return -EPERM;
-
-	hw = ATL_DEV_PRIVATE_TO_HW(eth_dev->data->dev_private);
-
-	if (hw->adapter_stopped == 0)
-		atl_dev_close(eth_dev);
-
-	eth_dev->dev_ops = NULL;
-	eth_dev->rx_pkt_burst = NULL;
-	eth_dev->tx_pkt_burst = NULL;
-
-	/* disable uio intr before callback unregister */
-	rte_intr_disable(intr_handle);
-	rte_intr_callback_unregister(intr_handle,
-				     atl_dev_interrupt_handler, eth_dev);
-
-	rte_free(eth_dev->data->mac_addrs);
-	eth_dev->data->mac_addrs = NULL;
-
-	pthread_mutex_destroy(&hw->mbox_mutex);
-
-	return 0;
-}
-
-static int
 eth_atl_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	struct rte_pci_device *pci_dev)
 {
@@ -489,7 +453,7 @@ eth_atl_pci_probe(struct rte_pci_driver *pci_drv __rte_unused,
 static int
 eth_atl_pci_remove(struct rte_pci_device *pci_dev)
 {
-	return rte_eth_dev_pci_generic_remove(pci_dev, eth_atl_dev_uninit);
+	return rte_eth_dev_pci_generic_remove(pci_dev, atl_dev_close);
 }
 
 static int
@@ -515,7 +479,7 @@ atl_dev_start(struct rte_eth_dev *dev)
 {
 	struct aq_hw_s *hw = ATL_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
-	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
+	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
 	uint32_t intr_vector = 0;
 	int status;
 	int err;
@@ -525,7 +489,7 @@ atl_dev_start(struct rte_eth_dev *dev)
 	/* set adapter started */
 	hw->adapter_stopped = 0;
 
-	if (dev->data->dev_conf.link_speeds & ETH_LINK_SPEED_FIXED) {
+	if (dev->data->dev_conf.link_speeds & RTE_ETH_LINK_SPEED_FIXED) {
 		PMD_INIT_LOG(ERR,
 		"Invalid link_speeds for port %u, fix speed not supported",
 				dev->data->port_id);
@@ -561,10 +525,9 @@ atl_dev_start(struct rte_eth_dev *dev)
 		}
 	}
 
-	if (rte_intr_dp_is_en(intr_handle) && !intr_handle->intr_vec) {
-		intr_handle->intr_vec = rte_zmalloc("intr_vec",
-				    dev->data->nb_rx_queues * sizeof(int), 0);
-		if (intr_handle->intr_vec == NULL) {
+	if (rte_intr_dp_is_en(intr_handle)) {
+		if (rte_intr_vec_list_alloc(intr_handle, "intr_vec",
+						   dev->data->nb_rx_queues)) {
 			PMD_INIT_LOG(ERR, "Failed to allocate %d rx_queues"
 				     " intr_vec", dev->data->nb_rx_queues);
 			return -ENOMEM;
@@ -637,16 +600,17 @@ error:
 /*
  * Stop device: disable rx and tx functions to allow for reconfiguring.
  */
-static void
+static int
 atl_dev_stop(struct rte_eth_dev *dev)
 {
 	struct rte_eth_link link;
 	struct aq_hw_s *hw =
 		ATL_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
-	struct rte_intr_handle *intr_handle = &pci_dev->intr_handle;
+	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
 
 	PMD_INIT_FUNC_TRACE();
+	dev->data->dev_started = 0;
 
 	/* disable interrupts */
 	atl_disable_intr(hw);
@@ -673,10 +637,9 @@ atl_dev_stop(struct rte_eth_dev *dev)
 
 	/* Clean datapath event and queue/vec mapping */
 	rte_intr_efd_disable(intr_handle);
-	if (intr_handle->intr_vec != NULL) {
-		rte_free(intr_handle->intr_vec);
-		intr_handle->intr_vec = NULL;
-	}
+	rte_intr_vec_list_free(intr_handle);
+
+	return 0;
 }
 
 /*
@@ -689,18 +652,18 @@ atl_dev_set_link_up(struct rte_eth_dev *dev)
 	uint32_t link_speeds = dev->data->dev_conf.link_speeds;
 	uint32_t speed_mask = 0;
 
-	if (link_speeds == ETH_LINK_SPEED_AUTONEG) {
+	if (link_speeds == RTE_ETH_LINK_SPEED_AUTONEG) {
 		speed_mask = hw->aq_nic_cfg->link_speed_msk;
 	} else {
-		if (link_speeds & ETH_LINK_SPEED_10G)
+		if (link_speeds & RTE_ETH_LINK_SPEED_10G)
 			speed_mask |= AQ_NIC_RATE_10G;
-		if (link_speeds & ETH_LINK_SPEED_5G)
+		if (link_speeds & RTE_ETH_LINK_SPEED_5G)
 			speed_mask |= AQ_NIC_RATE_5G;
-		if (link_speeds & ETH_LINK_SPEED_1G)
+		if (link_speeds & RTE_ETH_LINK_SPEED_1G)
 			speed_mask |= AQ_NIC_RATE_1G;
-		if (link_speeds & ETH_LINK_SPEED_2_5G)
+		if (link_speeds & RTE_ETH_LINK_SPEED_2_5G)
 			speed_mask |=  AQ_NIC_RATE_2G5;
-		if (link_speeds & ETH_LINK_SPEED_100M)
+		if (link_speeds & RTE_ETH_LINK_SPEED_100M)
 			speed_mask |= AQ_NIC_RATE_100M;
 	}
 
@@ -721,14 +684,33 @@ atl_dev_set_link_down(struct rte_eth_dev *dev)
 /*
  * Reset and stop device.
  */
-static void
+static int
 atl_dev_close(struct rte_eth_dev *dev)
 {
+	struct rte_pci_device *pci_dev = RTE_ETH_DEV_TO_PCI(dev);
+	struct rte_intr_handle *intr_handle = pci_dev->intr_handle;
+	struct aq_hw_s *hw;
+	int ret;
+
 	PMD_INIT_FUNC_TRACE();
 
-	atl_dev_stop(dev);
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
+
+	hw = ATL_DEV_PRIVATE_TO_HW(dev->data->dev_private);
+
+	ret = atl_dev_stop(dev);
 
 	atl_free_queues(dev);
+
+	/* disable uio intr before callback unregister */
+	rte_intr_disable(intr_handle);
+	rte_intr_callback_unregister(intr_handle,
+				     atl_dev_interrupt_handler, dev);
+
+	pthread_mutex_destroy(&hw->mbox_mutex);
+
+	return ret;
 }
 
 static int
@@ -736,7 +718,7 @@ atl_dev_reset(struct rte_eth_dev *dev)
 {
 	int ret;
 
-	ret = eth_atl_dev_uninit(dev);
+	ret = atl_dev_close(dev);
 	if (ret)
 		return ret;
 
@@ -1087,7 +1069,7 @@ atl_fw_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size)
 {
 	struct aq_hw_s *hw = ATL_DEV_PRIVATE_TO_HW(dev->data->dev_private);
 	uint32_t fw_ver = 0;
-	unsigned int ret = 0;
+	int ret = 0;
 
 	ret = hw_atl_utils_get_fw_version(hw, &fw_ver);
 	if (ret)
@@ -1095,10 +1077,11 @@ atl_fw_version_get(struct rte_eth_dev *dev, char *fw_version, size_t fw_size)
 
 	ret = snprintf(fw_version, fw_size, "%u.%u.%u", fw_ver >> 24,
 		       (fw_ver >> 16) & 0xFFU, fw_ver & 0xFFFFU);
+	if (ret < 0)
+		return -EINVAL;
 
 	ret += 1; /* add string null-terminator */
-
-	if (fw_size < ret)
+	if (fw_size < (size_t)ret)
 		return ret;
 
 	return 0;
@@ -1141,16 +1124,16 @@ atl_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
 	dev_info->reta_size = HW_ATL_B0_RSS_REDIRECTION_MAX;
 	dev_info->flow_type_rss_offloads = ATL_RSS_OFFLOAD_ALL;
 
-	dev_info->speed_capa = ETH_LINK_SPEED_1G | ETH_LINK_SPEED_10G;
-	dev_info->speed_capa |= ETH_LINK_SPEED_100M;
-	dev_info->speed_capa |= ETH_LINK_SPEED_2_5G;
-	dev_info->speed_capa |= ETH_LINK_SPEED_5G;
+	dev_info->speed_capa = RTE_ETH_LINK_SPEED_1G | RTE_ETH_LINK_SPEED_10G;
+	dev_info->speed_capa |= RTE_ETH_LINK_SPEED_100M;
+	dev_info->speed_capa |= RTE_ETH_LINK_SPEED_2_5G;
+	dev_info->speed_capa |= RTE_ETH_LINK_SPEED_5G;
 
 	return 0;
 }
 
 static const uint32_t *
-atl_dev_supported_ptypes_get(struct rte_eth_dev *dev)
+atl_dev_supported_ptypes_get(struct rte_eth_dev *dev, size_t *no_of_elements)
 {
 	static const uint32_t ptypes[] = {
 		RTE_PTYPE_L2_ETHER,
@@ -1162,11 +1145,12 @@ atl_dev_supported_ptypes_get(struct rte_eth_dev *dev)
 		RTE_PTYPE_L4_UDP,
 		RTE_PTYPE_L4_SCTP,
 		RTE_PTYPE_L4_ICMP,
-		RTE_PTYPE_UNKNOWN
 	};
 
-	if (dev->rx_pkt_burst == atl_recv_pkts)
+	if (dev->rx_pkt_burst == atl_recv_pkts) {
+		*no_of_elements = RTE_DIM(ptypes);
 		return ptypes;
+	}
 
 	return NULL;
 }
@@ -1189,10 +1173,10 @@ atl_dev_link_update(struct rte_eth_dev *dev, int wait __rte_unused)
 	u32 fc = AQ_NIC_FC_OFF;
 	int err = 0;
 
-	link.link_status = ETH_LINK_DOWN;
+	link.link_status = RTE_ETH_LINK_DOWN;
 	link.link_speed = 0;
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
-	link.link_autoneg = hw->is_autoneg ? ETH_LINK_AUTONEG : ETH_LINK_FIXED;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
+	link.link_autoneg = hw->is_autoneg ? RTE_ETH_LINK_AUTONEG : RTE_ETH_LINK_FIXED;
 	memset(&old, 0, sizeof(old));
 
 	/* load old link status */
@@ -1212,8 +1196,8 @@ atl_dev_link_update(struct rte_eth_dev *dev, int wait __rte_unused)
 		return 0;
 	}
 
-	link.link_status = ETH_LINK_UP;
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
+	link.link_status = RTE_ETH_LINK_UP;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 	link.link_speed = hw->aq_link_status.mbps;
 
 	rte_eth_linkstatus_set(dev, &link);
@@ -1347,7 +1331,7 @@ atl_dev_link_status_print(struct rte_eth_dev *dev)
 		PMD_DRV_LOG(INFO, "Port %d: Link Up - speed %u Mbps - %s",
 					(int)(dev->data->port_id),
 					(unsigned int)link.link_speed,
-			link.link_duplex == ETH_LINK_FULL_DUPLEX ?
+			link.link_duplex == RTE_ETH_LINK_FULL_DUPLEX ?
 					"full-duplex" : "half-duplex");
 	} else {
 		PMD_DRV_LOG(INFO, " Port %d: Link Down",
@@ -1397,8 +1381,7 @@ atl_dev_interrupt_action(struct rte_eth_dev *dev,
 	/* Notify userapp if link status changed */
 	if (!atl_dev_link_update(dev, 0)) {
 		atl_dev_link_status_print(dev);
-		_rte_eth_dev_callback_process(dev,
-			RTE_ETH_EVENT_INTR_LSC, NULL);
+		rte_eth_dev_callback_process(dev, RTE_ETH_EVENT_INTR_LSC, NULL);
 	} else {
 		if (hw->aq_fw_ops->send_macsec_req == NULL)
 			goto done;
@@ -1424,7 +1407,7 @@ atl_dev_interrupt_action(struct rte_eth_dev *dev,
 		    resp.stats.egress_expired ||
 		    resp.stats.ingress_expired) {
 			PMD_DRV_LOG(INFO, "RTE_ETH_EVENT_MACSEC");
-			_rte_eth_dev_callback_process(dev,
+			rte_eth_dev_callback_process(dev,
 				RTE_ETH_EVENT_MACSEC, NULL);
 		}
 	}
@@ -1442,7 +1425,7 @@ done:
  * @param handle
  *  Pointer to interrupt handle.
  * @param param
- *  The address of parameter (struct rte_eth_dev *) regsitered before.
+ *  The address of parameter (struct rte_eth_dev *) registered before.
  *
  * @return
  *  void
@@ -1547,13 +1530,13 @@ atl_flow_ctrl_get(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 	hw->aq_fw_ops->get_flow_control(hw, &fc);
 
 	if (fc == AQ_NIC_FC_OFF)
-		fc_conf->mode = RTE_FC_NONE;
+		fc_conf->mode = RTE_ETH_FC_NONE;
 	else if ((fc & AQ_NIC_FC_RX) && (fc & AQ_NIC_FC_TX))
-		fc_conf->mode = RTE_FC_FULL;
+		fc_conf->mode = RTE_ETH_FC_FULL;
 	else if (fc & AQ_NIC_FC_RX)
-		fc_conf->mode = RTE_FC_RX_PAUSE;
+		fc_conf->mode = RTE_ETH_FC_RX_PAUSE;
 	else if (fc & AQ_NIC_FC_TX)
-		fc_conf->mode = RTE_FC_TX_PAUSE;
+		fc_conf->mode = RTE_ETH_FC_TX_PAUSE;
 
 	return 0;
 }
@@ -1568,13 +1551,13 @@ atl_flow_ctrl_set(struct rte_eth_dev *dev, struct rte_eth_fc_conf *fc_conf)
 	if (hw->aq_fw_ops->set_flow_control == NULL)
 		return -ENOTSUP;
 
-	if (fc_conf->mode == RTE_FC_NONE)
+	if (fc_conf->mode == RTE_ETH_FC_NONE)
 		hw->aq_nic_cfg->flow_control = AQ_NIC_FC_OFF;
-	else if (fc_conf->mode == RTE_FC_RX_PAUSE)
+	else if (fc_conf->mode == RTE_ETH_FC_RX_PAUSE)
 		hw->aq_nic_cfg->flow_control = AQ_NIC_FC_RX;
-	else if (fc_conf->mode == RTE_FC_TX_PAUSE)
+	else if (fc_conf->mode == RTE_ETH_FC_TX_PAUSE)
 		hw->aq_nic_cfg->flow_control = AQ_NIC_FC_TX;
-	else if (fc_conf->mode == RTE_FC_FULL)
+	else if (fc_conf->mode == RTE_ETH_FC_FULL)
 		hw->aq_nic_cfg->flow_control = (AQ_NIC_FC_RX | AQ_NIC_FC_TX);
 
 	if (old_flow_control != hw->aq_nic_cfg->flow_control)
@@ -1649,9 +1632,6 @@ atl_dev_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 
 	if (mtu < RTE_ETHER_MIN_MTU || frame_size > dev_info.max_rx_pktlen)
 		return -EINVAL;
-
-	/* update max frame size */
-	dev->data->dev_conf.rxmode.max_rx_pkt_len = frame_size;
 
 	return 0;
 }
@@ -1745,14 +1725,14 @@ atl_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 
 	PMD_INIT_FUNC_TRACE();
 
-	ret = atl_enable_vlan_filter(dev, mask & ETH_VLAN_FILTER_MASK);
+	ret = atl_enable_vlan_filter(dev, mask & RTE_ETH_VLAN_FILTER_MASK);
 
-	cfg->vlan_strip = !!(mask & ETH_VLAN_STRIP_MASK);
+	cfg->vlan_strip = !!(mask & RTE_ETH_VLAN_STRIP_MASK);
 
 	for (i = 0; i < dev->data->nb_rx_queues; i++)
 		hw_atl_rpo_rx_desc_vlan_stripping_set(hw, cfg->vlan_strip, i);
 
-	if (mask & ETH_VLAN_EXTEND_MASK)
+	if (mask & RTE_ETH_VLAN_EXTEND_MASK)
 		ret = -ENOTSUP;
 
 	return ret;
@@ -1768,10 +1748,10 @@ atl_vlan_tpid_set(struct rte_eth_dev *dev, enum rte_vlan_type vlan_type,
 	PMD_INIT_FUNC_TRACE();
 
 	switch (vlan_type) {
-	case ETH_VLAN_TYPE_INNER:
+	case RTE_ETH_VLAN_TYPE_INNER:
 		hw_atl_rpf_vlan_inner_etht_set(hw, tpid);
 		break;
-	case ETH_VLAN_TYPE_OUTER:
+	case RTE_ETH_VLAN_TYPE_OUTER:
 		hw_atl_rpf_vlan_outer_etht_set(hw, tpid);
 		break;
 	default:
@@ -1929,13 +1909,5 @@ is_atlantic_supported(struct rte_eth_dev *dev)
 RTE_PMD_REGISTER_PCI(net_atlantic, rte_atl_pmd);
 RTE_PMD_REGISTER_PCI_TABLE(net_atlantic, pci_id_atl_map);
 RTE_PMD_REGISTER_KMOD_DEP(net_atlantic, "* igb_uio | uio_pci_generic");
-
-RTE_INIT(atl_init_log)
-{
-	atl_logtype_init = rte_log_register("pmd.net.atlantic.init");
-	if (atl_logtype_init >= 0)
-		rte_log_set_level(atl_logtype_init, RTE_LOG_NOTICE);
-	atl_logtype_driver = rte_log_register("pmd.net.atlantic.driver");
-	if (atl_logtype_driver >= 0)
-		rte_log_set_level(atl_logtype_driver, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER_SUFFIX(atl_logtype_init, init, NOTICE);
+RTE_LOG_REGISTER_SUFFIX(atl_logtype_driver, driver, NOTICE);

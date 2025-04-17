@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  *
- * Copyright(c) 2019-2020 Xilinx, Inc.
+ * Copyright(c) 2019-2021 Xilinx, Inc.
  * Copyright(c) 2017-2019 Solarflare Communications Inc.
  *
  * This software was jointly developed between OKTET Labs (under contract
@@ -11,9 +11,10 @@
 #define _SFC_DP_RX_H
 
 #include <rte_mempool.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 
 #include "sfc_dp.h"
+#include "sfc_nic_dma_dp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +69,8 @@ struct sfc_dp_rx_qcreate_info {
 	/** Receive queue flags initializer */
 	unsigned int		flags;
 #define SFC_RXQ_FLAG_RSS_HASH	0x1
+#define SFC_RXQ_FLAG_INGRESS_MPORT	0x2
+#define SFC_RXQ_FLAG_VLAN_STRIPPED_TCI	0x4
 
 	/** Rx queue size */
 	unsigned int		rxq_entries;
@@ -88,8 +91,16 @@ struct sfc_dp_rx_qcreate_info {
 	 * doorbell
 	 */
 	volatile void		*mem_bar;
+	/** Function control window offset */
+	efsys_dma_addr_t	fcw_offset;
 	/** VI window size shift */
 	unsigned int		vi_window_shift;
+
+	/** Mask to extract user bits from Rx prefix mark field */
+	uint32_t		user_mark_mask;
+
+	/** NIC's DMA mapping information */
+	const struct sfc_nic_dma_info	*nic_dma_info;
 };
 
 /**
@@ -149,7 +160,7 @@ typedef int (sfc_dp_rx_qcreate_t)(uint16_t port_id, uint16_t queue_id,
 				  struct sfc_dp_rxq **dp_rxqp);
 
 /**
- * Free resources allocated for datapath recevie queue.
+ * Free resources allocated for datapath receive queue.
  */
 typedef void (sfc_dp_rx_qdestroy_t)(struct sfc_dp_rxq *dp_rxq);
 
@@ -159,7 +170,8 @@ typedef void (sfc_dp_rx_qdestroy_t)(struct sfc_dp_rxq *dp_rxq);
  * It handovers EvQ to the datapath.
  */
 typedef int (sfc_dp_rx_qstart_t)(struct sfc_dp_rxq *dp_rxq,
-				 unsigned int evq_read_ptr);
+				 unsigned int evq_read_ptr,
+				 const efx_rx_prefix_layout_t *pinfo);
 
 /**
  * Receive queue stop function called before flush.
@@ -181,13 +193,13 @@ typedef bool (sfc_dp_rx_qrx_ps_ev_t)(struct sfc_dp_rxq *dp_rxq,
 /**
  * Receive queue purge function called after queue flush.
  *
- * Should be used to free unused recevie buffers.
+ * Should be used to free unused receive buffers.
  */
 typedef void (sfc_dp_rx_qpurge_t)(struct sfc_dp_rxq *dp_rxq);
 
 /** Get packet types recognized/classified */
-typedef const uint32_t * (sfc_dp_rx_supported_ptypes_get_t)(
-				uint32_t tunnel_encaps);
+typedef const uint32_t * (sfc_dp_rx_supported_ptypes_get_t)(uint32_t tunnel_encaps,
+							    size_t *no_of_elements);
 
 /** Get number of pending Rx descriptors */
 typedef unsigned int (sfc_dp_rx_qdesc_npending_t)(struct sfc_dp_rxq *dp_rxq);
@@ -201,6 +213,9 @@ typedef int (sfc_dp_rx_intr_enable_t)(struct sfc_dp_rxq *dp_rxq);
 /** Disable Rx interrupts */
 typedef int (sfc_dp_rx_intr_disable_t)(struct sfc_dp_rxq *dp_rxq);
 
+/** Get number of pushed Rx buffers */
+typedef unsigned int (sfc_dp_rx_get_pushed_t)(struct sfc_dp_rxq *dp_rxq);
+
 /** Receive datapath definition */
 struct sfc_dp_rx {
 	struct sfc_dp				dp;
@@ -210,6 +225,7 @@ struct sfc_dp_rx {
 #define SFC_DP_RX_FEAT_FLOW_FLAG		0x2
 #define SFC_DP_RX_FEAT_FLOW_MARK		0x4
 #define SFC_DP_RX_FEAT_INTR			0x8
+#define SFC_DP_RX_FEAT_STATS			0x10
 	/**
 	 * Rx offload capabilities supported by the datapath on device
 	 * level only if HW/FW supports it.
@@ -235,6 +251,7 @@ struct sfc_dp_rx {
 	sfc_dp_rx_qdesc_status_t		*qdesc_status;
 	sfc_dp_rx_intr_enable_t			*intr_enable;
 	sfc_dp_rx_intr_disable_t		*intr_disable;
+	sfc_dp_rx_get_pushed_t			*get_pushed;
 	eth_rx_burst_t				pkt_burst;
 };
 
@@ -266,6 +283,7 @@ const struct sfc_dp_rx *sfc_dp_rx_by_dp_rxq(const struct sfc_dp_rxq *dp_rxq);
 extern struct sfc_dp_rx sfc_efx_rx;
 extern struct sfc_dp_rx sfc_ef10_rx;
 extern struct sfc_dp_rx sfc_ef10_essb_rx;
+extern struct sfc_dp_rx sfc_ef100_rx;
 
 #ifdef __cplusplus
 }

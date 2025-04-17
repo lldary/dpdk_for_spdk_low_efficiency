@@ -20,7 +20,6 @@
 #include <rte_memcpy.h>
 #include <rte_eal.h>
 #include <rte_launch.h>
-#include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_prefetch.h>
 #include <rte_lcore.h>
@@ -68,16 +67,19 @@
  * by placing the low-order 23-bits of the IP address into the low-order
  * 23 bits of the Ethernet multicast address 01-00-5E-00-00-00 (hex)."
  */
+
+/* Construct Ethernet multicast address from IPv4 multicast Address. 8< */
 #define	ETHER_ADDR_FOR_IPV4_MCAST(x)	\
 	(rte_cpu_to_be_64(0x01005e000000ULL | ((x) & 0x7fffff)) >> 16)
+/* >8 End of Construction of multicast address from IPv4 multicast address. */
 
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr ports_eth_addr[MAX_PORTS];
@@ -107,13 +109,12 @@ static struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
-		.max_rx_pkt_len = JUMBO_FRAME_MAX_SIZE,
-		.split_hdr_size = 0,
-		.offloads = DEV_RX_OFFLOAD_JUMBO_FRAME,
+		.mtu = JUMBO_FRAME_MAX_SIZE - RTE_ETHER_HDR_LEN -
+			RTE_ETHER_CRC_LEN,
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
-		.offloads = DEV_TX_OFFLOAD_MULTI_SEGS,
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
+		.offloads = RTE_ETH_TX_OFFLOAD_MULTI_SEGS,
 	},
 };
 
@@ -176,7 +177,7 @@ send_burst(struct lcore_queue_conf *qconf, uint16_t port)
 	qconf->tx_mbufs[port].len = 0;
 }
 
-/* Get number of bits set. */
+/* Get number of bits set. 8< */
 static inline uint32_t
 bitcnt(uint32_t v)
 {
@@ -187,6 +188,7 @@ bitcnt(uint32_t v)
 
 	return n;
 }
+/* >8 End of getting number of bits set. */
 
 /**
  * Create the output multicast packet based on the given input packet.
@@ -231,6 +233,8 @@ bitcnt(uint32_t v)
  *  - The pointer to the new outgoing packet.
  *  - NULL if operation failed.
  */
+
+/* mcast_out_pkt 8< */
 static inline struct rte_mbuf *
 mcast_out_pkt(struct rte_mbuf *pkt, int use_clone)
 {
@@ -257,11 +261,14 @@ mcast_out_pkt(struct rte_mbuf *pkt, int use_clone)
 	__rte_mbuf_sanity_check(hdr, 1);
 	return hdr;
 }
+/* >8 End of mcast_out_kt. */
 
 /*
  * Write new Ethernet header to the outgoing packet,
  * and put it into the outgoing queue for the given port.
  */
+
+/* Write new Ethernet header to outgoing packets. 8< */
 static inline void
 mcast_send_pkt(struct rte_mbuf *pkt, struct rte_ether_addr *dest_addr,
 		struct lcore_queue_conf *qconf, uint16_t port)
@@ -274,8 +281,8 @@ mcast_send_pkt(struct rte_mbuf *pkt, struct rte_ether_addr *dest_addr,
 		rte_pktmbuf_prepend(pkt, (uint16_t)sizeof(*ethdr));
 	RTE_ASSERT(ethdr != NULL);
 
-	rte_ether_addr_copy(dest_addr, &ethdr->d_addr);
-	rte_ether_addr_copy(&ports_eth_addr[port], &ethdr->s_addr);
+	rte_ether_addr_copy(dest_addr, &ethdr->dst_addr);
+	rte_ether_addr_copy(&ports_eth_addr[port], &ethdr->src_addr);
 	ethdr->ether_type = rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4);
 
 	/* Put new packet into the output queue */
@@ -287,6 +294,7 @@ mcast_send_pkt(struct rte_mbuf *pkt, struct rte_ether_addr *dest_addr,
 	if (unlikely(MAX_PKT_BURST == len))
 		send_burst(qconf, port);
 }
+/* >8 End of writing new Ethernet headers. */
 
 /* Multicast forward of the input packet */
 static inline void
@@ -302,38 +310,45 @@ mcast_forward(struct rte_mbuf *m, struct lcore_queue_conf *qconf)
 		struct rte_ether_addr as_addr;
 	} dst_eth_addr;
 
-	/* Remove the Ethernet header from the input packet */
+	/* Remove the Ethernet header from the input packet. 8< */
 	iphdr = (struct rte_ipv4_hdr *)
 		rte_pktmbuf_adj(m, (uint16_t)sizeof(struct rte_ether_hdr));
 	RTE_ASSERT(iphdr != NULL);
 
 	dest_addr = rte_be_to_cpu_32(iphdr->dst_addr);
+	/* >8 End of removing the Ethernet header from the input packet. */
 
 	/*
 	 * Check that it is a valid multicast address and
 	 * we have some active ports assigned to it.
 	 */
+
+	/* Check valid multicast address. 8< */
 	if (!RTE_IS_IPV4_MCAST(dest_addr) ||
 	    (hash = rte_fbk_hash_lookup(mcast_hash, dest_addr)) <= 0 ||
 	    (port_mask = hash & enabled_port_mask) == 0) {
 		rte_pktmbuf_free(m);
 		return;
 	}
+	/* >8 End of valid multicast address check. */
 
 	/* Calculate number of destination ports. */
 	port_num = bitcnt(port_mask);
 
-	/* Should we use rte_pktmbuf_clone() or not. */
+	/* Should we use rte_pktmbuf_clone() or not. 8< */
 	use_clone = (port_num <= MCAST_CLONE_PORTS &&
 	    m->nb_segs <= MCAST_CLONE_SEGS);
+	/* >8 End of using rte_pktmbuf_clone(). */
 
 	/* Mark all packet's segments as referenced port_num times */
 	if (use_clone == 0)
 		rte_pktmbuf_refcnt_update(m, (uint16_t)port_num);
 
-	/* construct destination ethernet address */
+	/* Construct destination ethernet address. 8< */
 	dst_eth_addr.as_int = ETHER_ADDR_FOR_IPV4_MCAST(dest_addr);
+	/* >8 End of constructing destination ethernet address. */
 
+	/* Packets dispatched to destination ports. 8< */
 	for (port = 0; use_clone != port_mask; port_mask >>= 1, port++) {
 
 		/* Prepare output packet and send it out. */
@@ -345,6 +360,7 @@ mcast_forward(struct rte_mbuf *m, struct lcore_queue_conf *qconf)
 				rte_pktmbuf_free(m);
 		}
 	}
+	/* >8 End of packets dispatched to destination ports. */
 
 	/*
 	 * If we making clone packets, then, for the last destination port,
@@ -540,6 +556,7 @@ print_ethaddr(const char *name, struct rte_ether_addr *eth_addr)
 	printf("%s%s", name, buf);
 }
 
+/* Hash object is created and loaded. 8< */
 static int
 init_mcast_hash(void)
 {
@@ -561,6 +578,7 @@ init_mcast_hash(void)
 
 	return 0;
 }
+/* >8 End of hash object is created and loaded. */
 
 /* Check the link status of all ports in up to 9s, and print them finally */
 static void
@@ -572,6 +590,7 @@ check_all_ports_link_status(uint32_t port_mask)
 	uint8_t count, all_ports_up, print_flag = 0;
 	struct rte_eth_link link;
 	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -591,18 +610,15 @@ check_all_ports_link_status(uint32_t port_mask)
 			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf(
-					"Port%d Link Up. Speed %u Mbps - %s\n",
-					portid, link.link_speed,
-				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex"));
-				else
-					printf("Port %d Link Down\n", portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text),
+					&link);
+				printf("Port %d %s\n", portid,
+				       link_status_text);
 				continue;
 			}
 			/* clear all_ports_up flag if any link down */
-			if (link.link_status == ETH_LINK_DOWN) {
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -649,7 +665,7 @@ main(int argc, char **argv)
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid IPV4_MULTICAST parameters\n");
 
-	/* create the mbuf pools */
+	/* Create the mbuf pools. 8< */
 	packet_pool = rte_pktmbuf_pool_create("packet_pool", NB_PKT_MBUF, 32,
 		0, PKT_MBUF_DATA_SIZE, rte_socket_id());
 
@@ -667,6 +683,7 @@ main(int argc, char **argv)
 
 	if (clone_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init clone mbuf pool\n");
+	/* >8 End of create mbuf pools. */
 
 	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports == 0)
@@ -696,9 +713,9 @@ main(int argc, char **argv)
 				"Error during getting device (port %u) info: %s\n",
 				portid, strerror(-ret));
 
-		local_port_conf.rxmode.max_rx_pkt_len = RTE_MIN(
-		    dev_info.max_rx_pktlen,
-		    local_port_conf.rxmode.max_rx_pkt_len);
+		local_port_conf.rxmode.mtu = RTE_MIN(
+		    dev_info.max_mtu,
+		    local_port_conf.rxmode.mtu);
 
 		/* get the lcore_id for this port */
 		while (rte_lcore_is_enabled(rx_lcore_id) == 0 ||
@@ -801,11 +818,14 @@ main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE, "Cannot build the multicast hash\n");
 
 	/* launch per-lcore init on every lcore */
-	rte_eal_mp_remote_launch(main_loop, NULL, CALL_MASTER);
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	rte_eal_mp_remote_launch(main_loop, NULL, CALL_MAIN);
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			return -1;
 	}
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }

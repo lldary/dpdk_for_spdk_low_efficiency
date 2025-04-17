@@ -6,6 +6,32 @@
 #include "qat_device.h"
 #include "qat_logs.h"
 
+#define QAT_LEGACY_CAPA "qat_legacy_capa"
+
+static const char *const arguments[] = {
+	QAT_LEGACY_CAPA,
+	NULL
+};
+
+const char *const *qat_cmdline_defines[QAT_MAX_SERVICES + 1] = {
+	[QAT_MAX_SERVICES] = arguments,
+};
+
+const char *
+qat_service_get_str(enum qat_service_type type)
+{
+	switch (type) {
+	case QAT_SERVICE_SYMMETRIC:
+		return "sym";
+	case QAT_SERVICE_ASYMMETRIC:
+		return "asym";
+	case QAT_SERVICE_COMPRESSION:
+		return "comp";
+	default:
+		return "invalid";
+	}
+}
+
 int
 qat_sgl_fill_array(struct rte_mbuf *buf, int64_t offset,
 		void *list_in, uint32_t data_len,

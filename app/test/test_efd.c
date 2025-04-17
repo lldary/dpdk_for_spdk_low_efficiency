@@ -1,6 +1,17 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(c) 2016-2017 Intel Corporation
  */
+#include "test.h"
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_efd(void)
+{
+	printf("EFD not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
 
 #include <rte_memcpy.h>
 #include <rte_malloc.h>
@@ -9,8 +20,6 @@
 #include <rte_random.h>
 #include <rte_debug.h>
 #include <rte_ip.h>
-
-#include "test.h"
 
 #define EFD_TEST_KEY_LEN 8
 #define TABLE_SIZE (1 << 21)
@@ -32,12 +41,7 @@ struct flow_key {
 	uint8_t proto;
 } __rte_packed;
 
-int efd_logtype_test;
-
-RTE_INIT(test_efd_init_log)
-{
-	efd_logtype_test = rte_log_register("test.efd");
-}
+RTE_LOG_REGISTER(efd_logtype_test, test.efd, INFO);
 
 /*
  * Print out result of unit test efd operation.
@@ -96,14 +100,14 @@ static struct flow_key keys[5] = {
 /* Array to store the data */
 static efd_value_t data[5];
 
-static inline uint8_t efd_get_all_sockets_bitmask(void)
+static inline uint64_t efd_get_all_sockets_bitmask(void)
 {
-	uint8_t all_cpu_sockets_bitmask = 0;
+	uint64_t all_cpu_sockets_bitmask = 0;
 	unsigned int i;
-	unsigned int next_lcore = rte_get_master_lcore();
+	unsigned int next_lcore = rte_get_main_lcore();
 	const int val_true = 1, val_false = 0;
 	for (i = 0; i < rte_lcore_count(); i++) {
-		all_cpu_sockets_bitmask |= 1 << rte_lcore_to_socket_id(next_lcore);
+		all_cpu_sockets_bitmask |= 1ULL << rte_lcore_to_socket_id(next_lcore);
 		next_lcore = rte_get_next_lcore(next_lcore, val_false, val_true);
 	}
 
@@ -448,6 +452,7 @@ static int test_efd_creation_with_bad_parameters(void)
 static int
 test_efd(void)
 {
+	test_socket_id = rte_socket_id();
 
 	/* Unit tests */
 	if (test_add_delete() < 0)
@@ -466,4 +471,6 @@ test_efd(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(efd_autotest, test_efd);
+#endif /* !RTE_EXEC_ENV_WINDOWS */
+
+REGISTER_PERF_TEST(efd_autotest, test_efd);

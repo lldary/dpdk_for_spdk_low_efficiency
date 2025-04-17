@@ -2,6 +2,8 @@
  * Copyright(c) 2018 Intel Corporation
  */
 
+#include <stdlib.h>
+
 #include <rte_malloc.h>
 #include <rte_eal.h>
 #include <rte_log.h>
@@ -75,7 +77,7 @@ main_loop(struct cperf_verify_ctx *ctx, enum rte_comp_xform_type type)
 
 	if (ops == NULL) {
 		RTE_LOG(ERR, USER1,
-			"Can't allocate memory for ops strucures\n");
+			"Can't allocate memory for ops structures\n");
 		return -1;
 	}
 
@@ -85,14 +87,17 @@ main_loop(struct cperf_verify_ctx *ctx, enum rte_comp_xform_type type)
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_COMPRESS,
 			.compress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
-				.deflate.huffman = test_data->huffman_enc,
+				.algo = test_data->test_algo,
 				.level = test_data->level,
 				.window_size = test_data->window_sz,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_DEFLATE)
+			xform.compress.deflate.huffman = test_data->huffman_enc;
+		else if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.compress.lz4.flags = test_data->lz4_flags;
 		output_data_ptr = ctx->mem.compressed_data;
 		output_data_sz = &ctx->comp_data_sz;
 		input_bufs = mem->decomp_bufs;
@@ -102,17 +107,20 @@ main_loop(struct cperf_verify_ctx *ctx, enum rte_comp_xform_type type)
 		xform = (struct rte_comp_xform) {
 			.type = RTE_COMP_DECOMPRESS,
 			.decompress = {
-				.algo = RTE_COMP_ALGO_DEFLATE,
+				.algo = test_data->test_algo,
 				.chksum = RTE_COMP_CHECKSUM_NONE,
 				.window_size = test_data->window_sz,
 				.hash_algo = RTE_COMP_HASH_ALGO_NONE
 			}
 		};
+		if (test_data->test_algo == RTE_COMP_ALGO_LZ4)
+			xform.decompress.lz4.flags = test_data->lz4_flags;
 		output_data_ptr = ctx->mem.decompressed_data;
 		output_data_sz = &ctx->decomp_data_sz;
 		input_bufs = mem->comp_bufs;
 		output_bufs = mem->decomp_bufs;
-		out_seg_sz = test_data->seg_sz;
+		out_seg_sz = (test_data->test_op & COMPRESS) ?
+			     test_data->seg_sz : test_data->out_seg_sz;
 	}
 
 	/* Create private xform */
@@ -224,7 +232,7 @@ main_loop(struct cperf_verify_ctx *ctx, enum rte_comp_xform_type type)
 				  op->status ==
 				  RTE_COMP_OP_STATUS_OUT_OF_SPACE_RECOVERABLE) {
 					RTE_LOG(ERR, USER1,
-"Out of space error occurred due to uncompressible input data expanding to larger than destination buffer. Increase the EXPANSE_RATIO constant to use this data.\n");
+"Out of space error occurred due to incompressible input data expanding to larger than destination buffer. Increase the EXPANSE_RATIO constant to use this data.\n");
 					res = -1;
 					goto end;
 				} else if (op->status !=
@@ -309,7 +317,7 @@ main_loop(struct cperf_verify_ctx *ctx, enum rte_comp_xform_type type)
 				  op->status ==
 				  RTE_COMP_OP_STATUS_OUT_OF_SPACE_RECOVERABLE) {
 					RTE_LOG(ERR, USER1,
-"Out of space error occurred due to uncompressible input data expanding to larger than destination buffer. Increase the EXPANSE_RATIO constant to use this data.\n");
+"Out of space error occurred due to incompressible input data expanding to larger than destination buffer. Increase the EXPANSE_RATIO constant to use this data.\n");
 					res = -1;
 					goto end;
 				} else if (op->status !=
@@ -388,39 +396,55 @@ cperf_verify_test_runner(void *test_ctx)
 	struct cperf_verify_ctx *ctx = test_ctx;
 	struct comp_test_data *test_data = ctx->options;
 	int ret = EXIT_SUCCESS;
-	static rte_atomic16_t display_once = RTE_ATOMIC16_INIT(0);
+	static uint16_t display_once;
 	uint32_t lcore = rte_lcore_id();
+	uint16_t exp = 0;
 
 	ctx->mem.lcore_id = lcore;
 
 	test_data->ratio = 0;
 
-	if (main_loop(ctx, RTE_COMP_COMPRESS) < 0) {
-		ret = EXIT_FAILURE;
-		goto end;
-	}
-
-	if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0) {
-		ret = EXIT_FAILURE;
-		goto end;
-	}
-
-	if (ctx->decomp_data_sz != test_data->input_data_sz) {
-		RTE_LOG(ERR, USER1,
-	   "Decompressed data length not equal to input data length\n");
-		RTE_LOG(ERR, USER1,
-			"Decompressed size = %zu, expected = %zu\n",
-			ctx->decomp_data_sz, test_data->input_data_sz);
-		ret = EXIT_FAILURE;
-		goto end;
-	} else {
-		if (memcmp(ctx->mem.decompressed_data,
-				test_data->input_data,
-				test_data->input_data_sz) != 0) {
-			RTE_LOG(ERR, USER1,
-		    "Decompressed data is not the same as file data\n");
+	if (test_data->test_op & COMPRESS) {
+		if (main_loop(ctx, RTE_COMP_COMPRESS) < 0) {
 			ret = EXIT_FAILURE;
 			goto end;
+		}
+	}
+
+	if (test_data->test_op & DECOMPRESS) {
+		if (main_loop(ctx, RTE_COMP_DECOMPRESS) < 0) {
+			ret = EXIT_FAILURE;
+			goto end;
+		}
+
+		if (!(test_data->test_op & COMPRESS)) {
+			/*
+			 * For DECOMPRESS_ONLY mode there is no more
+			 * verifications, reset the 'ratio' and 'comp_data_sz'
+			 * fields for other tests report.
+			 */
+			ctx->comp_data_sz = 0;
+			ctx->ratio = 0;
+			goto end;
+		}
+
+		if (ctx->decomp_data_sz != test_data->input_data_sz) {
+			RTE_LOG(ERR, USER1,
+				"Decompressed data length not equal to input data length\n");
+			RTE_LOG(ERR, USER1,
+				"Decompressed size = %zu, expected = %zu\n",
+				ctx->decomp_data_sz, test_data->input_data_sz);
+			ret = EXIT_FAILURE;
+			goto end;
+		} else {
+			if (memcmp(ctx->mem.decompressed_data,
+					test_data->input_data,
+					test_data->input_data_sz) != 0) {
+				RTE_LOG(ERR, USER1,
+					"Decompressed data is not the same as file data\n");
+				ret = EXIT_FAILURE;
+				goto end;
+			}
 		}
 	}
 
@@ -428,7 +452,8 @@ cperf_verify_test_runner(void *test_ctx)
 			test_data->input_data_sz * 100;
 
 	if (!ctx->silent) {
-		if (rte_atomic16_test_and_set(&display_once)) {
+		if (__atomic_compare_exchange_n(&display_once, &exp, 1, 0,
+				__ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
 			printf("%12s%6s%12s%17s\n",
 			    "lcore id", "Level", "Comp size", "Comp ratio [%]");
 		}

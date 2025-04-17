@@ -19,26 +19,31 @@ Network Interface Controller Drivers
     axgbe
     bnx2x
     bnxt
+    cnxk
+    cpfl
     cxgbe
     dpaa
     dpaa2
     e1000em
     ena
     enetc
+    enetfec
     enic
+    fail_safe
     fm10k
+    gve
     hinic
     hns3
     i40e
     ice
+    idpf
     igb
     igc
+    intel_vf
     ionic
     ipn3ke
     ixgbe
-    intel_vf
-    kni
-    liquidio
+    mana
     memif
     mlx4
     mlx5
@@ -47,19 +52,19 @@ Network Interface Controller Drivers
     netvsc
     nfb
     nfp
+    ngbe
     null
+    octeon_ep
     octeontx
-    octeontx2
+    pcap_ring
     pfe
     qede
     sfc_efx
     softnic
-    szedata2
     tap
     thunderx
+    txgbe
     vdev_netvsc
-    virtio
     vhost
+    virtio
     vmxnet3
-    pcap_ring
-    fail_safe

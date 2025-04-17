@@ -14,13 +14,13 @@
 #include <errno.h>
 
 #include <rte_mbuf.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
 #include <rte_string_fns.h>
 #include <rte_cycles.h>
 #include <rte_kvargs.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include "rte_dpaa2_mempool.h"
 
 #include "fslmc_vfio.h"
@@ -35,9 +35,6 @@
 
 struct dpaa2_bp_info *rte_dpaa2_bpid_info;
 static struct dpaa2_bp_list *h_bp_list;
-
-/* Dynamic logging identified for mempool */
-int dpaa2_logtype_mempool;
 
 static int
 rte_hw_mbuf_create_pool(struct rte_mempool *mp)
@@ -266,6 +263,29 @@ aligned:
 	}
 }
 
+int rte_dpaa2_bpid_info_init(struct rte_mempool *mp)
+{
+	struct dpaa2_bp_info *bp_info = mempool_to_bpinfo(mp);
+	uint32_t bpid = bp_info->bpid;
+
+	if (!rte_dpaa2_bpid_info) {
+		rte_dpaa2_bpid_info = (struct dpaa2_bp_info *)rte_malloc(NULL,
+				      sizeof(struct dpaa2_bp_info) * MAX_BPID,
+				      RTE_CACHE_LINE_SIZE);
+		if (rte_dpaa2_bpid_info == NULL)
+			return -ENOMEM;
+		memset(rte_dpaa2_bpid_info, 0,
+		       sizeof(struct dpaa2_bp_info) * MAX_BPID);
+	}
+
+	rte_dpaa2_bpid_info[bpid].meta_data_size = sizeof(struct rte_mbuf)
+				+ rte_pktmbuf_priv_size(mp);
+	rte_dpaa2_bpid_info[bpid].bp_list = bp_info->bp_list;
+	rte_dpaa2_bpid_info[bpid].bpid = bpid;
+
+	return 0;
+}
+
 uint16_t
 rte_dpaa2_mbuf_pool_bpid(struct rte_mempool *mp)
 {
@@ -273,7 +293,7 @@ rte_dpaa2_mbuf_pool_bpid(struct rte_mempool *mp)
 
 	bp_info = mempool_to_bpinfo(mp);
 	if (!(bp_info->bp_list)) {
-		RTE_LOG(ERR, PMD, "DPAA2 buffer pool not configured\n");
+		DPAA2_MEMPOOL_ERR("DPAA2 buffer pool not configured");
 		return -ENOMEM;
 	}
 
@@ -287,7 +307,7 @@ rte_dpaa2_mbuf_from_buf_addr(struct rte_mempool *mp, void *buf_addr)
 
 	bp_info = mempool_to_bpinfo(mp);
 	if (!(bp_info->bp_list)) {
-		RTE_LOG(ERR, PMD, "DPAA2 buffer pool not configured\n");
+		DPAA2_MEMPOOL_ERR("DPAA2 buffer pool not configured");
 		return NULL;
 	}
 
@@ -396,6 +416,7 @@ rte_hw_mbuf_get_count(const struct rte_mempool *mp)
 	unsigned int num_of_bufs = 0;
 	struct dpaa2_bp_info *bp_info;
 	struct dpaa2_dpbp_dev *dpbp_node;
+	struct fsl_mc_io mc_io;
 
 	if (!mp || !mp->pool_data) {
 		DPAA2_MEMPOOL_ERR("Invalid mempool provided");
@@ -405,7 +426,12 @@ rte_hw_mbuf_get_count(const struct rte_mempool *mp)
 	bp_info = (struct dpaa2_bp_info *)mp->pool_data;
 	dpbp_node = bp_info->bp_list->buf_pool.dpbp_node;
 
-	ret = dpbp_get_num_free_bufs(&dpbp_node->dpbp, CMD_PRI_LOW,
+	/* In case as secondary process access stats, MCP portal in priv-hw may
+	 * have primary process address. Need the secondary process based MCP
+	 * portal address for this object.
+	 */
+	mc_io.regs = dpaa2_get_mcp_ptr(MC_PORTAL_INDEX);
+	ret = dpbp_get_num_free_bufs(&mc_io, CMD_PRI_LOW,
 				     dpbp_node->token, &num_of_bufs);
 	if (ret) {
 		DPAA2_MEMPOOL_ERR("Unable to obtain free buf count (err=%d)",
@@ -452,11 +478,6 @@ static const struct rte_mempool_ops dpaa2_mpool_ops = {
 	.populate = dpaa2_populate,
 };
 
-MEMPOOL_REGISTER_OPS(dpaa2_mpool_ops);
+RTE_MEMPOOL_REGISTER_OPS(dpaa2_mpool_ops);
 
-RTE_INIT(dpaa2_mempool_init_log)
-{
-	dpaa2_logtype_mempool = rte_log_register("mempool.dpaa2");
-	if (dpaa2_logtype_mempool >= 0)
-		rte_log_set_level(dpaa2_logtype_mempool, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER_DEFAULT(dpaa2_logtype_mempool, NOTICE);

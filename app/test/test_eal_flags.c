@@ -9,13 +9,102 @@
 
 #include <string.h>
 #include <stdarg.h>
+
+#ifdef RTE_EXEC_ENV_WINDOWS
+static int
+test_missing_c_flag(void)
+{
+	printf("missing_c_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_main_lcore_flag(void)
+{
+	printf("main_lcore_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_invalid_n_flag(void)
+{
+	printf("invalid_n_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_no_hpet_flag(void)
+{
+	printf("no_hpet_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_no_huge_flag(void)
+{
+	printf("no_huge_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_allow_flag(void)
+{
+	printf("allow_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_invalid_b_flag(void)
+{
+	printf("invalid_b_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_invalid_vdev_flag(void)
+{
+	printf("invalid_vdev_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_invalid_r_flag(void)
+{
+	printf("invalid_r_flag not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_memory_flags(void)
+{
+	printf("memory_flags not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_file_prefix(void)
+{
+	printf("file_prefix not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+static int
+test_misc_flags(void)
+{
+	printf("misc_flags not supported on Windows, skipping test\n");
+	return TEST_SKIPPED;
+}
+
+#else
+
 #include <libgen.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <sys/wait.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <limits.h>
 #include <fcntl.h>
 
@@ -30,7 +119,7 @@
 #define no_hpet "--no-hpet"
 #define no_huge "--no-huge"
 #define no_shconf "--no-shconf"
-#define pci_whitelist "--pci-whitelist"
+#define allow "--allow"
 #define vdev "--vdev"
 #define memtest "memtest"
 #define memtest1 "memtest1"
@@ -124,6 +213,7 @@ process_hugefiles(const char * prefix, enum hugepage_action action)
 			case HUGEPAGE_CHECK_EXISTS:
 				{
 					/* file exists, return */
+					closedir(hugepage_dir);
 					result = 1;
 					goto end;
 				}
@@ -223,12 +313,12 @@ get_number_of_sockets(void)
 #endif
 
 /*
- * Test that the app doesn't run with invalid whitelist option.
+ * Test that the app doesn't run with invalid allow option.
  * Final tests ensures it does run with valid options as sanity check (one
  * test for with Domain+BDF, second for just with BDF)
  */
 static int
-test_whitelist_flag(void)
+test_allow_flag(void)
 {
 	unsigned i;
 #ifdef RTE_EXEC_ENV_FREEBSD
@@ -245,45 +335,45 @@ test_whitelist_flag(void)
 
 	const char *wlinval[][7] = {
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "error", "", ""},
+				allow, "error", "", ""},
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "0:0:0", "", ""},
+				allow, "0:0:0", "", ""},
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "0:error:0.1", "", ""},
+				allow, "0:error:0.1", "", ""},
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "0:0:0.1error", "", ""},
+				allow, "0:0:0.1error", "", ""},
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "error0:0:0.1", "", ""},
+				allow, "error0:0:0.1", "", ""},
 		{prgname, prefix, mp_flag,
-				pci_whitelist, "0:0:0.1.2", "", ""},
+				allow, "0:0:0.1.2", "", ""},
 	};
-	/* Test with valid whitelist option */
+	/* Test with valid allow option */
 	const char *wlval1[] = {prgname, prefix, mp_flag,
-			pci_whitelist, "00FF:09:0B.3"};
+			allow, "00FF:09:0B.3"};
 	const char *wlval2[] = {prgname, prefix, mp_flag,
-			pci_whitelist, "09:0B.3", pci_whitelist, "0a:0b.1"};
+			allow, "09:0B.3", allow, "0a:0b.1"};
 	const char *wlval3[] = {prgname, prefix, mp_flag,
-			pci_whitelist, "09:0B.3,type=test",
-			pci_whitelist, "08:00.1,type=normal",
+			allow, "09:0B.3,type=test",
+			allow, "08:00.1,type=normal",
 	};
 
 	for (i = 0; i < RTE_DIM(wlinval); i++) {
 		if (launch_proc(wlinval[i]) == 0) {
 			printf("Error - process did run ok with invalid "
-			    "whitelist parameter\n");
+			    "allow parameter\n");
 			return -1;
 		}
 	}
 	if (launch_proc(wlval1) != 0 ) {
-		printf("Error - process did not run ok with valid whitelist\n");
+		printf("Error - process did not run ok with valid allow\n");
 		return -1;
 	}
 	if (launch_proc(wlval2) != 0 ) {
-		printf("Error - process did not run ok with valid whitelist value set\n");
+		printf("Error - process did not run ok with valid allow value set\n");
 		return -1;
 	}
 	if (launch_proc(wlval3) != 0 ) {
-		printf("Error - process did not run ok with valid whitelist + args\n");
+		printf("Error - process did not run ok with valid allow + args\n");
 		return -1;
 	}
 
@@ -291,7 +381,7 @@ test_whitelist_flag(void)
 }
 
 /*
- * Test that the app doesn't run with invalid blacklist option.
+ * Test that the app doesn't run with invalid blocklist option.
  * Final test ensures it does run with valid options as sanity check
  */
 static int
@@ -317,7 +407,7 @@ test_invalid_b_flag(void)
 		{prgname, prefix, mp_flag, "-b", "error0:0:0.1"},
 		{prgname, prefix, mp_flag, "-b", "0:0:0.1.2"},
 	};
-	/* Test with valid blacklist option */
+	/* Test with valid blocklist option */
 	const char *blval[] = {prgname, prefix, mp_flag,
 			       "-b", "FF:09:0B.3"};
 
@@ -326,12 +416,12 @@ test_invalid_b_flag(void)
 	for (i = 0; i != RTE_DIM(blinval); i++) {
 		if (launch_proc(blinval[i]) == 0) {
 			printf("Error - process did run ok with invalid "
-			    "blacklist parameter\n");
+			    "blocklist parameter\n");
 			return -1;
 		}
 	}
 	if (launch_proc(blval) != 0) {
-		printf("Error - process did not run ok with valid blacklist value\n");
+		printf("Error - process did not run ok with valid blocklist value\n");
 		return -1;
 	}
 	return 0;
@@ -344,7 +434,7 @@ test_invalid_b_flag(void)
 static int
 test_invalid_vdev_flag(void)
 {
-#ifdef RTE_LIBRTE_PMD_RING
+#ifdef RTE_NET_RING
 #ifdef RTE_EXEC_ENV_FREEBSD
 	/* BSD target doesn't support prefixes at this point, and we also need to
 	 * run another primary process here */
@@ -419,7 +509,7 @@ test_invalid_r_flag(void)
 			{prgname, prefix, mp_flag, "-r", "-1"},
 			{prgname, prefix, mp_flag, "-r", "17"},
 	};
-	/* Test with valid blacklist option */
+	/* Test with valid blocklist option */
 	const char *rval[] = {prgname, prefix, mp_flag, "-r", "16"};
 
 	int i;
@@ -527,6 +617,9 @@ test_missing_c_flag(void)
 	const char * const argv29[] = { prgname, prefix, mp_flag,
 				 "--lcores",
 				 "0-1,2@(5-7),(3-5)@(0,2),(0,6),7"};
+	/* check an invalid cpu value >= CPU_SETSIZE */
+	const char * const argv30[] = { prgname, prefix, mp_flag,
+				 "--lcores", "3@" RTE_STR(CPU_SETSIZE) };
 
 	if (launch_proc(argv2) != 0) {
 		printf("Error - "
@@ -576,7 +669,7 @@ test_missing_c_flag(void)
 	    launch_proc(argv22) == 0 || launch_proc(argv23) == 0 ||
 	    launch_proc(argv24) == 0 || launch_proc(argv25) == 0 ||
 	    launch_proc(argv26) == 0 || launch_proc(argv27) == 0 ||
-	    launch_proc(argv28) == 0) {
+	    launch_proc(argv28) == 0 || launch_proc(argv30) == 0) {
 		printf("Error - "
 		       "process ran without error with invalid --lcore flag\n");
 		return -1;
@@ -596,10 +689,10 @@ test_missing_c_flag(void)
 }
 
 /*
- * Test --master-lcore option with matching coremask
+ * Test --main-lcore option with matching coremask
  */
 static int
-test_master_lcore_flag(void)
+test_main_lcore_flag(void)
 {
 #ifdef RTE_EXEC_ENV_FREEBSD
 	/* BSD target doesn't support prefixes at this point */
@@ -616,34 +709,34 @@ test_master_lcore_flag(void)
 	if (!rte_lcore_is_enabled(0) || !rte_lcore_is_enabled(1))
 		return TEST_SKIPPED;
 
-	/* --master-lcore flag but no value */
+	/* --main-lcore flag but no value */
 	const char *argv1[] = { prgname, prefix, mp_flag,
-				"-c", "3", "--master-lcore"};
-	/* --master-lcore flag with invalid value */
+				"-c", "3", "--main-lcore"};
+	/* --main-lcore flag with invalid value */
 	const char *argv2[] = { prgname, prefix, mp_flag,
-				"-c", "3", "--master-lcore", "-1"};
+				"-c", "3", "--main-lcore", "-1"};
 	const char *argv3[] = { prgname, prefix, mp_flag,
-				"-c", "3", "--master-lcore", "X"};
-	/* master lcore not in coremask */
+				"-c", "3", "--main-lcore", "X"};
+	/* main lcore not in coremask */
 	const char *argv4[] = { prgname, prefix, mp_flag,
-				"-c", "3", "--master-lcore", "2"};
+				"-c", "3", "--main-lcore", "2"};
 	/* valid value */
 	const char *argv5[] = { prgname, prefix, mp_flag,
-				"-c", "3", "--master-lcore", "1"};
+				"-c", "3", "--main-lcore", "1"};
 	/* valid value set before coremask */
 	const char *argv6[] = { prgname, prefix, mp_flag,
-				"--master-lcore", "1", "-c", "3"};
+				"--main-lcore", "1", "-c", "3"};
 
 	if (launch_proc(argv1) == 0
 			|| launch_proc(argv2) == 0
 			|| launch_proc(argv3) == 0
 			|| launch_proc(argv4) == 0) {
-		printf("Error - process ran without error with wrong --master-lcore\n");
+		printf("Error - process ran without error with wrong --main-lcore\n");
 		return -1;
 	}
 	if (launch_proc(argv5) != 0
 			|| launch_proc(argv6) != 0) {
-		printf("Error - process did not run ok with valid --master-lcore\n");
+		printf("Error - process did not run ok with valid --main-lcore\n");
 		return -1;
 	}
 	return 0;
@@ -766,6 +859,14 @@ test_no_huge_flag(void)
 	/* With --no-huge, -m and --socket-mem */
 	const char *argv4[] = {prgname, prefix, no_huge,
 			"-m", DEFAULT_MEM_SIZE, "--socket-mem=" DEFAULT_MEM_SIZE};
+
+	/* With --no-huge and --huge-worker-stack (should fail) */
+	const char * const argv5[] = {prgname, prefix, no_huge,
+			"--huge-worker-stack"};
+	/* With --no-huge and --huge-worker-stack=512 (should fail) */
+	const char * const argv6[] = {prgname, prefix, no_huge,
+			"--huge-worker-stack=512"};
+
 	if (launch_proc(argv1) != 0) {
 		printf("Error - process did not run ok with --no-huge flag\n");
 		return -1;
@@ -775,7 +876,7 @@ test_no_huge_flag(void)
 		return -1;
 	}
 #ifdef RTE_EXEC_ENV_FREEBSD
-	/* BSD target does not support NUMA, hence no --socket-mem tests */
+	/* no other tests are applicable to FreeBSD */
 	return 0;
 #endif
 
@@ -789,6 +890,14 @@ test_no_huge_flag(void)
 				"--socket-mem flags\n");
 		return -1;
 	}
+	if (launch_proc(argv5) == 0) {
+		printf("Error - process run ok with --no-huge and --huge-worker-stack flags");
+		return -1;
+	}
+	if (launch_proc(argv6) == 0) {
+		printf("Error - process run ok with --no-huge and --huge-worker-stack=size flags");
+		return -1;
+	}
 	return 0;
 }
 
@@ -796,6 +905,9 @@ static int
 test_misc_flags(void)
 {
 	char hugepath[PATH_MAX] = {0};
+	char hugepath_dir[PATH_MAX] = {0};
+	char hugepath_dir2[PATH_MAX] = {0};
+	char hugepath_dir3[PATH_MAX] = {0};
 #ifdef RTE_EXEC_ENV_FREEBSD
 	/* BSD target doesn't support prefixes at this point */
 	const char * prefix = "";
@@ -806,6 +918,7 @@ test_misc_flags(void)
 	FILE * hugedir_handle = NULL;
 	char line[PATH_MAX] = {0};
 	unsigned i, isempty = 1;
+
 	if (get_current_prefix(tmp, sizeof(tmp)) == NULL) {
 		printf("Error - unable to get current prefix!\n");
 		return -1;
@@ -845,6 +958,20 @@ test_misc_flags(void)
 	}
 #endif
 
+	snprintf(hugepath_dir, sizeof(hugepath_dir), "%s/dpdk.missing", hugepath);
+	snprintf(hugepath_dir2, sizeof(hugepath_dir2), "%s/dpdk.dir", hugepath);
+
+	if (mkdir(hugepath_dir2, 0700) != 0 && errno != EEXIST) {
+		printf("Error - failed to mkdir(%s)\n", hugepath_dir2);
+		return -1;
+	}
+
+	snprintf(hugepath_dir3, sizeof(hugepath_dir3), "%s/dpdk.dir/sub", hugepath);
+
+	if (mkdir(hugepath_dir3, 0700) != 0 && errno != EEXIST) {
+		printf("Error - failed to mkdir(%s)\n", hugepath_dir3);
+		goto fail;
+	}
 
 	/* check that some general flags don't prevent things from working.
 	 * All cases, apart from the first, app should run.
@@ -877,60 +1004,74 @@ test_misc_flags(void)
 	/* With invalid --huge-dir */
 	const char *argv9[] = {prgname, "-m", DEFAULT_MEM_SIZE,
 			"--file-prefix=hugedir", "--huge-dir", "invalid"};
+	/* With invalid --huge-dir sub-directory */
+	const char *argv10[] = {prgname, "-m", DEFAULT_MEM_SIZE,
+			"--file-prefix=hugedir", "--huge-dir", hugepath_dir};
+	/* With valid --huge-dir sub-directory */
+	const char *argv11[] = {prgname, "-m", DEFAULT_MEM_SIZE,
+			"--file-prefix=hugedir", "--huge-dir", hugepath_dir2};
 	/* Secondary process with invalid --huge-dir (should run as flag has no
 	 * effect on secondary processes) */
-	const char *argv10[] = {prgname, prefix, mp_flag,
+	const char *argv12[] = {prgname, prefix, mp_flag,
 			"--huge-dir", "invalid"};
 
 	/* try running with base-virtaddr param */
-	const char *argv11[] = {prgname, "--file-prefix=virtaddr",
-			"--base-virtaddr=0x12345678"};
+	const char *argv13[] = {prgname, "--file-prefix=virtaddr",
+			"--base-virtaddr=0x23456789"};
 
 	/* try running with --vfio-intr INTx flag */
-	const char *argv12[] = {prgname, "--file-prefix=intr",
+	const char *argv14[] = {prgname, "--file-prefix=intr",
 			"--vfio-intr=legacy"};
 
 	/* try running with --vfio-intr MSI flag */
-	const char *argv13[] = {prgname, "--file-prefix=intr",
+	const char *argv15[] = {prgname, "--file-prefix=intr",
 			"--vfio-intr=msi"};
 
 	/* try running with --vfio-intr MSI-X flag */
-	const char *argv14[] = {prgname, "--file-prefix=intr",
+	const char *argv16[] = {prgname, "--file-prefix=intr",
 			"--vfio-intr=msix"};
 
 	/* try running with --vfio-intr invalid flag */
-	const char *argv15[] = {prgname, "--file-prefix=intr",
+	const char *argv17[] = {prgname, "--file-prefix=intr",
 			"--vfio-intr=invalid"};
 
 	/* With process type as auto-detect */
-	const char * const argv16[] = {prgname, "--file-prefix=auto",
+	const char * const argv18[] = {prgname, "--file-prefix=auto",
 			"--proc-type=auto"};
 
 	/* With process type as auto-detect with no-shconf */
-	const char * const argv17[] = {prgname, "--proc-type=auto",
+	const char * const argv19[] = {prgname, "--proc-type=auto",
 			no_shconf, nosh_prefix, no_huge};
 
 	/* With process type as --create-uio-dev flag */
-	const char * const argv18[] = {prgname, "--file-prefix=uiodev",
+	const char * const argv20[] = {prgname, "--file-prefix=uiodev",
 			"--create-uio-dev"};
+
+	/* Try running with --huge-worker-stack flag */
+	const char * const argv21[] = {prgname, prefix, mp_flag,
+				       "--huge-worker-stack"};
+
+	/* Try running with --huge-worker-stack=512 flag */
+	const char * const argv22[] = {prgname, prefix, mp_flag,
+				       "--huge-worker-stack=512"};
 
 	/* run all tests also applicable to FreeBSD first */
 
 	if (launch_proc(argv0) == 0) {
 		printf("Error - process ran ok with invalid flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv1) != 0) {
 		printf("Error - process did not run ok with --no-pci flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv2) != 0) {
 		printf("Error - process did not run ok with -v flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv6) != 0) {
 		printf("Error - process did not run ok with --no-shconf flag\n");
-		return -1;
+		goto fail;
 	}
 
 #ifdef RTE_EXEC_ENV_FREEBSD
@@ -940,73 +1081,96 @@ test_misc_flags(void)
 
 	if (launch_proc(argv3) != 0) {
 		printf("Error - process did not run ok with --syslog flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv4) == 0) {
 		printf("Error - process run ok with empty --syslog flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv5) == 0) {
 		printf("Error - process run ok with invalid --syslog flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv7) != 0) {
 		printf("Error - process did not run ok with --huge-dir flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv8) == 0) {
 		printf("Error - process run ok with empty --huge-dir flag\n");
-		return -1;
+		goto fail;
 	}
 	if (launch_proc(argv9) == 0) {
 		printf("Error - process run ok with invalid --huge-dir flag\n");
-		return -1;
+		goto fail;
 	}
-	if (launch_proc(argv10) != 0) {
-		printf("Error - secondary process did not run ok with invalid --huge-dir flag\n");
-		return -1;
+	if (launch_proc(argv10) == 0) {
+		printf("Error - process run ok with invalid --huge-dir sub-dir flag\n");
+		goto fail;
 	}
 	if (launch_proc(argv11) != 0) {
-		printf("Error - process did not run ok with --base-virtaddr parameter\n");
-		return -1;
+		printf("Error - process did not run ok with --huge-dir subdir flag\n");
+		goto fail;
 	}
 	if (launch_proc(argv12) != 0) {
-		printf("Error - process did not run ok with "
-				"--vfio-intr INTx parameter\n");
-		return -1;
+		printf("Error - secondary process did not run ok with invalid --huge-dir flag\n");
+		goto fail;
 	}
 	if (launch_proc(argv13) != 0) {
-		printf("Error - process did not run ok with "
-				"--vfio-intr MSI parameter\n");
-		return -1;
+		printf("Error - process did not run ok with --base-virtaddr parameter\n");
+		goto fail;
 	}
 	if (launch_proc(argv14) != 0) {
 		printf("Error - process did not run ok with "
-				"--vfio-intr MSI-X parameter\n");
-		return -1;
+				"--vfio-intr INTx parameter\n");
+		goto fail;
 	}
-	if (launch_proc(argv15) == 0) {
-		printf("Error - process run ok with "
-				"--vfio-intr invalid parameter\n");
-		return -1;
+	if (launch_proc(argv15) != 0) {
+		printf("Error - process did not run ok with "
+				"--vfio-intr MSI parameter\n");
+		goto fail;
 	}
 	if (launch_proc(argv16) != 0) {
 		printf("Error - process did not run ok with "
-				"--proc-type as auto parameter\n");
-		return -1;
+				"--vfio-intr MSI-X parameter\n");
+		goto fail;
 	}
-	if (launch_proc(argv17) != 0) {
-		printf("Error - process did not run ok with "
-				"--proc-type and --no-shconf parameter\n");
-		return -1;
+	if (launch_proc(argv17) == 0) {
+		printf("Error - process run ok with "
+				"--vfio-intr invalid parameter\n");
+		goto fail;
 	}
 	if (launch_proc(argv18) != 0) {
 		printf("Error - process did not run ok with "
+				"--proc-type as auto parameter\n");
+		goto fail;
+	}
+	if (launch_proc(argv19) != 0) {
+		printf("Error - process did not run ok with "
+				"--proc-type and --no-shconf parameter\n");
+		goto fail;
+	}
+	if (launch_proc(argv20) != 0) {
+		printf("Error - process did not run ok with "
 				"--create-uio-dev parameter\n");
-		return -1;
+		goto fail;
+	}
+	if (launch_proc(argv21) != 0) {
+		printf("Error - process did not run ok with --huge-worker-stack parameter\n");
+		goto fail;
+	}
+	if (launch_proc(argv22) != 0) {
+		printf("Error - process did not run ok with --huge-worker-stack=size parameter\n");
+		goto fail;
 	}
 
+	rmdir(hugepath_dir3);
+	rmdir(hugepath_dir2);
 	return 0;
+
+fail:
+	rmdir(hugepath_dir3);
+	rmdir(hugepath_dir2);
+	return -1;
 }
 
 static int
@@ -1076,6 +1240,11 @@ test_file_prefix(void)
 	/* primary process with memtest1 and --single-file-segments mode */
 	const char * const argv8[] = {prgname, "-m",
 		DEFAULT_MEM_SIZE, "--single-file-segments",
+		"--file-prefix=" memtest1 };
+
+	/* primary process with memtest1 and --huge-unlink=never mode */
+	const char * const argv9[] = {prgname, "-m",
+		DEFAULT_MEM_SIZE, "--huge-unlink=never",
 		"--file-prefix=" memtest1 };
 
 	/* check if files for current prefix are present */
@@ -1243,6 +1412,25 @@ test_file_prefix(void)
 	if (process_hugefiles(memtest1, HUGEPAGE_CHECK_EXISTS) != 0) {
 		printf("Error - hugepage files for %s were not deleted!\n",
 				memtest1);
+		return -1;
+	}
+
+	/* this process will run with --huge-unlink,
+	 * so it should not remove hugepage files when it exits
+	 */
+	if (launch_proc(argv9) != 0) {
+		printf("Error - failed to run with --huge-unlink=never\n");
+		return -1;
+	}
+
+	/* check if hugefiles for memtest1 are present */
+	if (process_hugefiles(memtest1, HUGEPAGE_CHECK_EXISTS) == 0) {
+		printf("Error - hugepage files for %s were deleted!\n",
+				memtest1);
+		return -1;
+	}
+	if (process_hugefiles(memtest1, HUGEPAGE_DELETE) != 1) {
+		printf("Error - deleting hugepages failed!\n");
 		return -1;
 	}
 
@@ -1454,99 +1642,17 @@ test_memory_flags(void)
 	return 0;
 }
 
-static int
-test_eal_flags(void)
-{
-	int ret = 0;
+#endif /* !RTE_EXEC_ENV_WINDOWS */
 
-	ret = test_missing_c_flag();
-	if (ret < 0) {
-		printf("Error in test_missing_c_flag()\n");
-		return ret;
-	}
-
-	ret = test_master_lcore_flag();
-	if (ret < 0) {
-		printf("Error in test_master_lcore_flag()\n");
-		return ret;
-	}
-
-	ret = test_invalid_n_flag();
-	if (ret < 0) {
-		printf("Error in test_invalid_n_flag()\n");
-		return ret;
-	}
-
-	ret = test_no_hpet_flag();
-	if (ret < 0) {
-		printf("Error in test_no_hpet_flag()\n");
-		return ret;
-	}
-
-	ret = test_no_huge_flag();
-	if (ret < 0) {
-		printf("Error in test_no_huge_flag()\n");
-		return ret;
-	}
-
-	ret = test_whitelist_flag();
-	if (ret < 0) {
-		printf("Error in test_invalid_whitelist_flag()\n");
-		return ret;
-	}
-
-	ret = test_invalid_b_flag();
-	if (ret < 0) {
-		printf("Error in test_invalid_b_flag()\n");
-		return ret;
-	}
-
-#ifdef RTE_LIBRTE_PMD_RING
-	ret = test_invalid_vdev_flag();
-	if (ret < 0) {
-		printf("Error in test_invalid_vdev_flag()\n");
-		return ret;
-	}
-#endif
-	ret = test_invalid_r_flag();
-	if (ret < 0) {
-		printf("Error in test_invalid_r_flag()\n");
-		return ret;
-	}
-
-	ret = test_memory_flags();
-	if (ret < 0) {
-		printf("Error in test_memory_flags()\n");
-		return ret;
-	}
-
-	ret = test_file_prefix();
-	if (ret < 0) {
-		printf("Error in test_file_prefix()\n");
-		return ret;
-	}
-
-	ret = test_misc_flags();
-	if (ret < 0) {
-		printf("Error in test_misc_flags()");
-		return ret;
-	}
-
-	return ret;
-}
-
-REGISTER_TEST_COMMAND(eal_flags_autotest, test_eal_flags);
-
-/* subtests used in meson for CI */
-REGISTER_TEST_COMMAND(eal_flags_c_opt_autotest, test_missing_c_flag);
-REGISTER_TEST_COMMAND(eal_flags_master_opt_autotest, test_master_lcore_flag);
-REGISTER_TEST_COMMAND(eal_flags_n_opt_autotest, test_invalid_n_flag);
-REGISTER_TEST_COMMAND(eal_flags_hpet_autotest, test_no_hpet_flag);
-REGISTER_TEST_COMMAND(eal_flags_no_huge_autotest, test_no_huge_flag);
-REGISTER_TEST_COMMAND(eal_flags_w_opt_autotest, test_whitelist_flag);
-REGISTER_TEST_COMMAND(eal_flags_b_opt_autotest, test_invalid_b_flag);
-REGISTER_TEST_COMMAND(eal_flags_vdev_opt_autotest, test_invalid_vdev_flag);
-REGISTER_TEST_COMMAND(eal_flags_r_opt_autotest, test_invalid_r_flag);
-REGISTER_TEST_COMMAND(eal_flags_mem_autotest, test_memory_flags);
-REGISTER_TEST_COMMAND(eal_flags_file_prefix_autotest, test_file_prefix);
-REGISTER_TEST_COMMAND(eal_flags_misc_autotest, test_misc_flags);
+REGISTER_FAST_TEST(eal_flags_c_opt_autotest, false, false, test_missing_c_flag);
+REGISTER_FAST_TEST(eal_flags_main_opt_autotest, false, false, test_main_lcore_flag);
+REGISTER_FAST_TEST(eal_flags_n_opt_autotest, false, false, test_invalid_n_flag);
+REGISTER_FAST_TEST(eal_flags_hpet_autotest, false, false, test_no_hpet_flag);
+REGISTER_FAST_TEST(eal_flags_no_huge_autotest, false, false, test_no_huge_flag);
+REGISTER_FAST_TEST(eal_flags_a_opt_autotest, false, false, test_allow_flag);
+REGISTER_FAST_TEST(eal_flags_b_opt_autotest, false, false, test_invalid_b_flag);
+REGISTER_FAST_TEST(eal_flags_vdev_opt_autotest, false, false, test_invalid_vdev_flag);
+REGISTER_FAST_TEST(eal_flags_r_opt_autotest, false, false, test_invalid_r_flag);
+REGISTER_FAST_TEST(eal_flags_mem_autotest, false, false, test_memory_flags);
+REGISTER_FAST_TEST(eal_flags_file_prefix_autotest, false, false, test_file_prefix);
+REGISTER_FAST_TEST(eal_flags_misc_autotest, false, false, test_misc_flags);

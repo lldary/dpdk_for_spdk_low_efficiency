@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2019-2020 Broadcom
+ * Copyright(c) 2019-2023 Broadcom
  * All rights reserved.
  */
 
@@ -25,6 +25,14 @@ stack_init(int num_entries, uint32_t *items, struct stack *st)
 	st->items = items;
 
 	return 0;
+}
+
+/*
+ * Return the address of the items
+ */
+uint32_t *stack_items(struct stack *st)
+{
+	return st->items;
 }
 
 /* Return the size of the stack

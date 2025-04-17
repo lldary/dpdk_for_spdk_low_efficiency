@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2019 Broadcom
+ * Copyright(c) 2014-2023 Broadcom
  * All rights reserved.
  */
 
@@ -9,6 +9,7 @@
 #include "bnxt_ulp.h"
 
 #define BNXT_ULP_MARK_VALID   0x1
+#define BNXT_ULP_MARK_VFR_ID  0x2
 #define BNXT_ULP_MARK_GLOBAL_HW_FID 0x4
 #define BNXT_ULP_MARK_LOCAL_HW_FID 0x8
 
@@ -67,6 +68,8 @@ ulp_mark_db_deinit(struct bnxt_ulp_context *ctxt);
  *
  * fid [in] The flow id that is returned by HW in BD
  *
+ * vfr_flag [out].it indicatesif mark is vfr_id or mark id
+ *
  * mark [out] The mark that is associated with the FID
  *
  */
@@ -74,6 +77,7 @@ int32_t
 ulp_mark_db_mark_get(struct bnxt_ulp_context *ctxt,
 		     bool is_gfid,
 		     uint32_t fid,
+		     uint32_t *vfr_flag,
 		     uint32_t *mark);
 
 /*
@@ -108,5 +112,4 @@ int32_t
 ulp_mark_db_mark_del(struct bnxt_ulp_context *ctxt,
 		     uint32_t mark_flag,
 		     uint32_t gfid);
-
 #endif /* _ULP_MARK_MGR_H_ */

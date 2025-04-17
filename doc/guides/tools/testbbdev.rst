@@ -1,40 +1,17 @@
 ..  SPDX-License-Identifier: BSD-3-Clause
     Copyright(c) 2017 Intel Corporation
 
+.. _test_bbdev_application:
+
 dpdk-test-bbdev Application
 ===========================
 
 The ``dpdk-test-bbdev`` tool is a Data Plane Development Kit (DPDK) utility that
 allows measuring performance parameters of PMDs available in the bbdev framework.
-Available tests available for execution are: latency, throughput, validation,
+Tests available for execution are: latency, throughput, validation,
 bler and sanity tests. Execution of tests can be customized using various
 parameters passed to a python running script.
 
-Compiling the Application
--------------------------
-
-**Step 1: PMD setting**
-
-The ``dpdk-test-bbdev`` tool depends on crypto device drivers PMD which
-are disabled by default in the build configuration file ``common_base``.
-The bbdevice drivers PMD which should be tested can be enabled by setting
-
-   ``CONFIG_RTE_LIBRTE_PMD_<name>=y``
-
-Setting example for (*baseband_turbo_sw*) PMD
-
-   ``CONFIG_RTE_LIBRTE_PMD_BBDEV_TURBO_SW=y``
-
-**Step 2: Build the application**
-
-Execute the ``dpdk-setup.sh`` script to build the DPDK library together with the
-``dpdk-test-bbdev`` application.
-
-Initially, the user must select a DPDK target to choose the correct target type
-and compiler options to use when building the libraries.
-The user must have all libraries, modules, updates and compilers installed
-in the system prior to this, as described in the earlier chapters in this
-Getting Started Guide.
 
 Running the Application
 -----------------------
@@ -43,7 +20,7 @@ The tool application has a number of command line options:
 
 .. code-block:: console
 
-  python test-bbdev.py [-h] [-p TESTAPP_PATH] [-e EAL_PARAMS] [-t TIMEOUT]
+    test-bbdev.py [-h] [-p TESTAPP_PATH] [-e EAL_PARAMS] [-t TIMEOUT]
                        [-c TEST_CASE [TEST_CASE ...]]
                        [-v TEST_VECTOR [TEST_VECTOR...]] [-n NUM_OPS]
                        [-b BURST_SIZE [BURST_SIZE ...]] [-l NUM_LCORES]
@@ -60,7 +37,7 @@ The following are the command-line options:
 
 ``-p TESTAPP_PATH, --testapp_path TESTAPP_PATH``
  Indicates the path to the bbdev test app. If not specified path is set based
- on *$RTE_SDK* environment variable concatenated with "*/build/app/testbbdev*".
+ on "../.." concatenated with "*/build/app/dpdk-test-bbdev*".
 
 ``-e EAL_PARAMS, --eal_params EAL_PARAMS``
  Specifies EAL arguments which are passed to the test app. For more details,
@@ -82,9 +59,8 @@ The following are the command-line options:
 
 ``-v TEST_VECTOR [TEST_VECTOR ...], --test_vector TEST_VECTOR [TEST_VECTOR ...]``
  Specifies paths to the test vector files. If not specified path is set based
- on *$RTE_SDK* environment variable concatenated with
- "*/app/test-bbdev/test_vectors/bbdev_null.data*" and indicates default
- data file.
+ on "../.." concatenated with "*/app/test-bbdev/test_vectors/bbdev_null.data*"
+ and indicates default data file.
 
  **Example usage:**
 
@@ -259,8 +235,8 @@ They are chosen to have a good coverage across sizes and processing
 parameters while still keeping their number limited as part of sanity
 regression.
 
-Shortened tree of isg_cid-wireless_dpdk_ae with dpdk compiled for
-x86_64-native-linux-icc target:
+Shortened tree of isg_cid-wireless_dpdk_ae with dpdk compiled and output
+to the build directory:
 
 ::
 
@@ -268,16 +244,16 @@ x86_64-native-linux-icc target:
      |-- test-bbdev
          |-- test_vectors
 
- |-- x86_64-native-linux-icc
+ |-- build
      |-- app
-         |-- testbbdev
+         |-- dpdk-test-bbdev
 
 All bbdev devices
 ~~~~~~~~~~~~~~~~~
 
 .. code-block:: console
 
-  ./test-bbdev.py -p ../../x86_64-native-linux-icc/app/testbbdev
+  ./test-bbdev.py -p ../../build/app/dpdk-test-bbdev
   -v turbo_dec_default.data
 
 It runs all available tests using the test vector filled based on
@@ -291,7 +267,7 @@ baseband turbo_sw device
 
 .. code-block:: console
 
-  ./test-bbdev.py -p ../../x86_64-native-linux-icc/app/testbbdev
+  ./test-bbdev.py -p ../../build/app/dpdk-test-bbdev
   -e="--vdev=baseband_turbo_sw" -t 120 -c validation
   -v ./test_vectors/* -n 64 -b 8 32
 
@@ -357,6 +333,9 @@ explicitly.
 Variable op_type has to be defined as a first variable in file. It specifies
 what type of operations will be executed. For 4G decoder op_type has to be set to
 ``RTE_BBDEV_OP_TURBO_DEC`` and for 4G encoder to ``RTE_BBDEV_OP_TURBO_ENC``.
+
+Bbdev-test adjusts the byte endianness based on the PMD capability (data_endianness)
+and all the test vectors input/output data are assumed to be LE by default
 
 Full details of the meaning and valid values for the below fields are
 documented in *rte_bbdev_op.h*
@@ -805,6 +784,139 @@ rte_bbdev_op_ldpcenc_flag_bitmasks:
 
     op_flags =
     RTE_BBDEV_LDPC_RATE_MATCH
+
+Chain of operation statuses that are expected after operation is performed.
+Following statuses can be used:
+
+- ``DMA``
+
+- ``FCW``
+
+- ``OK``
+
+``OK`` means no errors are expected. Cannot be used with other values.
+
+.. parsed-literal::
+
+    expected_status =
+    OK
+
+
+FFT test vectors template
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For FFT it has to be always set to ``RTE_BBDEV_OP_FFT``
+
+.. parsed-literal::
+
+    op_type =
+    RTE_BBDEV_OP_FFT
+
+Chain of uint32_t values
+
+.. parsed-literal::
+
+    input0 =
+    0x11d2bcac, ...
+
+Chain of uint32_t values
+
+.. parsed-literal::
+
+    output0 =
+    0xd2399179, ...
+
+uint16_t value
+
+.. parsed-literal::
+
+    in_sequence_size =
+    60
+
+uint16_t value
+
+.. parsed-literal::
+
+    in_leading_padding =
+    4
+
+uint16_t value
+
+.. parsed-literal::
+
+    out_sequence_size =
+    60
+
+uint6_t value
+
+.. parsed-literal::
+
+    out_leading_depadding =
+    0
+
+List of window indexes
+
+.. parsed-literal::
+
+    window_index =
+    2, 5, 8, 11, 14, 2, 5, 8, 11, 14, 2, 5
+
+uint8_t value
+
+.. parsed-literal::
+
+    num_antennas_log2 =
+    3
+
+uint8_t value
+
+.. parsed-literal::
+
+    ifft_log2 =
+    6
+
+uint8_t value
+
+.. parsed-literal::
+
+    fft_log2 =
+    6
+
+uint8_t value
+
+.. parsed-literal::
+
+    cs_time_adjustment =
+    0
+
+uint8_t value
+
+.. parsed-literal::
+
+    ifft_shift =
+    3
+
+uint8_t value
+
+.. parsed-literal::
+
+    fft_shift =
+    3
+
+uint16_t value
+
+.. parsed-literal::
+
+    ncs_reciprocal =
+    5461
+
+Chain of flags for FFT operation based on the
+rte_bbdev_op_fft_flag_bitmasks:
+
+.. parsed-literal::
+
+    op_flags =
+    RTE_BBDEV_FFT_CS_ADJUSTMENT, RTE_BBDEV_FFT_WINDOWING
 
 Chain of operation statuses that are expected after operation is performed.
 Following statuses can be used:

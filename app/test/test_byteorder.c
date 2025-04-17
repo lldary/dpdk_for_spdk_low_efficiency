@@ -46,7 +46,7 @@ test_byteorder(void)
 		return -1;
 
 	res_u16 = rte_bswap16(0x1337);
-	printf("const %"PRIx16" -> %"PRIx16"\n", 0x1337, res_u16);
+	printf("const %"PRIx16" -> %"PRIx16"\n", (uint16_t)0x1337, res_u16);
 	if (res_u16 != 0x3713)
 		return -1;
 
@@ -63,4 +63,4 @@ test_byteorder(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(byteorder_autotest, test_byteorder);
+REGISTER_FAST_TEST(byteorder_autotest, true, true, test_byteorder);

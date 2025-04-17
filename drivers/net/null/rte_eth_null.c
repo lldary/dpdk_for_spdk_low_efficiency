@@ -3,12 +3,14 @@
  *  All rights reserved.
  */
 
+#include <stdlib.h>
+
 #include <rte_mbuf.h>
-#include <rte_ethdev_driver.h>
-#include <rte_ethdev_vdev.h>
+#include <ethdev_driver.h>
+#include <ethdev_vdev.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_kvargs.h>
 #include <rte_spinlock.h>
 
@@ -35,8 +37,8 @@ struct null_queue {
 	struct rte_mempool *mb_pool;
 	struct rte_mbuf *dummy_packet;
 
-	rte_atomic64_t rx_pkts;
-	rte_atomic64_t tx_pkts;
+	uint64_t rx_pkts;
+	uint64_t tx_pkts;
 };
 
 struct pmd_options {
@@ -61,19 +63,19 @@ struct pmd_internals {
 	rte_spinlock_t rss_lock;
 
 	uint16_t reta_size;
-	struct rte_eth_rss_reta_entry64 reta_conf[ETH_RSS_RETA_SIZE_128 /
-			RTE_RETA_GROUP_SIZE];
+	struct rte_eth_rss_reta_entry64 reta_conf[RTE_ETH_RSS_RETA_SIZE_128 /
+			RTE_ETH_RETA_GROUP_SIZE];
 
 	uint8_t rss_key[40];                /**< 40-byte hash key. */
 };
 static struct rte_eth_link pmd_link = {
-	.link_speed = ETH_SPEED_NUM_10G,
-	.link_duplex = ETH_LINK_FULL_DUPLEX,
-	.link_status = ETH_LINK_DOWN,
-	.link_autoneg = ETH_LINK_FIXED,
+	.link_speed = RTE_ETH_SPEED_NUM_10G,
+	.link_duplex = RTE_ETH_LINK_FULL_DUPLEX,
+	.link_status = RTE_ETH_LINK_DOWN,
+	.link_autoneg = RTE_ETH_LINK_FIXED,
 };
 
-static int eth_null_logtype;
+RTE_LOG_REGISTER_DEFAULT(eth_null_logtype, NOTICE);
 
 #define PMD_LOG(level, fmt, args...) \
 	rte_log(RTE_LOG_ ## level, eth_null_logtype, \
@@ -99,7 +101,8 @@ eth_null_rx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs)
 		bufs[i]->port = h->internals->port_id;
 	}
 
-	rte_atomic64_add(&(h->rx_pkts), i);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_fetch_add(&h->rx_pkts, i, __ATOMIC_SEQ_CST);
 
 	return i;
 }
@@ -126,7 +129,8 @@ eth_null_copy_rx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs)
 		bufs[i]->port = h->internals->port_id;
 	}
 
-	rte_atomic64_add(&(h->rx_pkts), i);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_fetch_add(&h->rx_pkts, i, __ATOMIC_SEQ_CST);
 
 	return i;
 }
@@ -150,7 +154,8 @@ eth_null_tx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs)
 	for (i = 0; i < nb_bufs; i++)
 		rte_pktmbuf_free(bufs[i]);
 
-	rte_atomic64_add(&(h->tx_pkts), i);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_fetch_add(&h->tx_pkts, i, __ATOMIC_SEQ_CST);
 
 	return i;
 }
@@ -172,7 +177,8 @@ eth_null_copy_tx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs)
 		rte_pktmbuf_free(bufs[i]);
 	}
 
-	rte_atomic64_add(&(h->tx_pkts), i);
+	/* NOTE: review for potential ordering optimization */
+	__atomic_fetch_add(&h->tx_pkts, i, __ATOMIC_SEQ_CST);
 
 	return i;
 }
@@ -186,20 +192,37 @@ eth_dev_configure(struct rte_eth_dev *dev __rte_unused)
 static int
 eth_dev_start(struct rte_eth_dev *dev)
 {
+	uint16_t i;
+
 	if (dev == NULL)
 		return -EINVAL;
 
-	dev->data->dev_link.link_status = ETH_LINK_UP;
+	dev->data->dev_link.link_status = RTE_ETH_LINK_UP;
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+
 	return 0;
 }
 
-static void
+static int
 eth_dev_stop(struct rte_eth_dev *dev)
 {
-	if (dev == NULL)
-		return;
+	uint16_t i;
 
-	dev->data->dev_link.link_status = ETH_LINK_DOWN;
+	if (dev == NULL)
+		return 0;
+
+	dev->data->dev_link.link_status = RTE_ETH_LINK_DOWN;
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+
+	return 0;
 }
 
 static int
@@ -293,6 +316,7 @@ eth_dev_info(struct rte_eth_dev *dev,
 	dev_info->min_rx_bufsize = 0;
 	dev_info->reta_size = internals->reta_size;
 	dev_info->flow_type_rss_offloads = internals->flow_type_rss_offloads;
+	dev_info->hash_key_size = sizeof(internals->rss_key);
 
 	return 0;
 }
@@ -312,8 +336,9 @@ eth_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *igb_stats)
 			RTE_MIN(dev->data->nb_rx_queues,
 				RTE_DIM(internal->rx_null_queues)));
 	for (i = 0; i < num_stats; i++) {
+		/* NOTE: review for atomic access */
 		igb_stats->q_ipackets[i] =
-			internal->rx_null_queues[i].rx_pkts.cnt;
+			internal->rx_null_queues[i].rx_pkts;
 		rx_total += igb_stats->q_ipackets[i];
 	}
 
@@ -321,8 +346,9 @@ eth_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *igb_stats)
 			RTE_MIN(dev->data->nb_tx_queues,
 				RTE_DIM(internal->tx_null_queues)));
 	for (i = 0; i < num_stats; i++) {
+		/* NOTE: review for atomic access */
 		igb_stats->q_opackets[i] =
-			internal->tx_null_queues[i].tx_pkts.cnt;
+			internal->tx_null_queues[i].tx_pkts;
 		tx_total += igb_stats->q_opackets[i];
 	}
 
@@ -343,22 +369,34 @@ eth_stats_reset(struct rte_eth_dev *dev)
 
 	internal = dev->data->dev_private;
 	for (i = 0; i < RTE_DIM(internal->rx_null_queues); i++)
-		internal->rx_null_queues[i].rx_pkts.cnt = 0;
+		/* NOTE: review for atomic access */
+		internal->rx_null_queues[i].rx_pkts = 0;
 	for (i = 0; i < RTE_DIM(internal->tx_null_queues); i++)
-		internal->tx_null_queues[i].tx_pkts.cnt = 0;
+		/* NOTE: review for atomic access */
+		internal->tx_null_queues[i].tx_pkts = 0;
 
 	return 0;
 }
 
 static void
-eth_queue_release(void *q)
+eth_rx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
 {
-	struct null_queue *nq;
+	struct null_queue *nq = dev->data->rx_queues[qid];
 
-	if (q == NULL)
+	if (nq == NULL)
 		return;
 
-	nq = q;
+	rte_free(nq->dummy_packet);
+}
+
+static void
+eth_tx_queue_release(struct rte_eth_dev *dev, uint16_t qid)
+{
+	struct null_queue *nq = dev->data->tx_queues[qid];
+
+	if (nq == NULL)
+		return;
+
 	rte_free(nq->dummy_packet);
 }
 
@@ -379,9 +417,9 @@ eth_rss_reta_update(struct rte_eth_dev *dev,
 	rte_spinlock_lock(&internal->rss_lock);
 
 	/* Copy RETA table */
-	for (i = 0; i < (internal->reta_size / RTE_RETA_GROUP_SIZE); i++) {
+	for (i = 0; i < (internal->reta_size / RTE_ETH_RETA_GROUP_SIZE); i++) {
 		internal->reta_conf[i].mask = reta_conf[i].mask;
-		for (j = 0; j < RTE_RETA_GROUP_SIZE; j++)
+		for (j = 0; j < RTE_ETH_RETA_GROUP_SIZE; j++)
 			if ((reta_conf[i].mask >> j) & 0x01)
 				internal->reta_conf[i].reta[j] = reta_conf[i].reta[j];
 	}
@@ -404,8 +442,8 @@ eth_rss_reta_query(struct rte_eth_dev *dev,
 	rte_spinlock_lock(&internal->rss_lock);
 
 	/* Copy RETA table */
-	for (i = 0; i < (internal->reta_size / RTE_RETA_GROUP_SIZE); i++) {
-		for (j = 0; j < RTE_RETA_GROUP_SIZE; j++)
+	for (i = 0; i < (internal->reta_size / RTE_ETH_RETA_GROUP_SIZE); i++) {
+		for (j = 0; j < RTE_ETH_RETA_GROUP_SIZE; j++)
 			if ((reta_conf[i].mask >> j) & 0x01)
 				reta_conf[i].reta[j] = internal->reta_conf[i].reta[j];
 	}
@@ -458,15 +496,31 @@ eth_mac_address_set(__rte_unused struct rte_eth_dev *dev,
 	return 0;
 }
 
+static int
+eth_dev_close(struct rte_eth_dev *dev)
+{
+	PMD_LOG(INFO, "Closing null ethdev on NUMA socket %u",
+			rte_socket_id());
+
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
+
+	/* mac_addrs must not be freed alone because part of dev_private */
+	dev->data->mac_addrs = NULL;
+
+	return 0;
+}
+
 static const struct eth_dev_ops ops = {
+	.dev_close = eth_dev_close,
 	.dev_start = eth_dev_start,
 	.dev_stop = eth_dev_stop,
 	.dev_configure = eth_dev_configure,
 	.dev_infos_get = eth_dev_info,
 	.rx_queue_setup = eth_rx_queue_setup,
 	.tx_queue_setup = eth_tx_queue_setup,
-	.rx_queue_release = eth_queue_release,
-	.tx_queue_release = eth_queue_release,
+	.rx_queue_release = eth_rx_queue_release,
+	.tx_queue_release = eth_tx_queue_release,
 	.mtu_set = eth_mtu_set,
 	.link_update = eth_link_update,
 	.mac_addr_set = eth_mac_address_set,
@@ -520,8 +574,8 @@ eth_dev_null_create(struct rte_vdev_device *dev, struct pmd_options *args)
 	internals->port_id = eth_dev->data->port_id;
 	rte_eth_random_addr(internals->eth_addr.addr_bytes);
 
-	internals->flow_type_rss_offloads =  ETH_RSS_PROTO_MASK;
-	internals->reta_size = RTE_DIM(internals->reta_conf) * RTE_RETA_GROUP_SIZE;
+	internals->flow_type_rss_offloads =  RTE_ETH_RSS_PROTO_MASK;
+	internals->reta_size = RTE_DIM(internals->reta_conf) * RTE_ETH_RETA_GROUP_SIZE;
 
 	rte_memcpy(internals->rss_key, default_rss_key, 40);
 
@@ -532,6 +586,7 @@ eth_dev_null_create(struct rte_vdev_device *dev, struct pmd_options *args)
 	data->mac_addrs = &internals->eth_addr;
 	data->promiscuous = 1;
 	data->all_multicast = 1;
+	data->dev_flags |= RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	eth_dev->dev_ops = &ops;
 
@@ -688,8 +743,7 @@ rte_pmd_null_probe(struct rte_vdev_device *dev)
 	ret = eth_dev_null_create(dev, &args);
 
 free_kvlist:
-	if (kvlist)
-		rte_kvargs_free(kvlist);
+	rte_kvargs_free(kvlist);
 	return ret;
 }
 
@@ -701,18 +755,12 @@ rte_pmd_null_remove(struct rte_vdev_device *dev)
 	if (!dev)
 		return -EINVAL;
 
-	PMD_LOG(INFO, "Closing null ethdev on numa socket %u",
-			rte_socket_id());
-
 	/* find the ethdev entry */
 	eth_dev = rte_eth_dev_allocated(rte_vdev_device_name(dev));
 	if (eth_dev == NULL)
-		return -1;
+		return 0; /* port already released */
 
-	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
-		/* mac_addrs must not be freed alone because part of dev_private */
-		eth_dev->data->mac_addrs = NULL;
-
+	eth_dev_close(eth_dev);
 	rte_eth_dev_release_port(eth_dev);
 
 	return 0;
@@ -729,10 +777,3 @@ RTE_PMD_REGISTER_PARAM_STRING(net_null,
 	"size=<int> "
 	"copy=<int> "
 	ETH_NULL_PACKET_NO_RX_ARG "=0|1");
-
-RTE_INIT(eth_null_init_log)
-{
-	eth_null_logtype = rte_log_register("pmd.net.null");
-	if (eth_null_logtype >= 0)
-		rte_log_set_level(eth_null_logtype, RTE_LOG_NOTICE);
-}

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/queue.h>
 #include <stdarg.h>
+#include <signal.h>
 #include <errno.h>
 #include <getopt.h>
 #include <unistd.h>
@@ -22,7 +23,6 @@
 #include <rte_eal.h>
 #include <rte_per_lcore.h>
 #include <rte_launch.h>
-#include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_prefetch.h>
 #include <rte_lcore.h>
@@ -42,10 +42,20 @@
 
 #include "main.h"
 
+bool force_quit;
+
+static void
+signal_handler(int signum)
+{
+	if (signum == SIGINT || signum == SIGTERM)
+		force_quit = true;
+}
+
 int
 main(int argc, char **argv)
 {
 	uint32_t lcore;
+	uint32_t i;
 	int ret;
 
 	/* Init EAL */
@@ -54,6 +64,10 @@ main(int argc, char **argv)
 		return -1;
 	argc -= ret;
 	argv += ret;
+
+	force_quit = false;
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
 
 	/* Parse application arguments (after the EAL ones) */
 	ret = app_parse_args(argc, argv);
@@ -66,11 +80,29 @@ main(int argc, char **argv)
 	app_init();
 
 	/* Launch per-lcore init on every lcore */
-	rte_eal_mp_remote_launch(app_lcore_main_loop, NULL, CALL_MASTER);
-	RTE_LCORE_FOREACH_SLAVE(lcore) {
+	rte_eal_mp_remote_launch(app_lcore_main_loop, NULL, CALL_MAIN);
+	RTE_LCORE_FOREACH_WORKER(lcore) {
 		if (rte_eal_wait_lcore(lcore) < 0)
 			return -1;
 	}
+
+	/* Close ports */
+	for (i = 0; i < app.n_ports; i++) {
+		uint16_t port;
+		int ret;
+
+		port = app.ports[i];
+		printf("Closing port %d...", port);
+		ret = rte_eth_dev_stop(port);
+		if (ret != 0)
+			printf("rte_eth_dev_stop: err=%d, port=%u\n",
+					 ret, port);
+		rte_eth_dev_close(port);
+		printf("Done\n");
+	}
+
+	/* Clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }
@@ -126,7 +158,7 @@ app_lcore_main_loop(__rte_unused void *arg)
 			return 0;
 
 		case e_APP_PIPELINE_ACL:
-#ifndef RTE_LIBRTE_ACL
+#ifndef RTE_LIB_ACL
 			rte_exit(EXIT_FAILURE, "ACL not present in build\n");
 #else
 			app_main_loop_worker_pipeline_acl();

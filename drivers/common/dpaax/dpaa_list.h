@@ -31,10 +31,12 @@ do { \
 #define list_entry(node, type, member) \
 	(type *)((void *)node - offsetof(type, member))
 #define list_empty(p) \
-({ \
+__extension__ ({ \
 	const struct list_head *__p298 = (p); \
 	((__p298->next == __p298) && (__p298->prev == __p298)); \
 })
+#define list_first_entry(ptr, type, member) \
+	list_entry((ptr)->next, type, member)
 #define list_add(p, l) \
 do { \
 	struct list_head *__p298 = (p); \

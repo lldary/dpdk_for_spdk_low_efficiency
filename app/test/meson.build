@@ -1,497 +1,264 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright(c) 2017 Intel Corporation
+# Copyright(c) 2017-2023 Intel Corporation
 
-if not get_option('tests')
-	subdir_done()
-endif
+# the main test files [test.c and commands.c] relies on these libraries
+deps += ['cmdline', 'ring', 'mempool', 'mbuf']
+sources += files('commands.c', 'test.c')
 
-test_sources = files('commands.c',
-	'packet_burst_generator.c',
-	'test.c',
-	'test_acl.c',
-	'test_alarm.c',
-	'test_atomic.c',
-	'test_barrier.c',
-	'test_bpf.c',
-	'test_byteorder.c',
-	'test_cmdline.c',
-	'test_cmdline_cirbuf.c',
-	'test_cmdline_etheraddr.c',
-	'test_cmdline_ipaddr.c',
-	'test_cmdline_lib.c',
-	'test_cmdline_num.c',
-	'test_cmdline_portlist.c',
-	'test_cmdline_string.c',
-	'test_common.c',
-	'test_cpuflags.c',
-	'test_crc.c',
-	'test_cryptodev.c',
-	'test_cryptodev_asym.c',
-	'test_cryptodev_blockcipher.c',
-	'test_cryptodev_security_pdcp.c',
-	'test_cycles.c',
-	'test_debug.c',
-	'test_distributor.c',
-	'test_distributor_perf.c',
-	'test_eal_flags.c',
-	'test_eal_fs.c',
-	'test_efd.c',
-	'test_efd_perf.c',
-	'test_errno.c',
-	'test_event_crypto_adapter.c',
-	'test_event_eth_rx_adapter.c',
-	'test_event_ring.c',
-	'test_event_timer_adapter.c',
-	'test_eventdev.c',
-	'test_external_mem.c',
-	'test_fbarray.c',
-	'test_fib.c',
-	'test_fib_perf.c',
-	'test_fib6.c',
-	'test_fib6_perf.c',
-	'test_func_reentrancy.c',
-	'test_flow_classify.c',
-	'test_graph.c',
-	'test_graph_perf.c',
-	'test_hash.c',
-	'test_hash_functions.c',
-	'test_hash_multiwriter.c',
-	'test_hash_readwrite.c',
-	'test_hash_perf.c',
-	'test_hash_readwrite_lf_perf.c',
-	'test_interrupts.c',
-        'test_ipfrag.c',
-	'test_ipsec.c',
-	'test_ipsec_sad.c',
-	'test_ipsec_perf.c',
-	'test_kni.c',
-	'test_kvargs.c',
-	'test_logs.c',
-	'test_lpm.c',
-	'test_lpm6.c',
-	'test_lpm6_perf.c',
-	'test_lpm_perf.c',
-	'test_malloc.c',
-	'test_mbuf.c',
-	'test_member.c',
-	'test_member_perf.c',
-	'test_memcpy.c',
-	'test_memcpy_perf.c',
-	'test_memory.c',
-	'test_mempool.c',
-	'test_mempool_perf.c',
-	'test_memzone.c',
-	'test_meter.c',
-	'test_metrics.c',
-	'test_mcslock.c',
-	'test_mp_secondary.c',
-	'test_per_lcore.c',
-	'test_pmd_perf.c',
-	'test_power.c',
-	'test_power_cpufreq.c',
-	'test_power_kvm_vm.c',
-	'test_prefetch.c',
-	'test_rand_perf.c',
-	'test_rawdev.c',
-	'test_rcu_qsbr.c',
-	'test_rcu_qsbr_perf.c',
-	'test_reciprocal_division.c',
-	'test_reciprocal_division_perf.c',
-	'test_red.c',
-	'test_reorder.c',
-	'test_rib.c',
-	'test_rib6.c',
-	'test_ring.c',
-	'test_ring_mpmc_stress.c',
-	'test_ring_hts_stress.c',
-	'test_ring_peek_stress.c',
-	'test_ring_perf.c',
-	'test_ring_rts_stress.c',
-	'test_ring_stress.c',
-	'test_rwlock.c',
-	'test_sched.c',
-	'test_security.c',
-	'test_service_cores.c',
-	'test_spinlock.c',
-	'test_stack.c',
-	'test_stack_perf.c',
-	'test_string_fns.c',
-	'test_table.c',
-	'test_table_acl.c',
-	'test_table_combined.c',
-	'test_table_pipeline.c',
-	'test_table_ports.c',
-	'test_table_tables.c',
-	'test_tailq.c',
-	'test_thash.c',
-	'test_timer.c',
-	'test_timer_perf.c',
-	'test_timer_racecond.c',
-	'test_timer_secondary.c',
-	'test_ticketlock.c',
-	'test_trace.c',
-	'test_trace_register.c',
-	'test_trace_perf.c',
-	'test_version.c',
-	'virtual_pmd.c'
-)
+# optional dependencies: some files may use these - and so we should link them in -
+# but do not explicitly require them so they are not listed in the per-file lists below
+optional_deps = ['crypto_scheduler', 'lpm']
 
-test_deps = ['acl',
-	'bus_pci',
-	'bus_vdev',
-	'bitratestats',
-	'bpf',
-	'cfgfile',
-	'cmdline',
-	'cryptodev',
-	'distributor',
-	'efd',
-	'ethdev',
-	'eventdev',
-	'fib',
-	'flow_classify',
-	'graph',
-	'hash',
-	'ipsec',
-	'latencystats',
-	'lpm',
-	'member',
-	'metrics',
-	'node',
-	'pipeline',
-	'port',
-	'rawdev',
-	'rcu',
-	'reorder',
-	'rib',
-	'ring',
-	'security',
-	'stack',
-	'timer'
-]
+# some other utility C files, providing functions used by various tests
+# so we need to include these deps in the dependency list for the files using those fns.
+packet_burst_generator_deps = ['net']
+sample_packet_forward_deps = ['net_ring', 'ethdev', 'bus_vdev']
+virtual_pmd_deps = ['ethdev', 'net', 'bus_pci']
+# test_cryptodev has material that other crypto tests need
+test_cryptodev_deps = ['bus_vdev', 'net', 'cryptodev', 'security']
 
-# Each test is marked with flag true/false
-# to indicate whether it can run in no-huge mode.
-fast_tests = [
-        ['acl_autotest', true],
-        ['alarm_autotest', false],
-        ['atomic_autotest', false],
-        ['byteorder_autotest', true],
-        ['cmdline_autotest', true],
-        ['common_autotest', true],
-        ['cpuflags_autotest', true],
-        ['cycles_autotest', true],
-        ['debug_autotest', true],
-        ['eal_flags_c_opt_autotest', false],
-        ['eal_flags_master_opt_autotest', false],
-        ['eal_flags_n_opt_autotest', false],
-        ['eal_flags_hpet_autotest', false],
-        ['eal_flags_no_huge_autotest', false],
-        ['eal_flags_w_opt_autotest', false],
-        ['eal_flags_b_opt_autotest', false],
-        ['eal_flags_vdev_opt_autotest', false],
-        ['eal_flags_r_opt_autotest', false],
-        ['eal_flags_mem_autotest', false],
-        ['eal_flags_file_prefix_autotest', false],
-        ['eal_flags_misc_autotest', false],
-        ['eal_fs_autotest', true],
-        ['errno_autotest', true],
-        ['event_ring_autotest', true],
-        ['fib_autotest', true],
-        ['fib6_autotest', true],
-        ['func_reentrancy_autotest', false],
-        ['flow_classify_autotest', false],
-        ['hash_autotest', true],
-        ['interrupt_autotest', true],
-        ['ipfrag_autotest', false],
-        ['logs_autotest', true],
-        ['lpm_autotest', true],
-        ['lpm6_autotest', true],
-        ['malloc_autotest', false],
-        ['mbuf_autotest', false],
-        ['mcslock_autotest', false],
-        ['memcpy_autotest', true],
-        ['memory_autotest', false],
-        ['mempool_autotest', false],
-        ['memzone_autotest', false],
-        ['meter_autotest', true],
-        ['multiprocess_autotest', false],
-        ['per_lcore_autotest', true],
-        ['prefetch_autotest', true],
-        ['rcu_qsbr_autotest', true],
-        ['red_autotest', true],
-        ['rib_autotest', true],
-        ['rib6_autotest', true],
-        ['ring_autotest', true],
-        ['rwlock_test1_autotest', true],
-        ['rwlock_rda_autotest', true],
-        ['rwlock_rds_wrm_autotest', true],
-        ['rwlock_rde_wro_autotest', true],
-        ['sched_autotest', true],
-		['security_autotest', false],
-        ['spinlock_autotest', true],
-        ['stack_autotest', false],
-        ['stack_lf_autotest', false],
-        ['string_autotest', true],
-        ['table_autotest', true],
-        ['tailq_autotest', true],
-        ['timer_autotest', false],
-        ['user_delay_us', true],
-        ['version_autotest', true],
-        ['crc_autotest', true],
-        ['delay_us_sleep_autotest', true],
-        ['distributor_autotest', false],
-        ['eventdev_common_autotest', true],
-        ['fbarray_autotest', true],
-        ['hash_readwrite_func_autotest', false],
-        ['ipsec_autotest', true],
-        ['kni_autotest', false],
-        ['kvargs_autotest', true],
-        ['member_autotest', true],
-        ['metrics_autotest', true],
-        ['power_cpufreq_autotest', false],
-        ['power_autotest', true],
-        ['power_kvm_vm_autotest', false],
-        ['reorder_autotest', true],
-        ['service_autotest', true],
-        ['thash_autotest', true],
-        ['trace_autotest', true],
-]
+source_file_deps = {
+    # The C files providing functionality to other test cases
+    'packet_burst_generator.c': packet_burst_generator_deps,
+#    'resource.c': [],          # unused currently.
+    'sample_packet_forward.c': sample_packet_forward_deps,
+    'virtual_pmd.c': virtual_pmd_deps,
 
-perf_test_names = [
-        'ring_perf_autotest',
-        'mempool_perf_autotest',
-        'memcpy_perf_autotest',
-        'hash_perf_autotest',
-        'timer_perf_autotest',
-        'reciprocal_division',
-        'reciprocal_division_perf',
-        'lpm_perf_autotest',
-        'rib_slow_autotest',
-        'fib_slow_autotest',
-        'fib_perf_autotest',
-        'red_all',
-        'barrier_autotest',
-        'hash_multiwriter_autotest',
-        'timer_racecond_autotest',
-        'efd_autotest',
-        'hash_functions_autotest',
-        'member_perf_autotest',
-        'efd_perf_autotest',
-        'lpm6_perf_autotest',
-        'rib6_slow_autotest',
-        'fib6_slow_autotest',
-        'fib6_perf_autotest',
-        'rcu_qsbr_perf_autotest',
-        'red_perf',
-        'distributor_perf_autotest',
-        'pmd_perf_autotest',
-        'stack_perf_autotest',
-        'stack_lf_perf_autotest',
-        'rand_perf_autotest',
-        'hash_readwrite_perf_autotest',
-        'hash_readwrite_lf_perf_autotest',
-        'trace_perf_autotest',
-	'ipsec_perf_autotest',
-]
+    # the various test_*.c files
+    'test_acl.c': ['net', 'acl'],
+    'test_alarm.c': [],
+    'test_argparse.c': ['argparse'],
+    'test_atomic.c': ['hash'],
+    'test_barrier.c': [],
+    'test_bitcount.c': [],
+    'test_bitmap.c': [],
+    'test_bitops.c': [],
+    'test_bitratestats.c': ['metrics', 'bitratestats', 'ethdev'] + sample_packet_forward_deps,
+    'test_bpf.c': ['bpf', 'net'],
+    'test_byteorder.c': [],
+#    'test_cfgfile.c': ['cfgfile'],
+    'test_cksum.c': ['net'],
+    'test_cksum_perf.c': ['net'],
+    'test_cmdline.c': [],
+    'test_cmdline_cirbuf.c': [],
+    'test_cmdline_etheraddr.c': ['net'],
+    'test_cmdline_ipaddr.c': [],
+    'test_cmdline_lib.c': [],
+    'test_cmdline_num.c': [],
+    'test_cmdline_portlist.c': [],
+    'test_cmdline_string.c': [],
+    'test_common.c': [],
+    'test_compressdev.c': ['compressdev'],
+    'test_cpuflags.c': [],
+    'test_crc.c': ['net'],
+    'test_cryptodev.c': test_cryptodev_deps,
+    'test_cryptodev_asym.c': ['bus_vdev'] + test_cryptodev_deps,
+    'test_cryptodev_blockcipher.c': test_cryptodev_deps,
+    'test_cryptodev_crosscheck.c': test_cryptodev_deps,
+    'test_cryptodev_security_ipsec.c': test_cryptodev_deps,
+    'test_cryptodev_security_pdcp.c': test_cryptodev_deps,
+    'test_cryptodev_security_tls_record.c': ['cryptodev', 'security'],
+    'test_cycles.c': [],
+    'test_debug.c': [],
+    'test_devargs.c': ['kvargs'],
+    'test_dispatcher.c': ['dispatcher'],
+    'test_distributor.c': ['distributor'],
+    'test_distributor_perf.c': ['distributor'],
+    'test_dmadev.c': ['dmadev', 'bus_vdev'],
+    'test_dmadev_api.c': ['dmadev'],
+    'test_eal_flags.c': [],
+    'test_eal_fs.c': [],
+    'test_efd.c': ['efd', 'net'],
+    'test_efd_perf.c': ['efd', 'hash'],
+    'test_errno.c': [],
+    'test_ethdev_api.c': ['ethdev'],
+    'test_ethdev_link.c': ['ethdev'],
+    'test_event_crypto_adapter.c': ['cryptodev', 'eventdev', 'bus_vdev'],
+    'test_event_dma_adapter.c': ['dmadev', 'eventdev', 'bus_vdev'],
+    'test_event_eth_rx_adapter.c': ['ethdev', 'eventdev', 'bus_vdev'],
+    'test_event_eth_tx_adapter.c': ['bus_vdev', 'ethdev', 'net_ring', 'eventdev'],
+    'test_event_ring.c': ['eventdev'],
+    'test_event_timer_adapter.c': ['ethdev', 'eventdev', 'bus_vdev'],
+    'test_eventdev.c': ['eventdev', 'bus_vdev'],
+    'test_external_mem.c': [],
+    'test_fbarray.c': [],
+    'test_fib.c': ['net', 'fib'],
+    'test_fib6.c': ['rib', 'fib'],
+    'test_fib6_perf.c': ['fib'],
+    'test_fib_perf.c': ['net', 'fib'],
+    'test_flow_classify.c': ['net', 'acl', 'table', 'ethdev', 'flow_classify'],
+    'test_func_reentrancy.c': ['hash', 'lpm'],
+    'test_graph.c': ['graph'],
+    'test_graph_perf.c': ['graph'],
+    'test_hash.c': ['net', 'hash'],
+    'test_hash_functions.c': ['hash'],
+    'test_hash_multiwriter.c': ['hash'],
+    'test_hash_perf.c': ['hash'],
+    'test_hash_readwrite.c': ['hash'],
+    'test_hash_readwrite_lf_perf.c': ['hash'],
+    'test_interrupts.c': [],
+    'test_ipfrag.c': ['net', 'ip_frag'],
+    'test_ipsec.c': ['bus_vdev', 'net', 'cryptodev', 'ipsec', 'security'],
+    'test_ipsec_perf.c': ['net', 'ipsec'],
+    'test_ipsec_sad.c': ['ipsec'],
+    'test_kvargs.c': ['kvargs'],
+    'test_latencystats.c': ['ethdev', 'latencystats', 'metrics'] + sample_packet_forward_deps,
+    'test_lcores.c': [],
+    'test_link_bonding.c': ['ethdev', 'net_bond',
+        'net'] + packet_burst_generator_deps + virtual_pmd_deps,
+    'test_link_bonding_mode4.c': ['ethdev', 'net_ring', 'net_bond',
+        'net'] + packet_burst_generator_deps,
+    'test_link_bonding_rssconf.c': ['ethdev', 'bus_vdev', 'net_bond'],
+    'test_logs.c': [],
+    'test_lpm.c': ['net', 'lpm'],
+    'test_lpm6.c': ['lpm'],
+    'test_lpm6_perf.c': ['lpm'],
+    'test_lpm_perf.c': ['net', 'lpm'],
+    'test_malloc.c': [],
+    'test_malloc_perf.c': [],
+    'test_mbuf.c': ['net'],
+    'test_mcslock.c': [],
+    'test_member.c': ['member', 'net'],
+    'test_member_perf.c': ['hash', 'member'],
+    'test_memcpy.c': [],
+    'test_memcpy_perf.c': [],
+    'test_memory.c': [],
+    'test_mempool.c': [],
+    'test_mempool_perf.c': [],
+    'test_memzone.c': [],
+    'test_meter.c': ['meter'],
+    'test_metrics.c': ['metrics'],
+    'test_mp_secondary.c': ['hash'],
+    'test_net_ether.c': ['net'],
+    'test_pcapng.c': ['ethdev', 'net', 'pcapng', 'bus_vdev'],
+    'test_pdcp.c': ['eventdev', 'pdcp', 'net', 'timer', 'security'],
+    'test_pdump.c': ['pdump'] + sample_packet_forward_deps,
+    'test_per_lcore.c': [],
+    'test_pflock.c': [],
+    'test_pie.c': ['sched'],
+    'test_pmd_perf.c': ['ethdev', 'net'] + packet_burst_generator_deps,
+    'test_pmd_ring.c': ['net_ring', 'ethdev', 'bus_vdev'],
+    'test_pmd_ring_perf.c': ['ethdev', 'net_ring', 'bus_vdev'],
+    'test_power.c': ['power'],
+    'test_power_cpufreq.c': ['power'],
+    'test_power_intel_uncore.c': ['power'],
+    'test_power_kvm_vm.c': ['power'],
+    'test_prefetch.c': [],
+    'test_rand_perf.c': [],
+    'test_rawdev.c': ['rawdev', 'bus_vdev'],
+    'test_rcu_qsbr.c': ['rcu', 'hash'],
+    'test_rcu_qsbr_perf.c': ['rcu', 'hash'],
+    'test_reassembly_perf.c': ['net', 'ip_frag'],
+    'test_reciprocal_division.c': [],
+    'test_reciprocal_division_perf.c': [],
+    'test_red.c': ['sched'],
+    'test_reorder.c': ['reorder'],
+#    'test_resource.c': [],
+    'test_rib.c': ['net', 'rib'],
+    'test_rib6.c': ['net', 'rib'],
+    'test_ring.c': [],
+    'test_ring_hts_stress.c': [],
+    'test_ring_mpmc_stress.c': [],
+    'test_ring_mt_peek_stress.c': [],
+    'test_ring_mt_peek_stress_zc.c': [],
+    'test_ring_perf.c': [],
+    'test_ring_rts_stress.c': [],
+    'test_ring_st_peek_stress.c': [],
+    'test_ring_st_peek_stress_zc.c': [],
+    'test_ring_stress.c': [],
+    'test_rwlock.c': [],
+    'test_sched.c': ['net', 'sched'],
+    'test_security.c': ['net', 'security'],
+    'test_security_inline_macsec.c': ['ethdev', 'security'],
+    'test_security_inline_proto.c': ['ethdev', 'security', 'eventdev'] + test_cryptodev_deps,
+    'test_security_proto.c' : ['cryptodev', 'security'],
+    'test_seqlock.c': [],
+    'test_service_cores.c': [],
+    'test_spinlock.c': [],
+    'test_stack.c': ['stack'],
+    'test_stack_perf.c': ['stack'],
+    'test_string_fns.c': [],
+    'test_table.c': ['table', 'pipeline', 'port'],
+    'test_table_acl.c': ['net', 'table', 'pipeline', 'port'],
+    'test_table_combined.c': ['table', 'pipeline', 'port'],
+    'test_table_pipeline.c': ['pipeline', 'table', 'port'],
+    'test_table_ports.c': ['table', 'pipeline', 'port'],
+    'test_table_tables.c': ['table', 'pipeline', 'port'],
+    'test_tailq.c': [],
+    'test_telemetry_data.c': ['telemetry'],
+    'test_telemetry_json.c': ['telemetry'],
+    'test_thash.c': ['net', 'hash'],
+    'test_thash_perf.c': ['hash'],
+    'test_threads.c': [],
+    'test_ticketlock.c': [],
+    'test_timer.c': ['timer'],
+    'test_timer_perf.c': ['timer'],
+    'test_timer_racecond.c': ['timer'],
+    'test_timer_secondary.c': ['timer'],
+    'test_trace.c': [],
+    'test_trace_perf.c': [],
+    'test_trace_register.c': [],
+    'test_vdev.c': ['kvargs', 'bus_vdev'],
+    'test_version.c': [],
+}
 
-driver_test_names = [
-        'cryptodev_aesni_mb_autotest',
-        'cryptodev_aesni_gcm_autotest',
-        'cryptodev_dpaa_sec_autotest',
-        'cryptodev_dpaa2_sec_autotest',
-        'cryptodev_null_autotest',
-        'cryptodev_octeontx2_autotest',
-        'cryptodev_openssl_autotest',
-        'cryptodev_openssl_asym_autotest',
-        'cryptodev_qat_autotest',
-        'cryptodev_sw_armv8_autotest',
-        'cryptodev_sw_kasumi_autotest',
-        'cryptodev_sw_mvsam_autotest',
-        'cryptodev_sw_snow3g_autotest',
-        'cryptodev_sw_zuc_autotest',
-        'eventdev_selftest_octeontx',
-        'eventdev_selftest_sw',
-        'rawdev_autotest',
-]
+source_file_ext_deps = {
+    'test_compressdev.c': ['zlib'],
+    'test_pcapng.c': ['pcap'],
+}
 
-dump_test_names = [
-        'dump_struct_sizes',
-        'dump_mempool',
-        'dump_malloc_stats',
-        'dump_devargs',
-        'dump_log_types',
-        'dump_ring',
-        'dump_physmem',
-        'dump_memzone',
-]
-
-# The following linkages are an exception to allow running the
-# unit tests without requiring that the developer install the
-# DPDK libraries.  Explicit linkage of drivers (plugin libraries)
-# in applications should not be used.
-if dpdk_conf.has('RTE_LIBRTE_RING_MEMPOOL')
-	test_deps += 'mempool_ring'
-endif
-if dpdk_conf.has('RTE_LIBRTE_STACK_MEMPOOL')
-	test_deps += 'mempool_stack'
-endif
-if dpdk_conf.has('RTE_LIBRTE_SKELETON_EVENTDEV_PMD')
-	test_deps += 'pmd_skeleton_event'
-endif
-if dpdk_conf.has('RTE_LIBRTE_TELEMETRY')
-	test_sources += 'test_telemetry_json.c'
-	fast_tests += [['telemetry_json_autotest', true]]
-endif
-
-# The following linkages of drivers are required because
-# they are used via a driver-specific API.
-if dpdk_conf.has('RTE_LIBRTE_BOND_PMD')
-	test_deps += 'pmd_bond'
-	test_sources += ['test_link_bonding.c', 'test_link_bonding_rssconf.c']
-	driver_test_names += ['link_bonding_autotest', 'link_bonding_rssconf_autotest']
-endif
-if dpdk_conf.has('RTE_LIBRTE_RING_PMD')
-	test_deps += 'pmd_ring'
-	test_sources += 'test_pmd_ring_perf.c'
-	test_sources += 'test_pmd_ring.c'
-	test_sources += 'test_event_eth_tx_adapter.c'
-	test_sources += 'test_bitratestats.c'
-	test_sources += 'test_latencystats.c'
-	test_sources += 'test_link_bonding_mode4.c'
-	test_sources += 'sample_packet_forward.c'
-	test_sources += 'test_pdump.c'
-	fast_tests += [['ring_pmd_autotest', true]]
-	perf_test_names += 'ring_pmd_perf_autotest'
-	fast_tests += [['event_eth_tx_adapter_autotest', false]]
-	fast_tests += [['bitratestats_autotest', true]]
-	fast_tests += [['latencystats_autotest', true]]
-	driver_test_names += 'link_bonding_mode4_autotest'
-	fast_tests += [['pdump_autotest', true]]
-endif
-
-if dpdk_conf.has('RTE_LIBRTE_POWER')
-	test_deps += 'power'
-endif
-if dpdk_conf.has('RTE_LIBRTE_KNI')
-	test_deps += 'kni'
-endif
-if dpdk_conf.has('RTE_LIBRTE_PDUMP')
-	test_deps += 'pdump'
-endif
+def_lib = get_option('default_library')
+foreach f, f_deps : source_file_deps
+    has_deps = true
+    foreach d : f_deps
+        if not is_variable(def_lib + '_rte_' + d)
+            has_deps = false
+            break
+        else
+            # technically we might not need this dep, but adding it is harmless
+            if d not in deps
+                deps += d
+            endif
+        endif
+    endforeach
+    # check for any external dependencies for this file
+    if source_file_ext_deps.has_key(f)
+        foreach d: source_file_ext_deps.get(f)
+            dep = dependency(d, required: false, method: 'pkg-config')
+            if not dep.found()
+                message('Skipping test file @0@ due to missing external dependency @1@'.format(f, d))
+                has_deps = false
+            else
+                ext_deps += dep
+            endif
+        endforeach
+    endif
+    if has_deps
+        sources += files(f)
+    endif
+endforeach
+# add the optional dependencies
+foreach d:optional_deps
+    if is_variable(def_lib + '_rte_' + d) and d not in deps
+        deps += d
+    endif
+endforeach
 
 if cc.has_argument('-Wno-format-truncation')
     cflags += '-Wno-format-truncation'
 endif
 
-# specify -D_GNU_SOURCE unconditionally
-cflags += '-D_GNU_SOURCE'
 # Strict-aliasing rules are violated by uint8_t[] to context size casts.
 cflags += '-fno-strict-aliasing'
 
-test_dep_objs = []
-if dpdk_conf.has('RTE_LIBRTE_COMPRESSDEV')
-	compress_test_dep = dependency('zlib', required: false)
-	if compress_test_dep.found()
-		test_dep_objs += compress_test_dep
-		test_sources += 'test_compressdev.c'
-		test_deps += 'compressdev'
-		fast_tests += [['compressdev_autotest', false]]
-	endif
+# Enable using internal APIs in unit tests
+cflags += '-DALLOW_INTERNAL_API'
+
+# create a symlink in the app/test directory for the binary, for backward compatibility
+if not is_windows
+    custom_target('test_symlink',
+            output: 'dpdk-test',
+            command: ['ln', '-sf', '../dpdk-test', '@OUTPUT@'],
+            build_by_default: true,
+            install: false)
 endif
-
-if dpdk_conf.has('RTE_LIBRTE_PMD_CRYPTO_SCHEDULER')
-	driver_test_names += 'cryptodev_scheduler_autotest'
-endif
-
-foreach d:test_deps
-	def_lib = get_option('default_library')
-	test_dep_objs += get_variable(def_lib + '_rte_' + d)
-endforeach
-test_dep_objs += cc.find_library('execinfo', required: false)
-
-link_libs = []
-link_nodes = []
-if get_option('default_library') == 'static'
-	link_libs = dpdk_drivers
-	link_nodes = dpdk_graph_nodes
-endif
-
-dpdk_test = executable('dpdk-test',
-	test_sources,
-	link_whole: link_libs + link_nodes,
-	dependencies: test_dep_objs,
-	c_args: cflags,
-	install_rpath: driver_install_path,
-	install: true)
-
-has_hugepage = run_command('has-hugepage.sh').stdout().strip() != '0'
-message('hugepage availability: @0@'.format(has_hugepage))
-
-# some perf tests (eg: memcpy perf autotest)take very long
-# to complete, so timeout to 10 minutes
-timeout_seconds = 600
-timeout_seconds_fast = 10
-
-get_coremask = find_program('get-coremask.sh')
-num_cores_arg = '-l ' + run_command(get_coremask).stdout().strip()
-
-default_test_args = [num_cores_arg]
-
-foreach arg : fast_tests
-	test_args = default_test_args
-	run_test = true
-	if not has_hugepage
-		if arg[1]
-			test_args += ['--no-huge', '-m', '2048']
-		else
-			run_test = false
-		endif
-	endif
-
-	if (get_option('default_library') == 'shared' and
-		arg[0] == 'event_eth_tx_adapter_autotest')
-		foreach drv:dpdk_drivers
-			test_args += ['-d', drv.full_path().split('.a')[0] + '.so']
-		endforeach
-	endif
-	if is_linux
-		test_args += ['--file-prefix=@0@'.format(arg[0])]
-	endif
-
-	if run_test
-		test(arg[0], dpdk_test,
-			env : ['DPDK_TEST=' + arg[0]],
-			args : test_args,
-			timeout : timeout_seconds_fast,
-			is_parallel : false,
-			suite : 'fast-tests')
-	endif
-endforeach
-
-foreach arg : perf_test_names
-	test(arg, dpdk_test,
-	env : ['DPDK_TEST=' + arg],
-	args : default_test_args,
-	timeout : timeout_seconds,
-	is_parallel : false,
-	suite : 'perf-tests')
-endforeach
-
-foreach arg : driver_test_names
-	test(arg, dpdk_test,
-		env : ['DPDK_TEST=' + arg],
-		args : default_test_args,
-		timeout : timeout_seconds,
-		is_parallel : false,
-		suite : 'driver-tests')
-endforeach
-
-foreach arg : dump_test_names
-	test(arg, dpdk_test,
-		env : ['DPDK_TEST=' + arg],
-		args : default_test_args,
-		timeout : timeout_seconds,
-		is_parallel : false,
-		suite : 'debug-tests')
-endforeach

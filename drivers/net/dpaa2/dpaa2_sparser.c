@@ -7,7 +7,7 @@
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
 #include <rte_string_fns.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 
 #include <fslmc_logs.h>
 #include <fslmc_vfio.h>
@@ -145,36 +145,6 @@ struct frame_attr_ext frame_attr_ext_arr[] = {
 	/* 112 */ {NULL,                                       0, 0x0000}
 };
 
-#define SWAP_WORD(pr)						\
-do {								\
-	for (int i = 0; i < 4 ; i++) {				\
-		pr[i] = pr[i] ^ pr[6 - i + 1];			\
-		pr[6 - i + 1] = pr[6 - i + 1] ^ pr[i];		\
-		pr[i] = pr[i] ^ pr[6 - i + 1];			\
-	}							\
-} while (0)
-
-#define fa_print_sb()						\
-do {								\
-	if (rte_cpu_to_be_32(*pdw) & frm_attr->fld_mask)	\
-		DPAA2_PMD_DP_DEBUG("t %s : Yes", frm_attr->fld_name);	\
-} while (0)
-
-#define fa_print_sb_ext()					\
-do {								\
-	if (rte_cpu_to_be_16(*pw) & frm_attr_ext->fld_mask)	\
-		DPAA2_PMD_DP_DEBUG("\t %s : Yes",			\
-			  frm_attr_ext->fld_name);		\
-} while (0)
-
-#define fa_print_mb_ext()					\
-do {								\
-	if (rte_cpu_to_be_16(*pw) & frm_attr_ext->fld_mask)	\
-		DPAA2_PMD_DP_DEBUG("\t %s : 0x%02x",			\
-			  frm_attr_ext->fld_name,		\
-			  rte_cpu_to_be_16(*pw) & frm_attr_ext->fld_mask);\
-} while (0)
-
 int dpaa2_eth_load_wriop_soft_parser(struct dpaa2_dev_priv *priv,
 				     enum dpni_soft_sequence_dest dest)
 {
@@ -211,7 +181,7 @@ int dpaa2_eth_load_wriop_soft_parser(struct dpaa2_dev_priv *priv,
 
 	priv->ss_iova = (uint64_t)(DPAA2_VADDR_TO_IOVA(addr));
 	priv->ss_offset += sp_param.size;
-	RTE_LOG(INFO, PMD, "Soft parser loaded for dpni@%d\n", priv->hw_id);
+	DPAA2_PMD_INFO("Soft parser loaded for dpni@%d", priv->hw_id);
 
 	rte_free(addr);
 	return 0;
@@ -264,6 +234,6 @@ int dpaa2_eth_enable_wriop_soft_parser(struct dpaa2_dev_priv *priv,
 	}
 
 	rte_free(param_addr);
-	RTE_LOG(INFO, PMD, "Soft parser enabled for dpni@%d\n", priv->hw_id);
+	DPAA2_PMD_INFO("Soft parser enabled for dpni@%d", priv->hw_id);
 	return 0;
 }

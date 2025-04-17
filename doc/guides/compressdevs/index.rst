@@ -11,6 +11,8 @@ Compression Device Drivers
 
     overview
     isal
+    mlx5
+    nitrox
     octeontx
     qat_comp
     zlib

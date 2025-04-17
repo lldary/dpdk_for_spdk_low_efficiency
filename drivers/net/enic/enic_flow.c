@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <rte_log.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_flow_driver.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
@@ -405,7 +405,7 @@ enic_copy_item_ipv4_v1(struct copy_item_args *arg)
 		return ENOTSUP;
 	}
 
-	/* check that the suppied mask exactly matches capabilty */
+	/* check that the supplied mask exactly matches capability */
 	if (!mask_exact_match((const uint8_t *)&supported_mask,
 			      (const uint8_t *)item->mask, sizeof(*mask))) {
 		ENICPMD_LOG(ERR, "IPv4 exact match mask");
@@ -443,7 +443,7 @@ enic_copy_item_udp_v1(struct copy_item_args *arg)
 		return ENOTSUP;
 	}
 
-	/* check that the suppied mask exactly matches capabilty */
+	/* check that the supplied mask exactly matches capability */
 	if (!mask_exact_match((const uint8_t *)&supported_mask,
 			      (const uint8_t *)item->mask, sizeof(*mask))) {
 		ENICPMD_LOG(ERR, "UDP exact match mask");
@@ -482,7 +482,7 @@ enic_copy_item_tcp_v1(struct copy_item_args *arg)
 		return ENOTSUP;
 	}
 
-	/* check that the suppied mask exactly matches capabilty */
+	/* check that the supplied mask exactly matches capability */
 	if (!mask_exact_match((const uint8_t *)&supported_mask,
 			     (const uint8_t *)item->mask, sizeof(*mask))) {
 		ENICPMD_LOG(ERR, "TCP exact match mask");
@@ -656,17 +656,17 @@ enic_copy_item_eth_v2(struct copy_item_args *arg)
 	if (!mask)
 		mask = &rte_flow_item_eth_mask;
 
-	memcpy(enic_spec.d_addr.addr_bytes, spec->dst.addr_bytes,
+	memcpy(enic_spec.dst_addr.addr_bytes, spec->hdr.dst_addr.addr_bytes,
 	       RTE_ETHER_ADDR_LEN);
-	memcpy(enic_spec.s_addr.addr_bytes, spec->src.addr_bytes,
+	memcpy(enic_spec.src_addr.addr_bytes, spec->hdr.src_addr.addr_bytes,
 	       RTE_ETHER_ADDR_LEN);
 
-	memcpy(enic_mask.d_addr.addr_bytes, mask->dst.addr_bytes,
+	memcpy(enic_mask.dst_addr.addr_bytes, mask->hdr.dst_addr.addr_bytes,
 	       RTE_ETHER_ADDR_LEN);
-	memcpy(enic_mask.s_addr.addr_bytes, mask->src.addr_bytes,
+	memcpy(enic_mask.src_addr.addr_bytes, mask->hdr.src_addr.addr_bytes,
 	       RTE_ETHER_ADDR_LEN);
-	enic_spec.ether_type = spec->type;
-	enic_mask.ether_type = mask->type;
+	enic_spec.ether_type = spec->hdr.ether_type;
+	enic_mask.ether_type = mask->hdr.ether_type;
 
 	/* outer header */
 	memcpy(gp->layer[FILTER_GENERIC_1_L2].mask, &enic_mask,
@@ -715,16 +715,16 @@ enic_copy_item_vlan_v2(struct copy_item_args *arg)
 		struct rte_vlan_hdr *vlan;
 
 		vlan = (struct rte_vlan_hdr *)(eth_mask + 1);
-		vlan->eth_proto = mask->inner_type;
+		vlan->eth_proto = mask->hdr.eth_proto;
 		vlan = (struct rte_vlan_hdr *)(eth_val + 1);
-		vlan->eth_proto = spec->inner_type;
+		vlan->eth_proto = spec->hdr.eth_proto;
 	} else {
-		eth_mask->ether_type = mask->inner_type;
-		eth_val->ether_type = spec->inner_type;
+		eth_mask->ether_type = mask->hdr.eth_proto;
+		eth_val->ether_type = spec->hdr.eth_proto;
 	}
 	/* For TCI, use the vlan mask/val fields (little endian). */
-	gp->mask_vlan = rte_be_to_cpu_16(mask->tci);
-	gp->val_vlan = rte_be_to_cpu_16(spec->tci);
+	gp->mask_vlan = rte_be_to_cpu_16(mask->hdr.vlan_tci);
+	gp->val_vlan = rte_be_to_cpu_16(spec->hdr.vlan_tci);
 	return 0;
 }
 
@@ -1044,14 +1044,14 @@ fixup_l5_layer(struct enic *enic, struct filter_generic_1 *gp,
 }
 
 /**
- * Build the intenal enic filter structure from the provided pattern. The
+ * Build the internal enic filter structure from the provided pattern. The
  * pattern is validated as the items are copied.
  *
  * @param pattern[in]
  * @param items_info[in]
  *   Info about this NICs item support, like valid previous items.
  * @param enic_filter[out]
- *   NIC specfilc filters derived from the pattern.
+ *   NIC specific filters derived from the pattern.
  * @param error[out]
  */
 static int
@@ -1123,12 +1123,12 @@ stacking_error:
 }
 
 /**
- * Build the intenal version 1 NIC action structure from the provided pattern.
+ * Build the internal version 1 NIC action structure from the provided pattern.
  * The pattern is validated as the items are copied.
  *
  * @param actions[in]
  * @param enic_action[out]
- *   NIC specfilc actions derived from the actions.
+ *   NIC specific actions derived from the actions.
  * @param error[out]
  */
 static int
@@ -1170,12 +1170,12 @@ enic_copy_action_v1(__rte_unused struct enic *enic,
 }
 
 /**
- * Build the intenal version 2 NIC action structure from the provided pattern.
+ * Build the internal version 2 NIC action structure from the provided pattern.
  * The pattern is validated as the items are copied.
  *
  * @param actions[in]
  * @param enic_action[out]
- *   NIC specfilc actions derived from the actions.
+ *   NIC specific actions derived from the actions.
  * @param error[out]
  */
 static int
@@ -1208,7 +1208,8 @@ enic_copy_action_v2(struct enic *enic,
 			const struct rte_flow_action_mark *mark =
 				(const struct rte_flow_action_mark *)
 				actions->conf;
-
+			if (enic->use_noscatter_vec_rx_handler)
+				return ENOTSUP;
 			if (overlap & MARK)
 				return ENOTSUP;
 			overlap |= MARK;
@@ -1228,6 +1229,8 @@ enic_copy_action_v2(struct enic *enic,
 			break;
 		}
 		case RTE_FLOW_ACTION_TYPE_FLAG: {
+			if (enic->use_noscatter_vec_rx_handler)
+				return ENOTSUP;
 			if (overlap & MARK)
 				return ENOTSUP;
 			overlap |= MARK;
@@ -1389,7 +1392,7 @@ enic_dump_filter(const struct filter_v2 *filt)
 
 		if (gp->mask_flags & FILTER_GENERIC_1_IPV6)
 			sprintf(ip6, "%s ",
-				(gp->val_flags & FILTER_GENERIC_1_IPV4)
+				(gp->val_flags & FILTER_GENERIC_1_IPV6)
 				 ? "ip6(y)" : "ip6(n)");
 		else
 			sprintf(ip6, "%s ", "ip6(x)");
@@ -1595,6 +1598,8 @@ enic_flow_parse(struct rte_eth_dev *dev,
 		return -rte_errno;
 	}
 	enic_filter->type = enic->flow_filter_mode;
+	if (enic->adv_filters)
+		enic_filter->type = FILTER_DPDK_1;
 	ret = enic_copy_filter(pattern, enic_filter_cap, enic,
 				       enic_filter, error);
 	return ret;

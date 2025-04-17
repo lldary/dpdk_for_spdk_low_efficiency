@@ -32,7 +32,7 @@
 #endif
 
 /**
- * Master thead: data plane thread context
+ * Main thread: data plane thread context
  */
 struct thread {
 	struct rte_ring *msgq_req;
@@ -78,7 +78,7 @@ struct thread_data {
 static struct thread_data thread_data[RTE_MAX_LCORE];
 
 /**
- * Master thread: data plane thread init
+ * Main thread: data plane thread init
  */
 static void
 thread_free(void)
@@ -92,11 +92,9 @@ thread_free(void)
 			continue;
 
 		/* MSGQs */
-		if (t->msgq_req)
-			rte_ring_free(t->msgq_req);
+		rte_ring_free(t->msgq_req);
 
-		if (t->msgq_rsp)
-			rte_ring_free(t->msgq_rsp);
+		rte_ring_free(t->msgq_rsp);
 	}
 }
 
@@ -105,7 +103,7 @@ thread_init(void)
 {
 	uint32_t i;
 
-	RTE_LCORE_FOREACH_SLAVE(i) {
+	RTE_LCORE_FOREACH_WORKER(i) {
 		char name[NAME_MAX];
 		struct rte_ring *msgq_req, *msgq_rsp;
 		struct thread *t = &thread[i];
@@ -137,7 +135,7 @@ thread_init(void)
 			return -1;
 		}
 
-		/* Master thread records */
+		/* Main thread records */
 		t->msgq_req = msgq_req;
 		t->msgq_rsp = msgq_rsp;
 		t->enabled = 1;
@@ -179,7 +177,7 @@ pipeline_is_running(struct pipeline *p)
 }
 
 /**
- * Master thread & data plane threads: message passing
+ * Main thread & data plane threads: message passing
  */
 enum thread_req_type {
 	THREAD_REQ_PIPELINE_ENABLE = 0,
@@ -213,7 +211,7 @@ struct thread_msg_rsp {
 };
 
 /**
- * Master thread
+ * Main thread
  */
 static struct thread_msg_req *
 thread_msg_alloc(void)
@@ -432,7 +430,7 @@ thread_pipeline_disable(uint32_t thread_id,
 static inline struct thread_msg_req *
 thread_msg_recv(struct rte_ring *msgq_req)
 {
-	struct thread_msg_req *req;
+	struct thread_msg_req *req = NULL;
 
 	int status = rte_ring_sc_dequeue(msgq_req, (void **) &req);
 
@@ -556,7 +554,7 @@ thread_msg_handle(struct thread_data *t)
 }
 
 /**
- * Master thread & data plane threads: message passing
+ * Main thread & data plane threads: message passing
  */
 enum pipeline_req_type {
 	/* Port IN */
@@ -652,7 +650,6 @@ struct pipeline_msg_req {
 	enum pipeline_req_type type;
 	uint32_t id; /* Port IN, port OUT or table ID */
 
-	RTE_STD_C11
 	union {
 		struct pipeline_msg_req_port_in_stats_read port_in_stats_read;
 		struct pipeline_msg_req_port_out_stats_read port_out_stats_read;
@@ -714,7 +711,6 @@ struct pipeline_msg_rsp_table_rule_time_read {
 struct pipeline_msg_rsp {
 	int status;
 
-	RTE_STD_C11
 	union {
 		struct pipeline_msg_rsp_port_in_stats_read port_in_stats_read;
 		struct pipeline_msg_rsp_port_out_stats_read port_out_stats_read;
@@ -730,7 +726,7 @@ struct pipeline_msg_rsp {
 };
 
 /**
- * Master thread
+ * Main thread
  */
 static struct pipeline_msg_req *
 pipeline_msg_alloc(void)

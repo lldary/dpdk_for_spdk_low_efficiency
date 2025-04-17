@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2018-2019 Intel Corporation
+ * Copyright(c) 2018-2021 Intel Corporation
  */
 
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 #include <rte_hexdump.h>
 #include <rte_comp.h>
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_byteorder.h>
 #include <rte_memcpy.h>
 #include <rte_common.h>
@@ -191,8 +191,8 @@ qat_comp_build_request(void *in_op, uint8_t *out_msg,
 					ICP_QAT_FW_COMP_EOP
 				      : ICP_QAT_FW_COMP_NOT_EOP,
 				ICP_QAT_FW_COMP_NOT_BFINAL,
-				ICP_QAT_FW_COMP_NO_CNV,
-				ICP_QAT_FW_COMP_NO_CNV_RECOVERY);
+				ICP_QAT_FW_COMP_CNV,
+				ICP_QAT_FW_COMP_CNV_RECOVERY);
 	}
 
 	/* common for sgl and flat buffers */
@@ -305,9 +305,9 @@ qat_comp_build_request(void *in_op, uint8_t *out_msg,
 				comp_req->comp_pars.out_buffer_sz;
 
 		comp_req->comn_mid.src_data_addr =
-		    rte_pktmbuf_mtophys_offset(op->m_src, op->src.offset);
+		    rte_pktmbuf_iova_offset(op->m_src, op->src.offset);
 		comp_req->comn_mid.dest_data_addr =
-		    rte_pktmbuf_mtophys_offset(op->m_dst, op->dst.offset);
+		    rte_pktmbuf_iova_offset(op->m_dst, op->dst.offset);
 	}
 
 	if (unlikely(rte_pktmbuf_pkt_len(op->m_dst) < QAT_MIN_OUT_BUF_SIZE)) {
@@ -332,7 +332,8 @@ qat_comp_build_request(void *in_op, uint8_t *out_msg,
 	return 0;
 }
 
-static inline uint32_t adf_modulo(uint32_t data, uint32_t modulo_mask)
+static inline uint32_t
+adf_modulo(uint32_t data, uint32_t modulo_mask)
 {
 	return data & modulo_mask;
 }
@@ -603,7 +604,8 @@ qat_comp_process_response(void **op, uint8_t *resp, void *op_cookie,
 			rx_op->status = RTE_COMP_OP_STATUS_ERROR;
 			rx_op->debug_status = ERR_CODE_QAT_COMP_WRONG_FW;
 			*op = (void *)rx_op;
-			QAT_DP_LOG(ERR, "QAT has wrong firmware");
+			QAT_DP_LOG(ERR,
+					"This QAT hardware doesn't support compression operation");
 			++(*dequeue_err_count);
 			return 1;
 		}
@@ -792,8 +794,9 @@ qat_comp_stream_size(void)
 	return RTE_ALIGN_CEIL(sizeof(struct qat_comp_stream), 8);
 }
 
-static void qat_comp_create_req_hdr(struct icp_qat_fw_comn_req_hdr *header,
-				    enum qat_comp_request_type request)
+static void
+qat_comp_create_req_hdr(struct icp_qat_fw_comn_req_hdr *header,
+	    enum qat_comp_request_type request)
 {
 	if (request == QAT_COMP_REQUEST_FIXED_COMP_STATELESS)
 		header->service_cmd_id = ICP_QAT_FW_COMP_CMD_STATIC;
@@ -810,16 +813,17 @@ static void qat_comp_create_req_hdr(struct icp_qat_fw_comn_req_hdr *header,
 	    QAT_COMN_CD_FLD_TYPE_16BYTE_DATA, QAT_COMN_PTR_TYPE_FLAT);
 }
 
-static int qat_comp_create_templates(struct qat_comp_xform *qat_xform,
-			const struct rte_memzone *interm_buff_mz,
-			const struct rte_comp_xform *xform,
-			const struct qat_comp_stream *stream,
-			enum rte_comp_op_type op_type)
+static int
+qat_comp_create_templates(struct qat_comp_xform *qat_xform,
+			  const struct rte_memzone *interm_buff_mz,
+			  const struct rte_comp_xform *xform,
+			  const struct qat_comp_stream *stream,
+			  enum rte_comp_op_type op_type,
+			  enum qat_device_gen qat_dev_gen)
 {
 	struct icp_qat_fw_comp_req *comp_req;
-	int comp_level, algo;
 	uint32_t req_par_flags;
-	int direction = ICP_QAT_HW_COMPRESSION_DIR_COMPRESS;
+	int res;
 
 	if (unlikely(qat_xform == NULL)) {
 		QAT_LOG(ERR, "Session was not created for this device");
@@ -838,46 +842,17 @@ static int qat_comp_create_templates(struct qat_comp_xform *qat_xform,
 		}
 	}
 
-	if (qat_xform->qat_comp_request_type == QAT_COMP_REQUEST_DECOMPRESS) {
-		direction = ICP_QAT_HW_COMPRESSION_DIR_DECOMPRESS;
-		comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_1;
+	if (qat_xform->qat_comp_request_type == QAT_COMP_REQUEST_DECOMPRESS)
 		req_par_flags = ICP_QAT_FW_COMP_REQ_PARAM_FLAGS_BUILD(
 				ICP_QAT_FW_COMP_SOP, ICP_QAT_FW_COMP_EOP,
 				ICP_QAT_FW_COMP_BFINAL,
 				ICP_QAT_FW_COMP_CNV,
 				ICP_QAT_FW_COMP_CNV_RECOVERY);
-	} else {
-		if (xform->compress.level == RTE_COMP_LEVEL_PMD_DEFAULT)
-			comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_8;
-		else if (xform->compress.level == 1)
-			comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_1;
-		else if (xform->compress.level == 2)
-			comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_4;
-		else if (xform->compress.level == 3)
-			comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_8;
-		else if (xform->compress.level >= 4 &&
-			 xform->compress.level <= 9)
-			comp_level = ICP_QAT_HW_COMPRESSION_DEPTH_16;
-		else {
-			QAT_LOG(ERR, "compression level not supported");
-			return -EINVAL;
-		}
+	else
 		req_par_flags = ICP_QAT_FW_COMP_REQ_PARAM_FLAGS_BUILD(
 				ICP_QAT_FW_COMP_SOP, ICP_QAT_FW_COMP_EOP,
 				ICP_QAT_FW_COMP_BFINAL, ICP_QAT_FW_COMP_CNV,
 				ICP_QAT_FW_COMP_CNV_RECOVERY);
-	}
-
-	switch (xform->compress.algo) {
-	case RTE_COMP_ALGO_DEFLATE:
-		algo = ICP_QAT_HW_COMPRESSION_ALGO_DEFLATE;
-		break;
-	case RTE_COMP_ALGO_LZS:
-	default:
-		/* RTE_COMP_NULL */
-		QAT_LOG(ERR, "compression algorithm not supported");
-		return -EINVAL;
-	}
 
 	comp_req = &qat_xform->qat_comp_req_tmpl;
 
@@ -898,18 +873,10 @@ static int qat_comp_create_templates(struct qat_comp_xform *qat_xform,
 		comp_req->comp_cd_ctrl.comp_state_addr =
 				stream->state_registers_decomp_phys;
 
-		/* Enable A, B, C, D, and E (CAMs). */
+		/* RAM bank flags */
 		comp_req->comp_cd_ctrl.ram_bank_flags =
-			ICP_QAT_FW_COMP_RAM_FLAGS_BUILD(
-				ICP_QAT_FW_COMP_BANK_DISABLED, /* Bank I */
-				ICP_QAT_FW_COMP_BANK_DISABLED, /* Bank H */
-				ICP_QAT_FW_COMP_BANK_DISABLED, /* Bank G */
-				ICP_QAT_FW_COMP_BANK_DISABLED, /* Bank F */
-				ICP_QAT_FW_COMP_BANK_ENABLED,  /* Bank E */
-				ICP_QAT_FW_COMP_BANK_ENABLED,  /* Bank D */
-				ICP_QAT_FW_COMP_BANK_ENABLED,  /* Bank C */
-				ICP_QAT_FW_COMP_BANK_ENABLED,  /* Bank B */
-				ICP_QAT_FW_COMP_BANK_ENABLED); /* Bank A */
+				qat_comp_gen_dev_ops[qat_dev_gen]
+					.qat_comp_get_ram_bank_flags();
 
 		comp_req->comp_cd_ctrl.ram_banks_addr =
 				stream->inflate_context_phys;
@@ -923,13 +890,11 @@ static int qat_comp_create_templates(struct qat_comp_xform *qat_xform,
 			ICP_QAT_FW_COMP_ENABLE_SECURE_RAM_USED_AS_INTMD_BUF);
 	}
 
-	comp_req->cd_pars.sl.comp_slice_cfg_word[0] =
-	    ICP_QAT_HW_COMPRESSION_CONFIG_BUILD(
-		direction,
-		/* In CPM 1.6 only valid mode ! */
-		ICP_QAT_HW_COMPRESSION_DELAYED_MATCH_ENABLED, algo,
-		/* Translate level to depth */
-		comp_level, ICP_QAT_HW_COMPRESSION_FILE_TYPE_0);
+	res = qat_comp_gen_dev_ops[qat_dev_gen].qat_comp_set_slice_cfg_word(
+			qat_xform, xform, op_type,
+			comp_req->cd_pars.sl.comp_slice_cfg_word);
+	if (res)
+		return res;
 
 	comp_req->comp_pars.initial_adler = 1;
 	comp_req->comp_pars.initial_crc32 = 0;
@@ -957,7 +922,8 @@ static int qat_comp_create_templates(struct qat_comp_xform *qat_xform,
 				ICP_QAT_FW_SLICE_XLAT);
 
 		comp_req->u1.xlt_pars.inter_buff_ptr =
-				interm_buff_mz->phys_addr;
+				(qat_comp_get_num_im_bufs_required(qat_dev_gen)
+					== 0) ? 0 : interm_buff_mz->iova;
 	}
 
 #if RTE_LOG_DP_LEVEL >= RTE_LOG_DEBUG
@@ -990,6 +956,8 @@ qat_comp_private_xform_create(struct rte_compressdev *dev,
 			      void **private_xform)
 {
 	struct qat_comp_dev_private *qat = dev->data->dev_private;
+	enum qat_device_gen qat_dev_gen = qat->qat_dev->qat_dev_gen;
+	unsigned int im_bufs = qat_comp_get_num_im_bufs_required(qat_dev_gen);
 
 	if (unlikely(private_xform == NULL)) {
 		QAT_LOG(ERR, "QAT: private_xform parameter is NULL");
@@ -1011,7 +979,8 @@ qat_comp_private_xform_create(struct rte_compressdev *dev,
 
 		if (xform->compress.deflate.huffman == RTE_COMP_HUFFMAN_FIXED ||
 		  ((xform->compress.deflate.huffman == RTE_COMP_HUFFMAN_DEFAULT)
-				   && qat->interm_buff_mz == NULL))
+				   && qat->interm_buff_mz == NULL
+				   && im_bufs > 0))
 			qat_xform->qat_comp_request_type =
 					QAT_COMP_REQUEST_FIXED_COMP_STATELESS;
 
@@ -1019,7 +988,8 @@ qat_comp_private_xform_create(struct rte_compressdev *dev,
 				RTE_COMP_HUFFMAN_DYNAMIC ||
 				xform->compress.deflate.huffman ==
 						RTE_COMP_HUFFMAN_DEFAULT) &&
-				qat->interm_buff_mz != NULL)
+				(qat->interm_buff_mz != NULL ||
+						im_bufs == 0))
 
 			qat_xform->qat_comp_request_type =
 					QAT_COMP_REQUEST_DYNAMIC_COMP_STATELESS;
@@ -1038,7 +1008,8 @@ qat_comp_private_xform_create(struct rte_compressdev *dev,
 	}
 
 	if (qat_comp_create_templates(qat_xform, qat->interm_buff_mz, xform,
-				      NULL, RTE_COMP_OP_STATELESS)) {
+				      NULL, RTE_COMP_OP_STATELESS,
+				      qat_dev_gen)) {
 		QAT_LOG(ERR, "QAT: Problem with setting compression");
 		return -EINVAL;
 	}
@@ -1137,7 +1108,8 @@ qat_comp_stream_create(struct rte_compressdev *dev,
 	ptr->qat_xform.checksum_type = xform->decompress.chksum;
 
 	if (qat_comp_create_templates(&ptr->qat_xform, qat->interm_buff_mz,
-				      xform, ptr, RTE_COMP_OP_STATEFUL)) {
+				      xform, ptr, RTE_COMP_OP_STATEFUL,
+				      qat->qat_dev->qat_dev_gen)) {
 		QAT_LOG(ERR, "QAT: problem with creating descriptor template for stream");
 		rte_mempool_put(qat->streampool, *stream);
 		*stream = NULL;
@@ -1171,4 +1143,186 @@ qat_comp_stream_free(struct rte_compressdev *dev, void *stream)
 		return 0;
 	}
 	return -EINVAL;
+}
+
+/**
+ * Enqueue packets for processing on queue pair of a device
+ *
+ * @param qp
+ *   qat queue pair
+ * @param ops
+ *   Compressdev operation
+ * @param nb_ops
+ *   number of operations
+ * @return
+ *  - nb_ops_sent if successful
+ */
+uint16_t
+qat_enqueue_comp_op_burst(void *qp, void **ops, uint16_t nb_ops)
+{
+	register struct qat_queue *queue;
+	struct qat_qp *tmp_qp = (struct qat_qp *)qp;
+	register uint32_t nb_ops_sent = 0;
+	register int nb_desc_to_build;
+	uint16_t nb_ops_possible = nb_ops;
+	register uint8_t *base_addr;
+	register uint32_t tail;
+
+	int descriptors_built, total_descriptors_built = 0;
+	int nb_remaining_descriptors;
+	int overflow = 0;
+
+	if (unlikely(nb_ops == 0))
+		return 0;
+
+	/* read params used a lot in main loop into registers */
+	queue = &(tmp_qp->tx_q);
+	base_addr = (uint8_t *)queue->base_addr;
+	tail = queue->tail;
+
+	/* Find how many can actually fit on the ring */
+	{
+		/* dequeued can only be written by one thread, but it may not
+		 * be this thread. As it's 4-byte aligned it will be read
+		 * atomically here by any Intel CPU.
+		 * enqueued can wrap before dequeued, but cannot
+		 * lap it as var size of enq/deq (uint32_t) > var size of
+		 * max_inflights (uint16_t). In reality inflights is never
+		 * even as big as max uint16_t, as it's <= ADF_MAX_DESC.
+		 * On wrapping, the calculation still returns the correct
+		 * positive value as all three vars are unsigned.
+		 */
+		uint32_t inflights =
+			tmp_qp->enqueued - tmp_qp->dequeued;
+
+		/* Find how many can actually fit on the ring */
+		overflow = (inflights + nb_ops) - tmp_qp->max_inflights;
+		if (overflow > 0) {
+			nb_ops_possible = nb_ops - overflow;
+			if (nb_ops_possible == 0)
+				return 0;
+		}
+
+		/* QAT has plenty of work queued already, so don't waste cycles
+		 * enqueueing, wait til the application has gathered a bigger
+		 * burst or some completed ops have been dequeued
+		 */
+		if (tmp_qp->min_enq_burst_threshold && inflights >
+				QAT_QP_MIN_INFL_THRESHOLD && nb_ops_possible <
+				tmp_qp->min_enq_burst_threshold) {
+			tmp_qp->stats.threshold_hit_count++;
+			return 0;
+		}
+	}
+
+	/* At this point nb_ops_possible is assuming a 1:1 mapping
+	 * between ops and descriptors.
+	 * Fewer may be sent if some ops have to be split.
+	 * nb_ops_possible is <= burst size.
+	 * Find out how many spaces are actually available on the qp in case
+	 * more are needed.
+	 */
+	nb_remaining_descriptors = nb_ops_possible
+			 + ((overflow >= 0) ? 0 : overflow * (-1));
+	QAT_DP_LOG(DEBUG, "Nb ops requested %d, nb descriptors remaining %d",
+			nb_ops, nb_remaining_descriptors);
+
+	while (nb_ops_sent != nb_ops_possible &&
+				nb_remaining_descriptors > 0) {
+		struct qat_comp_op_cookie *cookie =
+				tmp_qp->op_cookies[tail >> queue->trailz];
+
+		descriptors_built = 0;
+
+		QAT_DP_LOG(DEBUG, "--- data length: %u",
+			   ((struct rte_comp_op *)*ops)->src.length);
+
+		nb_desc_to_build = qat_comp_build_request(*ops,
+				base_addr + tail, cookie, tmp_qp->qat_dev_gen);
+		QAT_DP_LOG(DEBUG, "%d descriptors built, %d remaining, "
+			"%d ops sent, %d descriptors needed",
+			total_descriptors_built, nb_remaining_descriptors,
+			nb_ops_sent, nb_desc_to_build);
+
+		if (unlikely(nb_desc_to_build < 0)) {
+			/* this message cannot be enqueued */
+			tmp_qp->stats.enqueue_err_count++;
+			if (nb_ops_sent == 0)
+				return 0;
+			goto kick_tail;
+		} else if (unlikely(nb_desc_to_build > 1)) {
+			/* this op is too big and must be split - get more
+			 * descriptors and retry
+			 */
+
+			QAT_DP_LOG(DEBUG, "Build %d descriptors for this op",
+					nb_desc_to_build);
+
+			nb_remaining_descriptors -= nb_desc_to_build;
+			if (nb_remaining_descriptors >= 0) {
+				/* There are enough remaining descriptors
+				 * so retry
+				 */
+				int ret2 = qat_comp_build_multiple_requests(
+						*ops, tmp_qp, tail,
+						nb_desc_to_build);
+
+				if (unlikely(ret2 < 1)) {
+					QAT_DP_LOG(DEBUG,
+							"Failed to build (%d) descriptors, status %d",
+							nb_desc_to_build, ret2);
+
+					qat_comp_free_split_op_memzones(cookie,
+							nb_desc_to_build - 1);
+
+					tmp_qp->stats.enqueue_err_count++;
+
+					/* This message cannot be enqueued */
+					if (nb_ops_sent == 0)
+						return 0;
+					goto kick_tail;
+				} else {
+					descriptors_built = ret2;
+					total_descriptors_built +=
+							descriptors_built;
+					nb_remaining_descriptors -=
+							descriptors_built;
+					QAT_DP_LOG(DEBUG,
+							"Multiple descriptors (%d) built ok",
+							descriptors_built);
+				}
+			} else {
+				QAT_DP_LOG(ERR, "For the current op, number of requested descriptors (%d) "
+						"exceeds number of available descriptors (%d)",
+						nb_desc_to_build,
+						nb_remaining_descriptors +
+							nb_desc_to_build);
+
+				qat_comp_free_split_op_memzones(cookie,
+						nb_desc_to_build - 1);
+
+				/* Not enough extra descriptors */
+				if (nb_ops_sent == 0)
+					return 0;
+				goto kick_tail;
+			}
+		} else {
+			descriptors_built = 1;
+			total_descriptors_built++;
+			nb_remaining_descriptors--;
+			QAT_DP_LOG(DEBUG, "Single descriptor built ok");
+		}
+
+		tail = adf_modulo(tail + (queue->msg_size * descriptors_built),
+				  queue->modulo_mask);
+		ops++;
+		nb_ops_sent++;
+	}
+
+kick_tail:
+	queue->tail = tail;
+	tmp_qp->enqueued += total_descriptors_built;
+	tmp_qp->stats.enqueued_count += nb_ops_sent;
+	txq_write_tail(tmp_qp->qat_dev_gen, tmp_qp, queue);
+	return nb_ops_sent;
 }

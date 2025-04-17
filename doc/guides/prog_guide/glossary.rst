@@ -103,9 +103,6 @@ lcore
    A logical execution unit of the processor, sometimes called a *hardware
    thread*.
 
-KNI
-   Kernel Network Interface
-
 L1
    Layer 1
 
@@ -124,9 +121,12 @@ LAN
 LPM
    Longest Prefix Match
 
-master lcore
+main lcore
    The execution unit that executes the main() function and that launches
    other lcores.
+
+master lcore
+   Deprecated name for *main lcore*. No longer used.
 
 mbuf
    An mbuf is a data structure used internally to carry messages (mainly
@@ -154,6 +154,9 @@ PCI
 
 PHY
    An abbreviation for the physical layer of the OSI model.
+
+PIE
+   Proportional Integral Controller Enhanced (RFC8033)
 
 pktmbuf
    An *mbuf* carrying a network packet.
@@ -185,7 +188,7 @@ Rx
    Reception
 
 Slave lcore
-   Any *lcore* that is not the *master lcore*.
+   Deprecated name for *worker lcore*. No longer used.
 
 Socket
    A physical CPU, that includes several *cores*.
@@ -236,6 +239,9 @@ VLAN
 
 Wr
    Write
+
+Worker lcore
+   Any *lcore* that is not the *main lcore*.
 
 WRED
    Weighted Random Early Detection

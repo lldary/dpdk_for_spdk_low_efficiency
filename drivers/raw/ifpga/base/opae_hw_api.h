@@ -55,6 +55,12 @@ struct opae_manager_ops {
 			unsigned int *value);
 	int (*get_board_info)(struct opae_manager *mgr,
 			struct opae_board_info **info);
+	int (*get_uuid)(struct opae_manager *mgr, struct uuid *uuid);
+	int (*update_flash)(struct opae_manager *mgr, const char *image,
+			u64 *status);
+	int (*stop_flash_update)(struct opae_manager *mgr, int force);
+	int (*reload)(struct opae_manager *mgr, int type, int page);
+	int (*read_flash)(struct opae_manager *mgr, u32 address, u32 size, void *buf);
 };
 
 /* networking management ops in FME */
@@ -88,6 +94,7 @@ int opae_manager_flash(struct opae_manager *mgr, int acc_id, const char *buf,
 		       u32 size, u64 *status);
 int opae_manager_get_eth_group_region_info(struct opae_manager *mgr,
 		u8 group_id, struct opae_eth_group_region_info *info);
+int opae_mgr_get_sensor_list(struct opae_manager *mgr, char *buf, size_t size);
 struct opae_sensor_info *opae_mgr_get_sensor_by_name(struct opae_manager *mgr,
 		const char *name);
 struct opae_sensor_info *opae_mgr_get_sensor_by_id(struct opae_manager *mgr,
@@ -138,6 +145,7 @@ struct opae_accelerator {
 	TAILQ_ENTRY(opae_accelerator) node;
 	const char *name;
 	int index;
+	struct opae_adapter *adapter;
 	struct opae_bridge *br;
 	struct opae_manager *mgr;
 	struct opae_accelerator_ops *ops;
@@ -235,6 +243,7 @@ struct opae_adapter_data {
 
 struct opae_reg_region {
 	u64 phys_addr;
+#define AFU_REGION_SIZE  0x8000
 	u64 len;
 	u8 *addr;
 };
@@ -265,12 +274,38 @@ TAILQ_HEAD(opae_accelerator_list, opae_accelerator);
 #define opae_adapter_for_each_acc(adatper, acc) \
 	TAILQ_FOREACH(acc, &adapter->acc_list, node)
 
+#define SHM_PREFIX     "/IFPGA:"
+#define SHM_BLK_SIZE   0x2000
+
+typedef struct {
+	union {
+		u8 byte[SHM_BLK_SIZE];
+		struct {
+			pthread_mutex_t spi_mutex;
+			pthread_mutex_t i2c_mutex;
+			u32 ref_cnt;    /* reference count of shared memory */
+			u32 dtb_size;   /* actual length of DTB data in byte */
+			u32 rsu_ctrl;   /* used to control rsu */
+			u32 rsu_stat;   /* used to report status for rsu */
+		};
+	};
+	u8 dtb[SHM_BLK_SIZE];   /* DTB data */
+} opae_share_data;
+
+typedef struct  {
+	int id;       /* shared memory id returned by shm_open */
+	u32 size;     /* size of shared memory in byte */
+	void *ptr;    /* start address of shared memory */
+} opae_share_memory;
+
 struct opae_adapter {
 	const char *name;
 	struct opae_manager *mgr;
 	struct opae_accelerator_list acc_list;
 	struct opae_adapter_ops *ops;
 	void *data;
+	pthread_mutex_t *lock;   /* multi-process mutex for IFPGA */
+	opae_share_memory shm;
 };
 
 /* OPAE Adapter APIs */
@@ -280,7 +315,8 @@ void *opae_adapter_data_alloc(enum opae_adapter_type type);
 int opae_adapter_init(struct opae_adapter *adapter,
 		const char *name, void *data);
 #define opae_adapter_free(adapter) opae_free(adapter)
-
+int opae_adapter_lock(struct opae_adapter *adapter, int timeout);
+int opae_adapter_unlock(struct opae_adapter *adapter);
 int opae_adapter_enumerate(struct opae_adapter *adapter);
 void opae_adapter_destroy(struct opae_adapter *adapter);
 static inline struct opae_manager *
@@ -329,4 +365,10 @@ int opae_manager_eth_group_read_reg(struct opae_manager *mgr, u8 group_id,
 		u8 type, u8 index, u16 addr, u32 *data);
 int opae_mgr_get_board_info(struct opae_manager *mgr,
 		struct opae_board_info **info);
+int opae_mgr_get_uuid(struct opae_manager *mgr, struct uuid *uuid);
+int opae_mgr_update_flash(struct opae_manager *mgr, const char *image,
+		uint64_t *status);
+int opae_mgr_stop_flash_update(struct opae_manager *mgr, int force);
+int opae_mgr_reload(struct opae_manager *mgr, int type, int page);
+int opae_mgr_read_flash(struct opae_manager *mgr, u32 address, u32 size, void *buf);
 #endif /* _OPAE_HW_API_H_*/

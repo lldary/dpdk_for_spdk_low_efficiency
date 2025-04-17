@@ -8,9 +8,9 @@
 #ifndef _DPAA2_HW_DPBP_H_
 #define _DPAA2_HW_DPBP_H_
 
-#define DPAA2_MAX_BUF_POOLS	8
+#include <rte_compat.h>
 
-#define DPAA2_INVALID_MBUF_SEQN	0
+#define DPAA2_MAX_BUF_POOLS	8
 
 struct buf_pool_cfg {
 	void *addr;

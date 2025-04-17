@@ -5,20 +5,20 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include <rte_bus_pci.h>
+#include <bus_pci_driver.h>
 #include <rte_ethdev.h>
 #include <rte_pci.h>
 #include <rte_malloc.h>
 
 #include <rte_mbuf.h>
 #include <rte_sched.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_spinlock.h>
 
 #include <rte_io.h>
 #include <rte_rawdev.h>
 #include <rte_rawdev_pmd.h>
-#include <rte_bus_ifpga.h>
+#include <bus_ifpga_driver.h>
 #include <ifpga_logs.h>
 
 #include "ipn3ke_rawdev_api.h"
@@ -27,7 +27,7 @@
 #include "ipn3ke_ethdev.h"
 
 static int ipn3ke_rpst_scan_num;
-static pthread_t ipn3ke_rpst_scan_thread;
+static rte_thread_t ipn3ke_rpst_scan_thread;
 
 /** Double linked list of representor port. */
 TAILQ_HEAD(ipn3ke_rpst_list, ipn3ke_rpst);
@@ -50,11 +50,11 @@ ipn3ke_rpst_dev_infos_get(struct rte_eth_dev *ethdev,
 	dev_info->speed_capa =
 		(hw->retimer.mac_type ==
 			IFPGA_RAWDEV_RETIMER_MAC_TYPE_10GE_XFI) ?
-		ETH_LINK_SPEED_10G :
+		RTE_ETH_LINK_SPEED_10G :
 		((hw->retimer.mac_type ==
 			IFPGA_RAWDEV_RETIMER_MAC_TYPE_25GE_25GAUI) ?
-		ETH_LINK_SPEED_25G :
-		ETH_LINK_SPEED_AUTONEG);
+		RTE_ETH_LINK_SPEED_25G :
+		RTE_ETH_LINK_SPEED_AUTONEG);
 
 	dev_info->max_rx_queues  = 1;
 	dev_info->max_tx_queues  = 1;
@@ -67,36 +67,36 @@ ipn3ke_rpst_dev_infos_get(struct rte_eth_dev *ethdev,
 	};
 	dev_info->rx_queue_offload_capa = 0;
 	dev_info->rx_offload_capa =
-		DEV_RX_OFFLOAD_VLAN_STRIP |
-		DEV_RX_OFFLOAD_QINQ_STRIP |
-		DEV_RX_OFFLOAD_IPV4_CKSUM |
-		DEV_RX_OFFLOAD_UDP_CKSUM |
-		DEV_RX_OFFLOAD_TCP_CKSUM |
-		DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM |
-		DEV_RX_OFFLOAD_VLAN_EXTEND |
-		DEV_RX_OFFLOAD_VLAN_FILTER |
-		DEV_RX_OFFLOAD_JUMBO_FRAME;
+		RTE_ETH_RX_OFFLOAD_VLAN_STRIP |
+		RTE_ETH_RX_OFFLOAD_QINQ_STRIP |
+		RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
+		RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+		RTE_ETH_RX_OFFLOAD_TCP_CKSUM |
+		RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM |
+		RTE_ETH_RX_OFFLOAD_VLAN_EXTEND |
+		RTE_ETH_RX_OFFLOAD_VLAN_FILTER;
 
-	dev_info->tx_queue_offload_capa = DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+	dev_info->tx_queue_offload_capa = RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 	dev_info->tx_offload_capa =
-		DEV_TX_OFFLOAD_VLAN_INSERT |
-		DEV_TX_OFFLOAD_QINQ_INSERT |
-		DEV_TX_OFFLOAD_IPV4_CKSUM |
-		DEV_TX_OFFLOAD_UDP_CKSUM |
-		DEV_TX_OFFLOAD_TCP_CKSUM |
-		DEV_TX_OFFLOAD_SCTP_CKSUM |
-		DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM |
-		DEV_TX_OFFLOAD_TCP_TSO |
-		DEV_TX_OFFLOAD_VXLAN_TNL_TSO |
-		DEV_TX_OFFLOAD_GRE_TNL_TSO |
-		DEV_TX_OFFLOAD_IPIP_TNL_TSO |
-		DEV_TX_OFFLOAD_GENEVE_TNL_TSO |
-		DEV_TX_OFFLOAD_MULTI_SEGS |
+		RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+		RTE_ETH_TX_OFFLOAD_QINQ_INSERT |
+		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+		RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+		RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
+		RTE_ETH_TX_OFFLOAD_SCTP_CKSUM |
+		RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |
+		RTE_ETH_TX_OFFLOAD_TCP_TSO |
+		RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO |
+		RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO |
+		RTE_ETH_TX_OFFLOAD_IPIP_TNL_TSO |
+		RTE_ETH_TX_OFFLOAD_GENEVE_TNL_TSO |
+		RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
 		dev_info->tx_queue_offload_capa;
 
 	dev_info->dev_capa =
 		RTE_ETH_DEV_CAPA_RUNTIME_RX_QUEUE_SETUP |
 		RTE_ETH_DEV_CAPA_RUNTIME_TX_QUEUE_SETUP;
+	dev_info->dev_capa &= ~RTE_ETH_DEV_CAPA_FLOW_RULE_KEEP;
 
 	dev_info->switch_info.name = ethdev->device->name;
 	dev_info->switch_info.domain_id = rpst->switch_domain_id;
@@ -120,6 +120,7 @@ ipn3ke_rpst_dev_start(struct rte_eth_dev *dev)
 	uint64_t base_mac;
 	uint32_t val;
 	char attr_name[IPN3KE_RAWDEV_ATTR_LEN_MAX];
+	uint16_t i;
 
 	rawdev = hw->rawdev;
 
@@ -190,14 +191,20 @@ ipn3ke_rpst_dev_start(struct rte_eth_dev *dev)
 
 	ipn3ke_rpst_link_update(dev, 0);
 
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+
 	return 0;
 }
 
-static void
+static int
 ipn3ke_rpst_dev_stop(struct rte_eth_dev *dev)
 {
 	struct ipn3ke_hw *hw = IPN3KE_DEV_PRIVATE_TO_HW(dev);
 	struct ipn3ke_rpst *rpst = IPN3KE_DEV_PRIVATE_TO_RPST(dev);
+	uint16_t i;
 
 	if (hw->retimer.mac_type == IFPGA_RAWDEV_RETIMER_MAC_TYPE_10GE_XFI) {
 		/* Disable the TX path */
@@ -206,14 +213,24 @@ ipn3ke_rpst_dev_stop(struct rte_eth_dev *dev)
 		/* Disable the RX path */
 		ipn3ke_xmac_rx_disable(hw, rpst->port_id, 0);
 	}
+
+	for (i = 0; i < dev->data->nb_rx_queues; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < dev->data->nb_tx_queues; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+
+	return 0;
 }
 
-static void
+static int
 ipn3ke_rpst_dev_close(struct rte_eth_dev *dev)
 {
 	struct ipn3ke_hw *hw = IPN3KE_DEV_PRIVATE_TO_HW(dev);
 	struct ipn3ke_rpst *rpst = IPN3KE_DEV_PRIVATE_TO_RPST(dev);
 
+	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
+		return 0;
+
 	if (hw->retimer.mac_type == IFPGA_RAWDEV_RETIMER_MAC_TYPE_10GE_XFI) {
 		/* Disable the TX path */
 		ipn3ke_xmac_tx_disable(hw, rpst->port_id, 0);
@@ -221,6 +238,8 @@ ipn3ke_rpst_dev_close(struct rte_eth_dev *dev)
 		/* Disable the RX path */
 		ipn3ke_xmac_rx_disable(hw, rpst->port_id, 0);
 	}
+
+	return 0;
 }
 
 /*
@@ -281,11 +300,6 @@ ipn3ke_rpst_rx_queue_setup(__rte_unused struct rte_eth_dev *dev,
 	return 0;
 }
 
-static void
-ipn3ke_rpst_rx_queue_release(__rte_unused void *rxq)
-{
-}
-
 static int
 ipn3ke_rpst_tx_queue_setup(__rte_unused struct rte_eth_dev *dev,
 	__rte_unused uint16_t queue_idx, __rte_unused uint16_t nb_desc,
@@ -293,11 +307,6 @@ ipn3ke_rpst_tx_queue_setup(__rte_unused struct rte_eth_dev *dev,
 	__rte_unused const struct rte_eth_txconf *tx_conf)
 {
 	return 0;
-}
-
-static void
-ipn3ke_rpst_tx_queue_release(__rte_unused void *txq)
-{
 }
 
 /* Statistics collected by each port, VSI, VEB, and S-channel */
@@ -2221,9 +2230,6 @@ ipn3ke_rpst_xstats_get
 	struct ipn3ke_rpst_hw_port_stats hw_stats;
 	struct rte_eth_stats stats;
 
-	if (!xstats)
-		return 0;
-
 	if (!ethdev) {
 		IPN3KE_AFU_PMD_ERR("ethernet device to get statistics is NULL");
 		return -EINVAL;
@@ -2285,7 +2291,7 @@ ipn3ke_rpst_xstats_get
 		count++;
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_hw_port */
+	/* Get individual stats from ipn3ke_rpst_hw_port */
 	for (i = 0; i < IPN3KE_RPST_HW_PORT_XSTATS_CNT; i++) {
 		xstats[count].value = *(uint64_t *)(((char *)(&hw_stats)) +
 			ipn3ke_rpst_hw_port_strings[i].offset);
@@ -2293,7 +2299,7 @@ ipn3ke_rpst_xstats_get
 		count++;
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_rxq_pri */
+	/* Get individual stats from ipn3ke_rpst_rxq_pri */
 	for (i = 0; i < IPN3KE_RPST_RXQ_PRIO_XSTATS_CNT; i++) {
 		for (prio = 0; prio < IPN3KE_RPST_PRIO_XSTATS_CNT; prio++) {
 			xstats[count].value =
@@ -2305,7 +2311,7 @@ ipn3ke_rpst_xstats_get
 		}
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_txq_prio */
+	/* Get individual stats from ipn3ke_rpst_txq_prio */
 	for (i = 0; i < IPN3KE_RPST_TXQ_PRIO_XSTATS_CNT; i++) {
 		for (prio = 0; prio < IPN3KE_RPST_PRIO_XSTATS_CNT; prio++) {
 			xstats[count].value =
@@ -2343,7 +2349,7 @@ __rte_unused unsigned int limit)
 		count++;
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_hw_port */
+	/* Get individual stats from ipn3ke_rpst_hw_port */
 	for (i = 0; i < IPN3KE_RPST_HW_PORT_XSTATS_CNT; i++) {
 		snprintf(xstats_names[count].name,
 			 sizeof(xstats_names[count].name),
@@ -2352,7 +2358,7 @@ __rte_unused unsigned int limit)
 		count++;
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_rxq_pri */
+	/* Get individual stats from ipn3ke_rpst_rxq_pri */
 	for (i = 0; i < IPN3KE_RPST_RXQ_PRIO_XSTATS_CNT; i++) {
 		for (prio = 0; prio < 8; prio++) {
 			snprintf(xstats_names[count].name,
@@ -2364,7 +2370,7 @@ __rte_unused unsigned int limit)
 		}
 	}
 
-	/* Get individiual stats from ipn3ke_rpst_txq_prio */
+	/* Get individual stats from ipn3ke_rpst_txq_prio */
 	for (i = 0; i < IPN3KE_RPST_TXQ_PRIO_XSTATS_CNT; i++) {
 		for (prio = 0; prio < 8; prio++) {
 			snprintf(xstats_names[count].name,
@@ -2403,10 +2409,10 @@ ipn3ke_update_link(struct rte_rawdev *rawdev,
 				(uint64_t *)&link_speed);
 	switch (link_speed) {
 	case IFPGA_RAWDEV_LINK_SPEED_10GB:
-		link->link_speed = ETH_SPEED_NUM_10G;
+		link->link_speed = RTE_ETH_SPEED_NUM_10G;
 		break;
 	case IFPGA_RAWDEV_LINK_SPEED_25GB:
-		link->link_speed = ETH_SPEED_NUM_25G;
+		link->link_speed = RTE_ETH_SPEED_NUM_25G;
 		break;
 	default:
 		IPN3KE_AFU_PMD_ERR("Unknown link speed info %u", link_speed);
@@ -2464,9 +2470,9 @@ ipn3ke_rpst_link_update(struct rte_eth_dev *ethdev,
 
 	memset(&link, 0, sizeof(link));
 
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 	link.link_autoneg = !(ethdev->data->dev_conf.link_speeds &
-				ETH_LINK_SPEED_FIXED);
+				RTE_ETH_LINK_SPEED_FIXED);
 
 	rawdev = hw->rawdev;
 	ipn3ke_update_link(rawdev, rpst->port_id, &link);
@@ -2522,9 +2528,9 @@ ipn3ke_rpst_link_check(struct ipn3ke_rpst *rpst)
 
 	memset(&link, 0, sizeof(link));
 
-	link.link_duplex = ETH_LINK_FULL_DUPLEX;
+	link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
 	link.link_autoneg = !(rpst->ethdev->data->dev_conf.link_speeds &
-				ETH_LINK_SPEED_FIXED);
+				RTE_ETH_LINK_SPEED_FIXED);
 
 	rawdev = hw->rawdev;
 	ipn3ke_update_link(rawdev, rpst->port_id, &link);
@@ -2564,7 +2570,7 @@ ipn3ke_rpst_link_check(struct ipn3ke_rpst *rpst)
 	return 0;
 }
 
-static void *
+static uint32_t
 ipn3ke_rpst_scan_handle_request(__rte_unused void *param)
 {
 	struct ipn3ke_rpst *rpst;
@@ -2585,11 +2591,11 @@ ipn3ke_rpst_scan_handle_request(__rte_unused void *param)
 		}
 		rte_delay_us(50 * MS);
 
-		if (num == 0xffffff)
-			return NULL;
+		if (num == 0 || num == 0xffffff)
+			return 0;
 	}
 
-	return NULL;
+	return 0;
 }
 
 static int
@@ -2598,20 +2604,19 @@ ipn3ke_rpst_scan_check(void)
 	int ret;
 
 	if (ipn3ke_rpst_scan_num == 1) {
-		ret = rte_ctrl_thread_create(&ipn3ke_rpst_scan_thread,
-			"ipn3ke scanner",
-			NULL,
+		ret = rte_thread_create_internal_control(&ipn3ke_rpst_scan_thread,
+			"ipn3ke-scn",
 			ipn3ke_rpst_scan_handle_request, NULL);
 		if (ret) {
 			IPN3KE_AFU_PMD_ERR("Fail to create ipn3ke rpst scan thread");
 			return -1;
 		}
 	} else if (ipn3ke_rpst_scan_num == 0) {
-		ret = pthread_cancel(ipn3ke_rpst_scan_thread);
+		ret = pthread_cancel((pthread_t)ipn3ke_rpst_scan_thread.opaque_id);
 		if (ret)
 			IPN3KE_AFU_PMD_ERR("Can't cancel the thread");
 
-		ret = pthread_join(ipn3ke_rpst_scan_thread, NULL);
+		ret = rte_thread_join(ipn3ke_rpst_scan_thread, NULL);
 		if (ret)
 			IPN3KE_AFU_PMD_ERR("Can't join the thread");
 
@@ -2771,12 +2776,6 @@ ipn3ke_rpst_mtu_set(struct rte_eth_dev *ethdev, uint16_t mtu)
 	int ret = 0;
 	struct ipn3ke_rpst *rpst = IPN3KE_DEV_PRIVATE_TO_RPST(ethdev);
 	struct rte_eth_dev_data *dev_data = ethdev->data;
-	uint32_t frame_size = mtu  + IPN3KE_ETH_OVERHEAD;
-
-	/* check if mtu is within the allowed range */
-	if (mtu < RTE_ETHER_MIN_MTU ||
-		frame_size > IPN3KE_MAC_FRAME_SIZE_MAX)
-		return -EINVAL;
 
 	/* mtu setting is forbidden if port is start */
 	/* make sure NIC port is stopped */
@@ -2794,15 +2793,6 @@ ipn3ke_rpst_mtu_set(struct rte_eth_dev *ethdev, uint16_t mtu)
 		return -EBUSY;
 	}
 
-	if (frame_size > RTE_ETHER_MAX_LEN)
-		dev_data->dev_conf.rxmode.offloads |=
-			(uint64_t)(DEV_RX_OFFLOAD_JUMBO_FRAME);
-	else
-		dev_data->dev_conf.rxmode.offloads &=
-			(uint64_t)(~DEV_RX_OFFLOAD_JUMBO_FRAME);
-
-	dev_data->dev_conf.rxmode.max_rx_pkt_len = frame_size;
-
 	if (rpst->i40e_pf_eth) {
 		ret = rpst->i40e_pf_eth->dev_ops->mtu_set(rpst->i40e_pf_eth,
 							mtu);
@@ -2814,11 +2804,9 @@ ipn3ke_rpst_mtu_set(struct rte_eth_dev *ethdev, uint16_t mtu)
 }
 
 static int
-ipn3ke_afu_filter_ctrl(struct rte_eth_dev *ethdev,
-	enum rte_filter_type filter_type, enum rte_filter_op filter_op,
-	void *arg)
+ipn3ke_afu_flow_ops_get(struct rte_eth_dev *ethdev,
+			const struct rte_flow_ops **ops)
 {
-	int ret = 0;
 	struct ipn3ke_hw *hw;
 	struct ipn3ke_rpst *rpst;
 
@@ -2829,27 +2817,13 @@ ipn3ke_afu_filter_ctrl(struct rte_eth_dev *ethdev,
 	rpst = IPN3KE_DEV_PRIVATE_TO_RPST(ethdev);
 
 	if (hw->acc_flow)
-		switch (filter_type) {
-		case RTE_ETH_FILTER_GENERIC:
-			if (filter_op != RTE_ETH_FILTER_GET)
-				return -EINVAL;
-			*(const void **)arg = &ipn3ke_flow_ops;
-			break;
-		default:
-			IPN3KE_AFU_PMD_WARN("Filter type (%d) not supported",
-					filter_type);
-			ret = -EINVAL;
-			break;
-		}
+		*ops = &ipn3ke_flow_ops;
 	else if (rpst->i40e_pf_eth)
-		(*rpst->i40e_pf_eth->dev_ops->filter_ctrl)(ethdev,
-							filter_type,
-							filter_op,
-							arg);
+		(*rpst->i40e_pf_eth->dev_ops->flow_ops_get)(ethdev, ops);
 	else
 		return -EINVAL;
 
-	return ret;
+	return 0;
 }
 
 static const struct eth_dev_ops ipn3ke_rpst_dev_ops = {
@@ -2867,16 +2841,14 @@ static const struct eth_dev_ops ipn3ke_rpst_dev_ops = {
 	.stats_reset          = ipn3ke_rpst_stats_reset,
 	.xstats_reset         = ipn3ke_rpst_stats_reset,
 
-	.filter_ctrl          = ipn3ke_afu_filter_ctrl,
+	.flow_ops_get         = ipn3ke_afu_flow_ops_get,
 
 	.rx_queue_start       = ipn3ke_rpst_rx_queue_start,
 	.rx_queue_stop        = ipn3ke_rpst_rx_queue_stop,
 	.tx_queue_start       = ipn3ke_rpst_tx_queue_start,
 	.tx_queue_stop        = ipn3ke_rpst_tx_queue_stop,
 	.rx_queue_setup       = ipn3ke_rpst_rx_queue_setup,
-	.rx_queue_release     = ipn3ke_rpst_rx_queue_release,
 	.tx_queue_setup       = ipn3ke_rpst_tx_queue_setup,
-	.tx_queue_release     = ipn3ke_rpst_tx_queue_release,
 
 	.dev_set_link_up      = ipn3ke_rpst_dev_set_link_up,
 	.dev_set_link_down    = ipn3ke_rpst_dev_set_link_down,
@@ -2959,7 +2931,8 @@ ipn3ke_rpst_init(struct rte_eth_dev *ethdev, void *init_params)
 		return -ENODEV;
 	}
 
-	ethdev->data->dev_flags |= RTE_ETH_DEV_REPRESENTOR;
+	ethdev->data->dev_flags |= RTE_ETH_DEV_REPRESENTOR |
+					RTE_ETH_DEV_AUTOFILL_QUEUE_XSTATS;
 
 	rte_spinlock_lock(&ipn3ke_link_notify_list_lk);
 	TAILQ_INSERT_TAIL(&ipn3ke_rpst_list, rpst, next);

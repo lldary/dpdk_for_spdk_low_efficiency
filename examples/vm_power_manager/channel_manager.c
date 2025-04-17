@@ -21,13 +21,12 @@
 #include <rte_memory.h>
 #include <rte_mempool.h>
 #include <rte_log.h>
-#include <rte_atomic.h>
 #include <rte_spinlock.h>
+#include <rte_tailq.h>
 
 #include <libvirt/libvirt.h>
 
 #include "channel_manager.h"
-#include "channel_commands.h"
 #include "channel_monitor.h"
 #include "power_manager.h"
 
@@ -60,16 +59,16 @@ struct virtual_machine_info {
 	virDomainInfo info;
 	rte_spinlock_t config_spinlock;
 	int allow_query;
-	LIST_ENTRY(virtual_machine_info) vms_info;
+	RTE_TAILQ_ENTRY(virtual_machine_info) vms_info;
 };
 
-LIST_HEAD(, virtual_machine_info) vm_list_head;
+RTE_TAILQ_HEAD(, virtual_machine_info) vm_list_head;
 
 static struct virtual_machine_info *
 find_domain_by_name(const char *name)
 {
 	struct virtual_machine_info *info;
-	LIST_FOREACH(info, &vm_list_head, vms_info) {
+	RTE_TAILQ_FOREACH(info, &vm_list_head, vms_info) {
 		if (!strncmp(info->name, name, CHANNEL_MGR_MAX_NAME_LEN-1))
 			return info;
 	}
@@ -467,9 +466,15 @@ add_all_channels(const char *vm_name)
 			continue;
 		}
 
-		snprintf(chan_info->channel_path,
+		if ((size_t)snprintf(chan_info->channel_path,
 				sizeof(chan_info->channel_path), "%s%s",
-				CHANNEL_MGR_SOCKET_PATH, dir->d_name);
+				CHANNEL_MGR_SOCKET_PATH, dir->d_name)
+					>= sizeof(chan_info->channel_path)) {
+			RTE_LOG(ERR, CHANNEL_MANAGER, "Pathname too long for channel '%s%s'\n",
+					CHANNEL_MGR_SOCKET_PATH, dir->d_name);
+			rte_free(chan_info);
+			continue;
+		}
 
 		if (setup_channel_info(&vm_info, &chan_info, channel_num) < 0) {
 			rte_free(chan_info);
@@ -506,7 +511,6 @@ add_channels(const char *vm_name, unsigned *channel_list,
 	}
 
 	for (i = 0; i < len_channel_list; i++) {
-
 		if (channel_list[i] >= RTE_MAX_LCORE) {
 			RTE_LOG(INFO, CHANNEL_MANAGER, "Channel(%u) is out of range "
 							"0...%d\n", channel_list[i],
@@ -568,6 +572,9 @@ add_host_channels(void)
 	}
 
 	for (i = 0; i < ci->core_count; i++) {
+		if (rte_lcore_index(i) == -1)
+			continue;
+
 		if (ci->cd[i].global_enabled_cpus == 0)
 			continue;
 
@@ -872,7 +879,7 @@ add_vm(const char *vm_name)
 
 	new_domain->allow_query = 0;
 	rte_spinlock_init(&(new_domain->config_spinlock));
-	LIST_INSERT_HEAD(&vm_list_head, new_domain, vms_info);
+	TAILQ_INSERT_HEAD(&vm_list_head, new_domain, vms_info);
 	return 0;
 }
 
@@ -894,7 +901,7 @@ remove_vm(const char *vm_name)
 		rte_spinlock_unlock(&vm_info->config_spinlock);
 		return -1;
 	}
-	LIST_REMOVE(vm_info, vms_info);
+	TAILQ_REMOVE(&vm_list_head, vm_info, vms_info);
 	rte_spinlock_unlock(&vm_info->config_spinlock);
 	rte_free(vm_info);
 	return 0;
@@ -947,7 +954,7 @@ channel_manager_init(const char *path __rte_unused)
 {
 	virNodeInfo info;
 
-	LIST_INIT(&vm_list_head);
+	TAILQ_INIT(&vm_list_head);
 	if (connect_hypervisor(path) < 0) {
 		global_n_host_cpus = 64;
 		global_hypervisor_available = 0;
@@ -999,9 +1006,9 @@ channel_manager_exit(void)
 {
 	unsigned i;
 	char mask[RTE_MAX_LCORE];
-	struct virtual_machine_info *vm_info;
+	struct virtual_machine_info *vm_info, *tmp;
 
-	LIST_FOREACH(vm_info, &vm_list_head, vms_info) {
+	RTE_TAILQ_FOREACH_SAFE(vm_info, &vm_list_head, vms_info, tmp) {
 
 		rte_spinlock_lock(&(vm_info->config_spinlock));
 
@@ -1016,7 +1023,7 @@ channel_manager_exit(void)
 		}
 		rte_spinlock_unlock(&(vm_info->config_spinlock));
 
-		LIST_REMOVE(vm_info, vms_info);
+		TAILQ_REMOVE(&vm_list_head, vm_info, vms_info);
 		rte_free(vm_info);
 	}
 

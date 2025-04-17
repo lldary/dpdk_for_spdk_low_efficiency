@@ -23,13 +23,16 @@
 #include <rte_cycles.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
+#define RTE_GRAPH_MODEL_SELECT RTE_GRAPH_MODEL_RTC
 #include <rte_graph_worker.h>
 #include <rte_launch.h>
 #include <rte_lcore.h>
 #include <rte_log.h>
+#include <rte_lpm6.h>
 #include <rte_mempool.h>
 #include <rte_node_eth_api.h>
 #include <rte_node_ip4_api.h>
+#include <rte_node_ip6_api.h>
 #include <rte_per_lcore.h>
 #include <rte_string_fns.h>
 #include <rte_vect.h>
@@ -43,8 +46,8 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
 #define MAX_TX_QUEUE_PER_PORT RTE_MAX_ETHPORTS
 #define MAX_RX_QUEUE_PER_PORT 128
@@ -55,9 +58,12 @@
 
 #define NB_SOCKETS 8
 
+/* Graph module */
+#define WORKER_MODEL_RTC "rtc"
+#define WORKER_MODEL_MCORE_DISPATCH "dispatch"
 /* Static global variables used within this file. */
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /**< Ports set in promiscuous mode off by default. */
 static int promiscuous_on;
@@ -76,11 +82,19 @@ xmm_t val_eth[RTE_MAX_ETHPORTS];
 /* Mask of enabled ports */
 static uint32_t enabled_port_mask;
 
+/* Pcap trace */
+static char pcap_filename[RTE_GRAPH_PCAP_FILE_SZ];
+static uint64_t packet_to_capture;
+static int pcap_trace_enable;
+
+
 struct lcore_rx_queue {
 	uint16_t port_id;
 	uint8_t queue_id;
 	char node_name[RTE_NODE_NAMESIZE];
 };
+
+static uint8_t model_conf = RTE_GRAPH_MODEL_DEFAULT;
 
 /* Lcore conf */
 struct lcore_conf {
@@ -111,20 +125,20 @@ static uint16_t nb_lcore_params = RTE_DIM(lcore_params_array_default);
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
-		.mq_mode = ETH_MQ_RX_RSS,
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
-		.split_hdr_size = 0,
+		.mq_mode = RTE_ETH_MQ_RX_RSS,
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
 				.rss_key = NULL,
-				.rss_hf = ETH_RSS_IP,
+				.rss_hf = RTE_ETH_RSS_IP,
 		},
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
 	},
 };
+
+static uint32_t max_pkt_len;
 
 static struct rte_mempool *pktmbuf_pool[RTE_MAX_ETHPORTS][NB_SOCKETS];
 
@@ -132,6 +146,12 @@ static struct rte_node_ethdev_config ethdev_conf[RTE_MAX_ETHPORTS];
 
 struct ipv4_l3fwd_lpm_route {
 	uint32_t ip;
+	uint8_t depth;
+	uint8_t if_out;
+};
+
+struct ipv6_l3fwd_lpm_route {
+	uint8_t ip[RTE_LPM6_IPV6_ADDR_SIZE];
 	uint8_t depth;
 	uint8_t if_out;
 };
@@ -146,6 +166,41 @@ static struct ipv4_l3fwd_lpm_route ipv4_l3fwd_lpm_route_array[] = {
 	{RTE_IPV4(198, 18, 4, 0), 24, 4}, {RTE_IPV4(198, 18, 5, 0), 24, 5},
 	{RTE_IPV4(198, 18, 6, 0), 24, 6}, {RTE_IPV4(198, 18, 7, 0), 24, 7},
 };
+
+#define IPV6_L3FWD_LPM_NUM_ROUTES                                              \
+	(sizeof(ipv6_l3fwd_lpm_route_array) /                                  \
+	 sizeof(ipv6_l3fwd_lpm_route_array[0]))
+static struct ipv6_l3fwd_lpm_route ipv6_l3fwd_lpm_route_array[] = {
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00}, 48, 0},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x01}, 48, 1},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x02}, 48, 2},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x03}, 48, 3},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x04}, 48, 4},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x05}, 48, 5},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x06}, 48, 6},
+	{{0x20, 0x01, 0xdb, 0x08, 0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x02}, 48, 7},
+};
+
+static int
+check_worker_model_params(void)
+{
+	if (model_conf == RTE_GRAPH_MODEL_MCORE_DISPATCH &&
+	    nb_lcore_params > 1) {
+		printf("Exceeded max number of lcore params for remote model: %hu\n",
+		       nb_lcore_params);
+		return -1;
+	}
+
+	return 0;
+}
 
 static int
 check_lcore_params(void)
@@ -167,8 +222,8 @@ check_lcore_params(void)
 			return -1;
 		}
 
-		if (lcore == rte_get_master_lcore()) {
-			printf("Error: lcore %u is master lcore\n", lcore);
+		if (lcore == rte_get_main_lcore()) {
+			printf("Error: lcore %u is main lcore\n", lcore);
 			return -1;
 		}
 		socketid = rte_lcore_to_socket_id(lcore);
@@ -259,21 +314,41 @@ print_usage(const char *prgname)
 		" [-P]"
 		" --config (port,queue,lcore)[,(port,queue,lcore)]"
 		" [--eth-dest=X,MM:MM:MM:MM:MM:MM]"
-		" [--enable-jumbo [--max-pkt-len PKTLEN]]"
+		" [--max-pkt-len PKTLEN]"
 		" [--no-numa]"
-		" [--per-port-pool]\n\n"
+		" [--per-port-pool]"
+		" [--num-pkt-cap]\n\n"
 
 		"  -p PORTMASK: Hexadecimal bitmask of ports to configure\n"
 		"  -P : Enable promiscuous mode\n"
 		"  --config (port,queue,lcore): Rx queue configuration\n"
 		"  --eth-dest=X,MM:MM:MM:MM:MM:MM: Ethernet destination for "
 		"port X\n"
-		"  --enable-jumbo: Enable jumbo frames\n"
-		"  --max-pkt-len: Under the premise of enabling jumbo,\n"
-		"                 maximum packet length in decimal (64-9600)\n"
+		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
+		"  --model NAME: walking model name, dispatch or rtc(by default)\n"
 		"  --no-numa: Disable numa awareness\n"
-		"  --per-port-pool: Use separate buffer pool per port\n\n",
+		"  --per-port-pool: Use separate buffer pool per port\n"
+		"  --pcap-enable: Enables pcap capture\n"
+		"  --pcap-num-cap NUMPKT: Number of packets to capture\n"
+		"  --pcap-file-name NAME: Pcap file name\n\n",
 		prgname);
+}
+
+static uint64_t
+parse_num_pkt_cap(const char *num_pkt_cap)
+{
+	uint64_t num_pkt;
+	char *end = NULL;
+
+	/* Parse decimal string */
+	num_pkt = strtoull(num_pkt_cap, &end, 10);
+	if ((num_pkt_cap[0] == '\0') || (end == NULL) || (*end != '\0'))
+		return 0;
+
+	if (num_pkt == 0)
+		return 0;
+
+	return num_pkt;
 }
 
 static int
@@ -293,6 +368,23 @@ parse_max_pkt_len(const char *pktlen)
 	return len;
 }
 
+static void
+parse_worker_model(const char *model)
+{
+	if (strcmp(model, WORKER_MODEL_MCORE_DISPATCH) == 0)
+		model_conf = RTE_GRAPH_MODEL_MCORE_DISPATCH;
+	else if (strcmp(model, WORKER_MODEL_RTC) == 0)
+		model_conf = RTE_GRAPH_MODEL_RTC;
+	else
+		rte_exit(EXIT_FAILURE, "Invalid worker model: %s", model);
+
+#if defined(RTE_GRAPH_MODEL_SELECT)
+	if (model_conf != RTE_GRAPH_MODEL_SELECT)
+		printf("Warning: model mismatch, will use the RTE_GRAPH_MODEL_SELECT model\n");
+	model_conf = RTE_GRAPH_MODEL_SELECT;
+#endif
+}
+
 static int
 parse_portmask(const char *portmask)
 {
@@ -302,10 +394,7 @@ parse_portmask(const char *portmask)
 	/* Parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -407,8 +496,13 @@ static const char short_options[] = "p:" /* portmask */
 #define CMD_LINE_OPT_CONFIG	   "config"
 #define CMD_LINE_OPT_ETH_DEST	   "eth-dest"
 #define CMD_LINE_OPT_NO_NUMA	   "no-numa"
-#define CMD_LINE_OPT_ENABLE_JUMBO  "enable-jumbo"
+#define CMD_LINE_OPT_MAX_PKT_LEN   "max-pkt-len"
 #define CMD_LINE_OPT_PER_PORT_POOL "per-port-pool"
+#define CMD_LINE_OPT_PCAP_ENABLE   "pcap-enable"
+#define CMD_LINE_OPT_NUM_PKT_CAP   "pcap-num-cap"
+#define CMD_LINE_OPT_PCAP_FILENAME "pcap-file-name"
+#define CMD_LINE_OPT_WORKER_MODEL  "model"
+
 enum {
 	/* Long options mapped to a short option */
 
@@ -419,16 +513,24 @@ enum {
 	CMD_LINE_OPT_CONFIG_NUM,
 	CMD_LINE_OPT_ETH_DEST_NUM,
 	CMD_LINE_OPT_NO_NUMA_NUM,
-	CMD_LINE_OPT_ENABLE_JUMBO_NUM,
+	CMD_LINE_OPT_MAX_PKT_LEN_NUM,
 	CMD_LINE_OPT_PARSE_PER_PORT_POOL,
+	CMD_LINE_OPT_PARSE_PCAP_ENABLE,
+	CMD_LINE_OPT_PARSE_NUM_PKT_CAP,
+	CMD_LINE_OPT_PCAP_FILENAME_CAP,
+	CMD_LINE_OPT_WORKER_MODEL_TYPE,
 };
 
 static const struct option lgopts[] = {
 	{CMD_LINE_OPT_CONFIG, 1, 0, CMD_LINE_OPT_CONFIG_NUM},
 	{CMD_LINE_OPT_ETH_DEST, 1, 0, CMD_LINE_OPT_ETH_DEST_NUM},
 	{CMD_LINE_OPT_NO_NUMA, 0, 0, CMD_LINE_OPT_NO_NUMA_NUM},
-	{CMD_LINE_OPT_ENABLE_JUMBO, 0, 0, CMD_LINE_OPT_ENABLE_JUMBO_NUM},
+	{CMD_LINE_OPT_MAX_PKT_LEN, 1, 0, CMD_LINE_OPT_MAX_PKT_LEN_NUM},
 	{CMD_LINE_OPT_PER_PORT_POOL, 0, 0, CMD_LINE_OPT_PARSE_PER_PORT_POOL},
+	{CMD_LINE_OPT_PCAP_ENABLE, 0, 0, CMD_LINE_OPT_PARSE_PCAP_ENABLE},
+	{CMD_LINE_OPT_NUM_PKT_CAP, 1, 0, CMD_LINE_OPT_PARSE_NUM_PKT_CAP},
+	{CMD_LINE_OPT_PCAP_FILENAME, 1, 0, CMD_LINE_OPT_PCAP_FILENAME_CAP},
+	{CMD_LINE_OPT_WORKER_MODEL, 1, 0, CMD_LINE_OPT_WORKER_MODEL_TYPE},
 	{NULL, 0, 0, 0},
 };
 
@@ -493,34 +595,36 @@ parse_args(int argc, char **argv)
 			numa_on = 0;
 			break;
 
-		case CMD_LINE_OPT_ENABLE_JUMBO_NUM: {
-			const struct option lenopts = {"max-pkt-len",
-						       required_argument, 0, 0};
-
-			port_conf.rxmode.offloads |= DEV_RX_OFFLOAD_JUMBO_FRAME;
-			port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MULTI_SEGS;
-
-			/*
-			 * if no max-pkt-len set, use the default
-			 * value RTE_ETHER_MAX_LEN.
-			 */
-			if (getopt_long(argc, argvopt, "", &lenopts,
-					&option_index) == 0) {
-				ret = parse_max_pkt_len(optarg);
-				if (ret < 64 || ret > MAX_JUMBO_PKT_LEN) {
-					fprintf(stderr, "Invalid maximum "
-							"packet length\n");
-					print_usage(prgname);
-					return -1;
-				}
-				port_conf.rxmode.max_rx_pkt_len = ret;
-			}
+		case CMD_LINE_OPT_MAX_PKT_LEN_NUM: {
+			max_pkt_len = parse_max_pkt_len(optarg);
 			break;
 		}
 
 		case CMD_LINE_OPT_PARSE_PER_PORT_POOL:
 			printf("Per port buffer pool is enabled\n");
 			per_port_pool = 1;
+			break;
+
+		case CMD_LINE_OPT_PARSE_PCAP_ENABLE:
+			printf("Packet capture enabled\n");
+			pcap_trace_enable = 1;
+			break;
+
+		case CMD_LINE_OPT_PARSE_NUM_PKT_CAP:
+			packet_to_capture = parse_num_pkt_cap(optarg);
+			printf("Number of packets to capture: %"PRIu64"\n",
+			       packet_to_capture);
+			break;
+
+		case CMD_LINE_OPT_PCAP_FILENAME_CAP:
+			rte_strlcpy(pcap_filename, optarg,
+				    sizeof(pcap_filename));
+			printf("Pcap file name: %s\n", pcap_filename);
+			break;
+
+		case CMD_LINE_OPT_WORKER_MODEL_TYPE:
+			printf("Use new worker model: %s\n", optarg);
+			parse_worker_model(optarg);
 			break;
 
 		default:
@@ -599,6 +703,7 @@ check_all_ports_link_status(uint32_t port_mask)
 	struct rte_eth_link link;
 	uint16_t portid;
 	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -623,20 +728,14 @@ check_all_ports_link_status(uint32_t port_mask)
 			}
 			/* Print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf("Port%d Link Up. Speed %u Mbps "
-					       "-%s\n",
-					       portid, link.link_speed,
-					       (link.link_duplex ==
-						ETH_LINK_FULL_DUPLEX)
-						       ? ("full-duplex")
-						       : ("half-duplex\n"));
-				else
-					printf("Port %d Link Down\n", portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text), &link);
+				printf("Port %d %s\n", portid,
+				       link_status_text);
 				continue;
 			}
 			/* Clear all_ports_up flag if any link down */
-			if (link.link_status == ETH_LINK_DOWN) {
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -699,7 +798,7 @@ print_stats(void)
 	rte_graph_cluster_stats_destroy(stats);
 }
 
-/* Main processing loop */
+/* Main processing loop. 8< */
 static int
 graph_main_loop(void *conf)
 {
@@ -728,12 +827,185 @@ graph_main_loop(void *conf)
 
 	return 0;
 }
+/* >8 End of main processing loop. */
+
+static uint32_t
+eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
+{
+	uint32_t overhead_len;
+
+	if (max_mtu != UINT16_MAX && max_rx_pktlen > max_mtu)
+		overhead_len = max_rx_pktlen - max_mtu;
+	else
+		overhead_len = RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+
+	return overhead_len;
+}
+
+static int
+config_port_max_pkt_len(struct rte_eth_conf *conf,
+		struct rte_eth_dev_info *dev_info)
+{
+	uint32_t overhead_len;
+
+	if (max_pkt_len == 0)
+		return 0;
+
+	if (max_pkt_len < RTE_ETHER_MIN_LEN || max_pkt_len > MAX_JUMBO_PKT_LEN)
+		return -1;
+
+	overhead_len = eth_dev_get_overhead_len(dev_info->max_rx_pktlen,
+			dev_info->max_mtu);
+	conf->rxmode.mtu = max_pkt_len - overhead_len;
+
+	if (conf->rxmode.mtu > RTE_ETHER_MTU)
+		conf->txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	return 0;
+}
+
+static void
+graph_config_mcore_dispatch(struct rte_graph_param graph_conf)
+{
+	uint16_t nb_patterns = graph_conf.nb_node_patterns;
+	int worker_count = rte_lcore_count() - 1;
+	int main_lcore_id = rte_get_main_lcore();
+	rte_graph_t main_graph_id = 0;
+	struct rte_node *node_tmp;
+	struct lcore_conf *qconf;
+	struct rte_graph *graph;
+	rte_graph_t graph_id;
+	rte_graph_off_t off;
+	int n_rx_node = 0;
+	int worker_lcore;
+	rte_node_t count;
+	int i, j;
+	int ret;
+
+	for (j = 0; j < nb_lcore_params; j++) {
+		qconf = &lcore_conf[lcore_params[j].lcore_id];
+		/* Add rx node patterns of all lcore */
+		for (i = 0; i < qconf->n_rx_queue; i++) {
+			char *node_name = qconf->rx_queue_list[i].node_name;
+			unsigned int lcore_id = lcore_params[j].lcore_id;
+
+			graph_conf.node_patterns[nb_patterns + n_rx_node + i] = node_name;
+			n_rx_node++;
+			ret = rte_graph_model_mcore_dispatch_node_lcore_affinity_set(node_name,
+										     lcore_id);
+			if (ret == 0)
+				printf("Set node %s affinity to lcore %u\n", node_name,
+				       lcore_params[j].lcore_id);
+		}
+	}
+
+	graph_conf.nb_node_patterns = nb_patterns + n_rx_node;
+	graph_conf.socket_id = rte_lcore_to_socket_id(main_lcore_id);
+
+	qconf = &lcore_conf[main_lcore_id];
+	snprintf(qconf->name, sizeof(qconf->name), "worker_%u",
+		 main_lcore_id);
+
+	/* create main graph */
+	main_graph_id = rte_graph_create(qconf->name, &graph_conf);
+	if (main_graph_id == RTE_GRAPH_ID_INVALID)
+		rte_exit(EXIT_FAILURE,
+			 "rte_graph_create(): main_graph_id invalid for lcore %u\n",
+			 main_lcore_id);
+
+	/* set the graph model for the main graph */
+	rte_graph_worker_model_set(RTE_GRAPH_MODEL_MCORE_DISPATCH);
+	qconf->graph_id = main_graph_id;
+	qconf->graph = rte_graph_lookup(qconf->name);
+	if (!qconf->graph)
+		rte_exit(EXIT_FAILURE,
+			 "rte_graph_lookup(): graph %s not found\n",
+			 qconf->name);
+
+	graph = qconf->graph;
+	worker_lcore = lcore_params[nb_lcore_params - 1].lcore_id;
+	rte_graph_foreach_node(count, off, graph, node_tmp) {
+		/* Need to set the node Lcore affinity before clone graph for each lcore */
+		if (node_tmp->dispatch.lcore_id == RTE_MAX_LCORE) {
+			worker_lcore = rte_get_next_lcore(worker_lcore, true, 1);
+			ret = rte_graph_model_mcore_dispatch_node_lcore_affinity_set(node_tmp->name,
+										     worker_lcore);
+			if (ret == 0)
+				printf("Set node %s affinity to lcore %u\n",
+				       node_tmp->name, worker_lcore);
+		}
+	}
+
+	worker_lcore = main_lcore_id;
+	for (i = 0; i < worker_count; i++) {
+		worker_lcore = rte_get_next_lcore(worker_lcore, true, 1);
+
+		qconf = &lcore_conf[worker_lcore];
+		snprintf(qconf->name, sizeof(qconf->name), "cloned-%u", worker_lcore);
+		graph_id = rte_graph_clone(main_graph_id, qconf->name, &graph_conf);
+		ret = rte_graph_model_mcore_dispatch_core_bind(graph_id, worker_lcore);
+		if (ret == 0)
+			printf("bind graph %d to lcore %u\n", graph_id, worker_lcore);
+
+		/* full cloned graph name */
+		snprintf(qconf->name, sizeof(qconf->name), "%s",
+			 rte_graph_id_to_name(graph_id));
+		qconf->graph_id = graph_id;
+		qconf->graph = rte_graph_lookup(qconf->name);
+		if (!qconf->graph)
+			rte_exit(EXIT_FAILURE,
+				 "Failed to lookup graph %s\n",
+				 qconf->name);
+		continue;
+	}
+}
+
+static void
+graph_config_rtc(struct rte_graph_param graph_conf)
+{
+	uint16_t nb_patterns = graph_conf.nb_node_patterns;
+	struct lcore_conf *qconf;
+	rte_graph_t graph_id;
+	uint32_t lcore_id;
+	rte_edge_t i;
+
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		if (rte_lcore_is_enabled(lcore_id) == 0)
+			continue;
+
+		qconf = &lcore_conf[lcore_id];
+		/* Skip graph creation if no source exists */
+		if (!qconf->n_rx_queue)
+			continue;
+		/* Add rx node patterns of this lcore */
+		for (i = 0; i < qconf->n_rx_queue; i++) {
+			graph_conf.node_patterns[nb_patterns + i] =
+				qconf->rx_queue_list[i].node_name;
+		}
+		graph_conf.nb_node_patterns = nb_patterns + i;
+		graph_conf.socket_id = rte_lcore_to_socket_id(lcore_id);
+		snprintf(qconf->name, sizeof(qconf->name), "worker_%u",
+			 lcore_id);
+		graph_id = rte_graph_create(qconf->name, &graph_conf);
+		if (graph_id == RTE_GRAPH_ID_INVALID)
+			rte_exit(EXIT_FAILURE,
+				 "rte_graph_create(): graph_id invalid for lcore %u\n",
+				 lcore_id);
+		qconf->graph_id = graph_id;
+		qconf->graph = rte_graph_lookup(qconf->name);
+		if (!qconf->graph)
+			rte_exit(EXIT_FAILURE,
+				 "rte_graph_lookup(): graph %s not found\n",
+				 qconf->name);
+	}
+}
 
 int
 main(int argc, char **argv)
 {
 	/* Rewrite data of src and dst ether addr */
 	uint8_t rewrite_data[2 * sizeof(struct rte_ether_addr)];
+	/* Graph initialization. 8< */
 	static const char * const default_patterns[] = {
 		"ip4*",
 		"ethdev_tx-*",
@@ -780,6 +1052,9 @@ main(int argc, char **argv)
 	if (check_lcore_params() < 0)
 		rte_exit(EXIT_FAILURE, "check_lcore_params() failed\n");
 
+	if (check_worker_model_params() < 0)
+		rte_exit(EXIT_FAILURE, "check_worker_model_params() failed\n");
+
 	ret = init_lcore_rx_queues();
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "init_lcore_rx_queues() failed\n");
@@ -790,7 +1065,7 @@ main(int argc, char **argv)
 	nb_ports = rte_eth_dev_count_avail();
 	nb_lcores = rte_lcore_count();
 
-	/* Initialize all ports */
+	/* Initialize all ports. 8< */
 	RTE_ETH_FOREACH_DEV(portid)
 	{
 		struct rte_eth_conf local_port_conf = port_conf;
@@ -813,9 +1088,16 @@ main(int argc, char **argv)
 		       nb_rx_queue, n_tx_queue);
 
 		rte_eth_dev_info_get(portid, &dev_info);
-		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+
+		ret = config_port_max_pkt_len(&local_port_conf, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Invalid max packet length: %u (port %u)\n",
+				max_pkt_len, portid);
+
+		if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 		local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
 			dev_info.flow_type_rss_offloads;
@@ -970,6 +1252,7 @@ main(int argc, char **argv)
 
 	/* Ethdev node config, skip rx queue mapping */
 	ret = rte_node_eth_config(ethdev_conf, nb_conf, nb_graphs);
+	/* >8 End of graph creation. */
 	if (ret)
 		rte_exit(EXIT_FAILURE, "rte_node_eth_config: err=%d\n", ret);
 
@@ -1011,50 +1294,25 @@ main(int argc, char **argv)
 
 	memset(&graph_conf, 0, sizeof(graph_conf));
 	graph_conf.node_patterns = node_patterns;
+	graph_conf.nb_node_patterns = nb_patterns;
 
-	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
-		rte_graph_t graph_id;
-		rte_edge_t i;
+	/* Pcap config */
+	graph_conf.pcap_enable = pcap_trace_enable;
+	graph_conf.num_pkt_to_capture = packet_to_capture;
+	graph_conf.pcap_filename = pcap_filename;
 
-		if (rte_lcore_is_enabled(lcore_id) == 0)
-			continue;
+	if (model_conf == RTE_GRAPH_MODEL_MCORE_DISPATCH)
+		graph_config_mcore_dispatch(graph_conf);
+	else
+		graph_config_rtc(graph_conf);
 
-		qconf = &lcore_conf[lcore_id];
-
-		/* Skip graph creation if no source exists */
-		if (!qconf->n_rx_queue)
-			continue;
-
-		/* Add rx node patterns of this lcore */
-		for (i = 0; i < qconf->n_rx_queue; i++) {
-			graph_conf.node_patterns[nb_patterns + i] =
-				qconf->rx_queue_list[i].node_name;
-		}
-
-		graph_conf.nb_node_patterns = nb_patterns + i;
-		graph_conf.socket_id = rte_lcore_to_socket_id(lcore_id);
-
-		snprintf(qconf->name, sizeof(qconf->name), "worker_%u",
-			 lcore_id);
-
-		graph_id = rte_graph_create(qconf->name, &graph_conf);
-		if (graph_id == RTE_GRAPH_ID_INVALID)
-			rte_exit(EXIT_FAILURE,
-				 "rte_graph_create(): graph_id invalid"
-				 " for lcore %u\n", lcore_id);
-
-		qconf->graph_id = graph_id;
-		qconf->graph = rte_graph_lookup(qconf->name);
-		if (!qconf->graph)
-			rte_exit(EXIT_FAILURE,
-				 "rte_graph_lookup(): graph %s not found\n",
-				 qconf->name);
-	}
+	rte_graph_worker_model_set(model_conf);
+	/* >8 End of graph initialization. */
 
 	memset(&rewrite_data, 0, sizeof(rewrite_data));
 	rewrite_len = sizeof(rewrite_data);
 
-	/* Add route to ip4 graph infra */
+	/* Add routes and rewrite data to graph infra. 8< */
 	for (i = 0; i < IPV4_L3FWD_LPM_NUM_ROUTES; i++) {
 		char route_str[INET6_ADDRSTRLEN * 4];
 		char abuf[INET6_ADDRSTRLEN];
@@ -1099,16 +1357,60 @@ main(int argc, char **argv)
 			route_str, i);
 	}
 
-	/* Launch per-lcore init on every slave lcore */
-	rte_eal_mp_remote_launch(graph_main_loop, NULL, SKIP_MASTER);
+	for (i = 0; i < IPV6_L3FWD_LPM_NUM_ROUTES; i++) {
+		char route_str[INET6_ADDRSTRLEN * 4];
+		char abuf[INET6_ADDRSTRLEN];
+		struct in6_addr in6;
+		uint32_t dst_port;
 
-	/* Accumulate and print stats on master until exit */
+		/* Skip unused ports */
+		if ((1 << ipv6_l3fwd_lpm_route_array[i].if_out &
+		     enabled_port_mask) == 0)
+			continue;
+
+		dst_port = ipv6_l3fwd_lpm_route_array[i].if_out;
+
+		memcpy(in6.s6_addr, ipv6_l3fwd_lpm_route_array[i].ip, RTE_LPM6_IPV6_ADDR_SIZE);
+		snprintf(route_str, sizeof(route_str), "%s / %d (%d)",
+			 inet_ntop(AF_INET6, &in6, abuf, sizeof(abuf)),
+			 ipv6_l3fwd_lpm_route_array[i].depth,
+			 ipv6_l3fwd_lpm_route_array[i].if_out);
+
+		/* Use route index 'i' as next hop id */
+		ret = rte_node_ip6_route_add(ipv6_l3fwd_lpm_route_array[i].ip,
+			ipv6_l3fwd_lpm_route_array[i].depth, i,
+			RTE_NODE_IP6_LOOKUP_NEXT_REWRITE);
+
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Unable to add ip6 route %s to graph\n",
+				 route_str);
+
+		memcpy(rewrite_data, val_eth + dst_port, rewrite_len);
+
+		/* Add next hop rewrite data for id 'i' */
+		ret = rte_node_ip6_rewrite_add(i, rewrite_data,
+					       rewrite_len, dst_port);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Unable to add next hop %u for "
+				 "route %s\n", i, route_str);
+
+		RTE_LOG(INFO, L3FWD_GRAPH, "Added route %s, next_hop %u\n",
+			route_str, i);
+	}
+	/* >8 End of adding routes and rewrite data to graph infa. */
+
+	/* Launch per-lcore init on every worker lcore */
+	rte_eal_mp_remote_launch(graph_main_loop, NULL, SKIP_MAIN);
+
+	/* Accumulate and print stats on main until exit */
 	if (rte_graph_has_stats_feature())
 		print_stats();
 
-	/* Wait for slave cores to exit */
+	/* Wait for worker cores to exit */
 	ret = 0;
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		ret = rte_eal_wait_lcore(lcore_id);
 		/* Destroy graph */
 		if (ret < 0 || rte_graph_destroy(
@@ -1124,10 +1426,16 @@ main(int argc, char **argv)
 		if ((enabled_port_mask & (1 << portid)) == 0)
 			continue;
 		printf("Closing port %d...", portid);
-		rte_eth_dev_stop(portid);
+		ret = rte_eth_dev_stop(portid);
+		if (ret != 0)
+			printf("Failed to stop port %u: %s\n",
+			       portid, rte_strerror(-ret));
 		rte_eth_dev_close(portid);
 		printf(" Done\n");
 	}
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 	printf("Bye...\n");
 
 	return ret;

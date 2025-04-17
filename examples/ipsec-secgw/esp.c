@@ -100,6 +100,7 @@ esp_inbound(struct rte_mbuf *m, struct ipsec_sa *sa,
 
 		switch (sa->cipher_algo) {
 		case RTE_CRYPTO_CIPHER_NULL:
+		case RTE_CRYPTO_CIPHER_DES_CBC:
 		case RTE_CRYPTO_CIPHER_3DES_CBC:
 		case RTE_CRYPTO_CIPHER_AES_CBC:
 			/* Copy IV at the end of crypto operation */
@@ -121,6 +122,7 @@ esp_inbound(struct rte_mbuf *m, struct ipsec_sa *sa,
 		case RTE_CRYPTO_AUTH_NULL:
 		case RTE_CRYPTO_AUTH_SHA1_HMAC:
 		case RTE_CRYPTO_AUTH_SHA256_HMAC:
+		case RTE_CRYPTO_AUTH_AES_XCBC_MAC:
 			sym_cop->auth.data.offset = ip_hdr_len;
 			sym_cop->auth.data.length = sizeof(struct rte_esp_hdr) +
 				sa->iv_len + payload_len;
@@ -159,8 +161,8 @@ esp_inbound_post(struct rte_mbuf *m, struct ipsec_sa *sa,
 
 	if ((ips->type == RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL) ||
 			(ips->type == RTE_SECURITY_ACTION_TYPE_INLINE_CRYPTO)) {
-		if (m->ol_flags & PKT_RX_SEC_OFFLOAD) {
-			if (m->ol_flags & PKT_RX_SEC_OFFLOAD_FAILED)
+		if (m->ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD) {
+			if (m->ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED)
 				cop->status = RTE_CRYPTO_OP_STATUS_ERROR;
 			else
 				cop->status = RTE_CRYPTO_OP_STATUS_SUCCESS;
@@ -336,6 +338,7 @@ esp_outbound(struct rte_mbuf *m, struct ipsec_sa *sa,
 	} else {
 		switch (sa->cipher_algo) {
 		case RTE_CRYPTO_CIPHER_NULL:
+		case RTE_CRYPTO_CIPHER_DES_CBC:
 		case RTE_CRYPTO_CIPHER_3DES_CBC:
 		case RTE_CRYPTO_CIPHER_AES_CBC:
 			memset(iv, 0, sa->iv_len);
@@ -399,6 +402,7 @@ esp_outbound(struct rte_mbuf *m, struct ipsec_sa *sa,
 	} else {
 		switch (sa->cipher_algo) {
 		case RTE_CRYPTO_CIPHER_NULL:
+		case RTE_CRYPTO_CIPHER_DES_CBC:
 		case RTE_CRYPTO_CIPHER_3DES_CBC:
 		case RTE_CRYPTO_CIPHER_AES_CBC:
 			sym_cop->cipher.data.offset = ip_hdr_len +
@@ -431,6 +435,7 @@ esp_outbound(struct rte_mbuf *m, struct ipsec_sa *sa,
 		case RTE_CRYPTO_AUTH_NULL:
 		case RTE_CRYPTO_AUTH_SHA1_HMAC:
 		case RTE_CRYPTO_AUTH_SHA256_HMAC:
+		case RTE_CRYPTO_AUTH_AES_XCBC_MAC:
 			sym_cop->auth.data.offset = ip_hdr_len;
 			sym_cop->auth.data.length = sizeof(struct rte_esp_hdr) +
 				sa->iv_len + pad_payload_len;
@@ -464,7 +469,7 @@ esp_outbound_post(struct rte_mbuf *m,
 
 	if ((type == RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL) ||
 			(type == RTE_SECURITY_ACTION_TYPE_INLINE_CRYPTO)) {
-		m->ol_flags |= PKT_TX_SEC_OFFLOAD;
+		m->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
 	} else {
 		RTE_ASSERT(cop != NULL);
 		if (cop->status != RTE_CRYPTO_OP_STATUS_SUCCESS) {

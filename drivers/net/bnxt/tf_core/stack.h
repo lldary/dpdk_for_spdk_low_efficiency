@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2019-2020 Broadcom
+ * Copyright(c) 2019-2023 Broadcom
  * All rights reserved.
  */
 #ifndef _STACK_H_
@@ -35,6 +35,16 @@ struct stack {
 int stack_init(int num_entries,
 	       uint32_t *items,
 	       struct stack *st);
+
+/** Return the address of the stack contents
+ *
+ *  [in] st
+ *    pointer to the stack
+ *
+ *  return
+ *    pointer to the stack contents
+ */
+uint32_t *stack_items(struct stack *st);
 
 /** Return the size of the stack
  *
@@ -103,5 +113,4 @@ int stack_pop(struct stack *st, uint32_t *x);
  *    none
  */
 void stack_dump(struct stack *st);
-
 #endif /* _STACK_H_ */

@@ -6,7 +6,7 @@
 #include <errno.h>
 #include <stdint.h>
 
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_atomic.h>
 #include <rte_interrupts.h>
 #include <rte_branch_prediction.h>
@@ -19,9 +19,6 @@
 #include <portal/dpaa2_hw_dpio.h>
 #include "dpaa2_cmdif_logs.h"
 #include "rte_pmd_dpaa2_cmdif.h"
-
-/* Dynamic log type identifier */
-int dpaa2_cmdif_logtype;
 
 /* CMDIF driver name */
 #define DPAA2_CMDIF_PMD_NAME dpaa2_dpci
@@ -291,10 +288,4 @@ static struct rte_vdev_driver dpaa2_cmdif_drv = {
 };
 
 RTE_PMD_REGISTER_VDEV(DPAA2_CMDIF_PMD_NAME, dpaa2_cmdif_drv);
-
-RTE_INIT(dpaa2_cmdif_init_log)
-{
-	dpaa2_cmdif_logtype = rte_log_register("pmd.raw.dpaa2.cmdif");
-	if (dpaa2_cmdif_logtype >= 0)
-		rte_log_set_level(dpaa2_cmdif_logtype, RTE_LOG_INFO);
-}
+RTE_LOG_REGISTER(dpaa2_cmdif_logtype, pmd.raw.dpaa2.cmdif, INFO);

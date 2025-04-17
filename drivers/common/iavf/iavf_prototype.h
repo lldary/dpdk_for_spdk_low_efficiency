@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2021 Intel Corporation
  */
 
 #ifndef _IAVF_PROTOTYPE_H_
@@ -9,6 +9,8 @@
 #include "iavf_alloc.h"
 #include "virtchnl.h"
 
+#include <rte_compat.h>
+
 /* Prototypes for shared code functions that are not in
  * the standard function pointer structures.  These are
  * mostly because they are needed even before the init
@@ -17,7 +19,9 @@
  */
 
 /* adminq functions */
+__rte_internal
 enum iavf_status iavf_init_adminq(struct iavf_hw *hw);
+__rte_internal
 enum iavf_status iavf_shutdown_adminq(struct iavf_hw *hw);
 enum iavf_status iavf_init_asq(struct iavf_hw *hw);
 enum iavf_status iavf_init_arq(struct iavf_hw *hw);
@@ -30,6 +34,7 @@ void iavf_free_adminq_asq(struct iavf_hw *hw);
 void iavf_free_adminq_arq(struct iavf_hw *hw);
 enum iavf_status iavf_validate_mac_addr(u8 *mac_addr);
 void iavf_adminq_init_ring_data(struct iavf_hw *hw);
+__rte_internal
 enum iavf_status iavf_clean_arq_element(struct iavf_hw *hw,
 					struct iavf_arq_event_info *e,
 					u16 *events_pending);
@@ -61,6 +66,7 @@ enum iavf_status iavf_aq_set_rss_key(struct iavf_hw *hw,
 const char *iavf_aq_str(struct iavf_hw *hw, enum iavf_admin_queue_err aq_err);
 const char *iavf_stat_str(struct iavf_hw *hw, enum iavf_status stat_err);
 
+__rte_internal
 enum iavf_status iavf_set_mac_type(struct iavf_hw *hw);
 
 extern struct iavf_rx_ptype_decoded iavf_ptype_lookup[];
@@ -70,15 +76,11 @@ STATIC INLINE struct iavf_rx_ptype_decoded decode_rx_desc_ptype(u8 ptype)
 	return iavf_ptype_lookup[ptype];
 }
 
-/* prototype for functions used for SW spinlocks */
-void iavf_init_spinlock(struct iavf_spinlock *sp);
-void iavf_acquire_spinlock(struct iavf_spinlock *sp);
-void iavf_release_spinlock(struct iavf_spinlock *sp);
-void iavf_destroy_spinlock(struct iavf_spinlock *sp);
-
+__rte_internal
 void iavf_vf_parse_hw_config(struct iavf_hw *hw,
 			     struct virtchnl_vf_resource *msg);
 enum iavf_status iavf_vf_reset(struct iavf_hw *hw);
+__rte_internal
 enum iavf_status iavf_aq_send_msg_to_pf(struct iavf_hw *hw,
 				enum virtchnl_ops v_opcode,
 				enum iavf_status v_retval,

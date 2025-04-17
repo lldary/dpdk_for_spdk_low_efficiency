@@ -10,35 +10,25 @@
 #define CRYPTODEV_NAME_ARMV8_PMD	crypto_armv8
 /**< ARMv8 Crypto PMD device name */
 
-#define ARMV8_CRYPTO_LOG_ERR(fmt, args...) \
-	RTE_LOG(ERR, CRYPTODEV, "[%s] %s() line %u: " fmt "\n",  \
-			RTE_STR(CRYPTODEV_NAME_ARMV8_CRYPTO_PMD), \
+extern int crypto_armv8_log_type;
+
+#define ARMV8_CRYPTO_LOG_ERR(fmt, args...)			\
+	rte_log(RTE_LOG_ERR, crypto_armv8_log_type,		\
+			"[%s] %s() line %u: " fmt "\n",		\
+			RTE_STR(CRYPTODEV_NAME_ARMV8_PMD),	\
 			__func__, __LINE__, ## args)
 
-#ifdef RTE_LIBRTE_ARMV8_CRYPTO_DEBUG
-#define ARMV8_CRYPTO_LOG_INFO(fmt, args...) \
-	RTE_LOG(INFO, CRYPTODEV, "[%s] %s() line %u: " fmt "\n", \
-			RTE_STR(CRYPTODEV_NAME_ARMV8_CRYPTO_PMD), \
+#define ARMV8_CRYPTO_LOG_INFO(fmt, args...)			\
+	rte_log(RTE_LOG_INFO, crypto_armv8_log_type,		\
+			"[%s] %s() line %u: " fmt "\n",		\
+			RTE_STR(CRYPTODEV_NAME_ARMV8_PMD),	\
 			__func__, __LINE__, ## args)
 
-#define ARMV8_CRYPTO_LOG_DBG(fmt, args...) \
-	RTE_LOG(DEBUG, CRYPTODEV, "[%s] %s() line %u: " fmt "\n", \
-			RTE_STR(CRYPTODEV_NAME_ARMV8_CRYPTO_PMD), \
+#define ARMV8_CRYPTO_LOG_DBG(fmt, args...)			\
+	rte_log(RTE_LOG_DEBUG, crypto_armv8_log_type,		\
+			"[%s] %s() line %u: " fmt "\n",		\
+			RTE_STR(CRYPTODEV_NAME_ARMV8_PMD),	\
 			__func__, __LINE__, ## args)
-
-#define ARMV8_CRYPTO_ASSERT(con)				\
-do {								\
-	if (!(con)) {						\
-		rte_panic("%s(): "				\
-		    con "condition failed, line %u", __func__);	\
-	}							\
-} while (0)
-
-#else
-#define ARMV8_CRYPTO_LOG_INFO(fmt, args...)
-#define ARMV8_CRYPTO_LOG_DBG(fmt, args...)
-#define ARMV8_CRYPTO_ASSERT(con)
-#endif
 
 #define NBBY		8		/* Number of bits in a byte */
 #define BYTE_LENGTH(x)	((x) / NBBY)	/* Number of bytes in x (round down) */
@@ -80,11 +70,9 @@ enum armv8_crypto_auth_mode {
 	ARMV8_CRYPTO_AUTH_LIST_END = ARMV8_CRYPTO_AUTH_NOT_SUPPORTED
 };
 
-#define CRYPTO_ORDER_MAX		ARMV8_CRYPTO_CHAIN_LIST_END
-#define CRYPTO_CIPHER_OP_MAX		ARMV8_CRYPTO_CIPHER_OP_LIST_END
 #define CRYPTO_CIPHER_KEYLEN_MAX	ARMV8_CRYPTO_CIPHER_KEYLEN_LIST_END
-#define CRYPTO_CIPHER_MAX		RTE_CRYPTO_CIPHER_LIST_END
-#define CRYPTO_AUTH_MAX			RTE_CRYPTO_AUTH_LIST_END
+#define CRYPTO_CIPHER_MAX		(RTE_CRYPTO_CIPHER_AES_ECB + 1)
+#define CRYPTO_AUTH_MAX			(RTE_CRYPTO_AUTH_SHA512_HMAC + 1)
 
 #define HMAC_IPAD_VALUE			(0x36)
 #define HMAC_OPAD_VALUE			(0x5C)
@@ -118,8 +106,6 @@ struct armv8_crypto_qp {
 	/**< Ring for placing process packets */
 	struct rte_mempool *sess_mp;
 	/**< Session Mempool */
-	struct rte_mempool *sess_mp_priv;
-       /**< Session Private Data Mempool */
 	struct rte_cryptodev_stats stats;
 	/**< Queue pair statistics */
 	char name[RTE_CRYPTODEV_NAME_MAX_LEN];

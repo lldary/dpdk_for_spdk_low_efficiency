@@ -178,7 +178,7 @@ enqueue_dequeue_bulk_helper(const unsigned int flag, const int esize,
 	struct thread_params *p)
 {
 	int ret;
-	const unsigned int iter_shift = 23;
+	const unsigned int iter_shift = 15;
 	const unsigned int iterations = 1 << iter_shift;
 	struct rte_ring *r = p->r;
 	unsigned int bsize = p->size;
@@ -186,7 +186,7 @@ enqueue_dequeue_bulk_helper(const unsigned int flag, const int esize,
 	void *burst = NULL;
 
 #ifdef RTE_USE_C11_MEM_MODEL
-	if (__atomic_add_fetch(&lcore_count, 1, __ATOMIC_RELAXED) != 2)
+	if (__atomic_fetch_add(&lcore_count, 1, __ATOMIC_RELAXED) + 1 != 2)
 #else
 	if (__sync_add_and_fetch(&lcore_count, 1) != 2)
 #endif
@@ -297,7 +297,7 @@ run_on_core_pair(struct lcore_pair *cores, struct rte_ring *r, const int esize)
 		lcore_count = 0;
 		param1.size = param2.size = bulk_sizes[i];
 		param1.r = param2.r = r;
-		if (cores->c1 == rte_get_master_lcore()) {
+		if (cores->c1 == rte_get_main_lcore()) {
 			rte_eal_remote_launch(f2, &param2, cores->c2);
 			f1(&param1);
 			rte_eal_wait_lcore(cores->c2);
@@ -320,7 +320,7 @@ run_on_core_pair(struct lcore_pair *cores, struct rte_ring *r, const int esize)
 	return 0;
 }
 
-static rte_atomic32_t synchro;
+static uint32_t synchro;
 static uint64_t queue_count[RTE_MAX_LCORE];
 
 #define TIME_MS 100
@@ -340,10 +340,9 @@ load_loop_fn_helper(struct thread_params *p, const int esize)
 	if (burst == NULL)
 		return -1;
 
-	/* wait synchro for slaves */
-	if (lcore != rte_get_master_lcore())
-		while (rte_atomic32_read(&synchro) == 0)
-			rte_pause();
+	/* wait synchro for workers */
+	if (lcore != rte_get_main_lcore())
+		rte_wait_until_equal_32(&synchro, 1, __ATOMIC_RELAXED);
 
 	begin = rte_get_timer_cycles();
 	while (time_diff < hz * TIME_MS / 1000) {
@@ -380,7 +379,7 @@ load_loop_fn_16B(void *p)
 static int
 run_on_all_cores(struct rte_ring *r, const int esize)
 {
-	uint64_t total = 0;
+	uint64_t total;
 	struct thread_params param;
 	lcore_function_t *lcore_f;
 	unsigned int i, c;
@@ -392,17 +391,18 @@ run_on_all_cores(struct rte_ring *r, const int esize)
 
 	memset(&param, 0, sizeof(struct thread_params));
 	for (i = 0; i < RTE_DIM(bulk_sizes); i++) {
+		total = 0;
 		printf("\nBulk enq/dequeue count on size %u\n", bulk_sizes[i]);
 		param.size = bulk_sizes[i];
 		param.r = r;
 
-		/* clear synchro and start slaves */
-		rte_atomic32_set(&synchro, 0);
-		if (rte_eal_mp_remote_launch(lcore_f, &param, SKIP_MASTER) < 0)
+		/* clear synchro and start workers */
+		__atomic_store_n(&synchro, 0, __ATOMIC_RELAXED);
+		if (rte_eal_mp_remote_launch(lcore_f, &param, SKIP_MAIN) < 0)
 			return -1;
 
-		/* start synchro and launch test on master */
-		rte_atomic32_set(&synchro, 1);
+		/* start synchro and launch test on main */
+		__atomic_store_n(&synchro, 1, __ATOMIC_RELAXED);
 		lcore_f(&param);
 
 		rte_eal_mp_wait_lcore();
@@ -552,7 +552,7 @@ test_ring_perf_esize(const int esize)
 			goto test_fail;
 	}
 
-	printf("\n### Testing using all slave nodes ###\n");
+	printf("\n### Testing using all worker nodes ###\n");
 	if (run_on_all_cores(r, esize) < 0)
 		goto test_fail;
 
@@ -579,4 +579,4 @@ test_ring_perf(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(ring_perf_autotest, test_ring_perf);
+REGISTER_PERF_TEST(ring_perf_autotest, test_ring_perf);

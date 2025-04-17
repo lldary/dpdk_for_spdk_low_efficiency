@@ -17,8 +17,9 @@
 #include <rte_lcore.h>
 #include <rte_per_lcore.h>
 #include <rte_random.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_test.h>
+#include <bus_fslmc_driver.h>
 
 #include "dpaa2_eventdev.h"
 #include "dpaa2_eventdev_logs.h"
@@ -46,17 +47,6 @@ struct event_attr {
 	uint8_t port;
 	uint8_t seq;
 };
-
-static uint32_t seqn_list_index;
-static int seqn_list[NUM_PACKETS];
-
-static void
-seqn_list_init(void)
-{
-	RTE_BUILD_BUG_ON(NUM_PACKETS < MAX_EVENTS);
-	memset(seqn_list, 0, sizeof(seqn_list));
-	seqn_list_index = 0;
-}
 
 struct test_core_param {
 	rte_atomic32_t *total_events;
@@ -128,7 +118,7 @@ _eventdev_setup(int mode)
 	struct rte_event_dev_info info;
 	const char *pool_name = "evdev_dpaa2_test_pool";
 
-	/* Create and destrory pool for each test case to make it standalone */
+	/* Create and destroy pool for each test case to make it standalone */
 	eventdev_test_mempool = rte_pktmbuf_pool_create(pool_name,
 					MAX_EVENTS,
 					0 /*MBUF_CACHE_SIZE*/,
@@ -285,7 +275,8 @@ check_excess_events(uint8_t port)
 		valid_event = rte_event_dequeue_burst(evdev, port, &ev, 1, 0);
 
 		RTE_TEST_ASSERT_SUCCESS(valid_event,
-				"Unexpected valid event=%d", ev.mbuf->seqn);
+				"Unexpected valid event=%d",
+				*dpaa2_seqn(ev.mbuf));
 	}
 	return 0;
 }
@@ -477,7 +468,7 @@ wait_workers_to_join(int lcore, const rte_atomic32_t *count)
 	RTE_SET_USED(count);
 
 	print_cycles = cycles = rte_get_timer_cycles();
-	while (rte_eal_get_lcore_state(lcore) != FINISHED) {
+	while (rte_eal_get_lcore_state(lcore) != WAIT) {
 		uint64_t new_cycles = rte_get_timer_cycles();
 
 		if (new_cycles - print_cycles > rte_get_timer_hz()) {
@@ -501,8 +492,8 @@ wait_workers_to_join(int lcore, const rte_atomic32_t *count)
 
 
 static int
-launch_workers_and_wait(int (*master_worker)(void *),
-			int (*slave_workers)(void *), uint32_t total_events,
+launch_workers_and_wait(int (*main_worker)(void *),
+			int (*workers)(void *), uint32_t total_events,
 			uint8_t nb_workers, uint8_t sched_type)
 {
 	uint8_t port = 0;
@@ -516,7 +507,7 @@ launch_workers_and_wait(int (*master_worker)(void *),
 		return 0;
 
 	rte_atomic32_set(&atomic_total_events, total_events);
-	seqn_list_init();
+	RTE_BUILD_BUG_ON(NUM_PACKETS < MAX_EVENTS);
 
 	param = malloc(sizeof(struct test_core_param) * nb_workers);
 	if (!param)
@@ -537,9 +528,9 @@ launch_workers_and_wait(int (*master_worker)(void *),
 
 	w_lcore = rte_get_next_lcore(
 			/* start core */ -1,
-			/* skip master */ 1,
+			/* skip main */ 1,
 			/* wrap */ 0);
-	rte_eal_remote_launch(master_worker, &param[0], w_lcore);
+	rte_eal_remote_launch(main_worker, &param[0], w_lcore);
 
 	for (port = 1; port < nb_workers; port++) {
 		param[port].total_events = &atomic_total_events;
@@ -548,7 +539,7 @@ launch_workers_and_wait(int (*master_worker)(void *),
 		param[port].dequeue_tmo_ticks = dequeue_tmo_ticks;
 		rte_smp_wmb();
 		w_lcore = rte_get_next_lcore(w_lcore, 1, 0);
-		rte_eal_remote_launch(slave_workers, &param[port], w_lcore);
+		rte_eal_remote_launch(workers, &param[port], w_lcore);
 	}
 
 	ret = wait_workers_to_join(w_lcore, &atomic_total_events);
@@ -783,15 +774,15 @@ static void dpaa2_test_run(int (*setup)(void), void (*tdown)(void),
 		int (*test)(void), const char *name)
 {
 	if (setup() < 0) {
-		RTE_LOG(INFO, PMD, "Error setting up test %s", name);
+		DPAA2_EVENTDEV_INFO("Error setting up test %s", name);
 		unsupported++;
 	} else {
 		if (test() < 0) {
 			failed++;
-			RTE_LOG(INFO, PMD, "%s Failed\n", name);
+			DPAA2_EVENTDEV_INFO("%s Failed", name);
 		} else {
 			passed++;
-			RTE_LOG(INFO, PMD, "%s Passed", name);
+			DPAA2_EVENTDEV_INFO("%s Passed", name);
 		}
 	}
 

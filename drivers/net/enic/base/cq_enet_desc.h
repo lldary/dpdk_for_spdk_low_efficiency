@@ -58,6 +58,20 @@ struct cq_enet_rq_clsf_desc {
 	uint8_t type_color;
 };
 
+/* Completion queue descriptor: Ethernet receive queue, 64B */
+struct cq_enet_rq_desc_64 {
+	uint16_t completed_index_flags;
+	uint16_t q_number_rss_type_flags;
+	uint32_t rss_hash;
+	uint16_t bytes_written_flags;
+	uint16_t vlan;
+	uint16_t checksum_fcoe;
+	uint8_t flags;
+	uint8_t fetch_idx_flags;
+	uint8_t unused[47];
+	uint8_t type_color;
+};
+
 #define CQ_ENET_RQ_DESC_FLAGS_INGRESS_PORT          (0x1 << 12)
 #define CQ_ENET_RQ_DESC_FLAGS_FCOE                  (0x1 << 13)
 #define CQ_ENET_RQ_DESC_FLAGS_EOP                   (0x1 << 14)
@@ -79,6 +93,9 @@ struct cq_enet_rq_clsf_desc {
 #define CQ_ENET_RQ_DESC_BYTES_WRITTEN_BITS          14
 #define CQ_ENET_RQ_DESC_BYTES_WRITTEN_MASK \
 	((1 << CQ_ENET_RQ_DESC_BYTES_WRITTEN_BITS) - 1)
+#define CQ_ENET_RQ_DESC_FETCH_IDX_BITS              2
+#define CQ_ENET_RQ_DESC_FETCH_IDX_MASK \
+	((1 << CQ_ENET_RQ_DESC_FETCH_IDX_BITS) - 1)
 #define CQ_ENET_RQ_DESC_FLAGS_TRUNCATED             (0x1 << 14)
 #define CQ_ENET_RQ_DESC_FLAGS_VLAN_STRIPPED         (0x1 << 15)
 

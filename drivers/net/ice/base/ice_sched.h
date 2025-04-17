@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2023 Intel Corporation
  */
 
 #ifndef _ICE_SCHED_H_
 #define _ICE_SCHED_H_
 
 #include "ice_common.h"
+
+#define ICE_SCHED_5_LAYERS	5
+#define ICE_SCHED_9_LAYERS	9
 
 #define ICE_QGRP_LAYER_OFFSET	2
 #define ICE_VSI_LAYER_OFFSET	4
@@ -34,6 +37,11 @@
 #define ICE_PSM_CLK_416MHZ_IN_HZ 416666667
 #define ICE_PSM_CLK_446MHZ_IN_HZ 446428571
 #define ICE_PSM_CLK_390MHZ_IN_HZ 390625000
+
+#define PSM_CLK_SRC_367_MHZ 0x0
+#define PSM_CLK_SRC_416_MHZ 0x1
+#define PSM_CLK_SRC_446_MHZ 0x2
+#define PSM_CLK_SRC_390_MHZ 0x3
 
 struct rl_profile_params {
 	u32 bw;			/* in Kbps */
@@ -75,15 +83,23 @@ struct ice_sched_agg_info {
 /* FW AQ command calls */
 enum ice_status
 ice_aq_query_rl_profile(struct ice_hw *hw, u16 num_profiles,
-			struct ice_aqc_rl_profile_generic_elem *buf,
-			u16 buf_size, struct ice_sq_cd *cd);
+			struct ice_aqc_rl_profile_elem *buf, u16 buf_size,
+			struct ice_sq_cd *cd);
+enum ice_status
+ice_aq_cfg_node_attr(struct ice_hw *hw, u16 num_nodes,
+		     struct ice_aqc_node_attr_elem *buf, u16 buf_size,
+		     struct ice_sq_cd *cd);
 enum ice_status
 ice_aq_cfg_l2_node_cgd(struct ice_hw *hw, u16 num_nodes,
-		       struct ice_aqc_cfg_l2_node_cgd_data *buf, u16 buf_size,
+		       struct ice_aqc_cfg_l2_node_cgd_elem *buf, u16 buf_size,
 		       struct ice_sq_cd *cd);
 enum ice_status
+ice_aq_move_sched_elems(struct ice_hw *hw, u16 grps_req,
+			struct ice_aqc_move_elem *buf, u16 buf_size,
+			u16 *grps_movd, struct ice_sq_cd *cd);
+enum ice_status
 ice_aq_query_sched_elems(struct ice_hw *hw, u16 elems_req,
-			 struct ice_aqc_get_elem *buf, u16 buf_size,
+			 struct ice_aqc_txsched_elem_data *buf, u16 buf_size,
 			 u16 *elems_ret, struct ice_sq_cd *cd);
 enum ice_status ice_sched_init_port(struct ice_port_info *pi);
 enum ice_status ice_sched_query_res_alloc(struct ice_hw *hw);
@@ -101,7 +117,8 @@ ice_sched_find_node_by_teid(struct ice_sched_node *start_node, u32 teid);
 /* Add a scheduling node into SW DB for given info */
 enum ice_status
 ice_sched_add_node(struct ice_port_info *pi, u8 layer,
-		   struct ice_aqc_txsched_elem_data *info);
+		   struct ice_aqc_txsched_elem_data *info,
+		   struct ice_sched_node *prealloc_node);
 void ice_free_sched_node(struct ice_port_info *pi, struct ice_sched_node *node);
 struct ice_sched_node *ice_sched_get_tc_node(struct ice_port_info *pi, u8 tc);
 struct ice_sched_node *
@@ -117,7 +134,7 @@ ice_sched_get_vsi_node(struct ice_port_info *pi, struct ice_sched_node *tc_node,
 bool ice_sched_is_tree_balanced(struct ice_hw *hw, struct ice_sched_node *node);
 enum ice_status
 ice_aq_query_node_to_root(struct ice_hw *hw, u32 node_teid,
-			  struct ice_aqc_get_elem *buf, u16 buf_size,
+			  struct ice_aqc_txsched_elem_data *buf, u16 buf_size,
 			  struct ice_sq_cd *cd);
 
 /* Tx scheduler rate limiter functions */
@@ -153,16 +170,30 @@ enum ice_status
 ice_cfg_agg_bw_dflt_lmt_per_tc(struct ice_port_info *pi, u32 agg_id, u8 tc,
 			       enum ice_rl_type rl_type);
 enum ice_status
-ice_cfg_vsi_bw_shared_lmt(struct ice_port_info *pi, u16 vsi_handle, u32 bw);
+ice_cfg_vsi_bw_shared_lmt(struct ice_port_info *pi, u16 vsi_handle, u32 min_bw,
+			  u32 max_bw, u32 shared_bw);
 enum ice_status
 ice_cfg_vsi_bw_no_shared_lmt(struct ice_port_info *pi, u16 vsi_handle);
 enum ice_status
-ice_cfg_agg_bw_shared_lmt(struct ice_port_info *pi, u32 agg_id, u32 bw);
+ice_cfg_agg_bw_shared_lmt(struct ice_port_info *pi, u32 agg_id, u32 min_bw,
+			  u32 max_bw, u32 shared_bw);
 enum ice_status
 ice_cfg_agg_bw_no_shared_lmt(struct ice_port_info *pi, u32 agg_id);
 enum ice_status
+ice_cfg_agg_bw_shared_lmt_per_tc(struct ice_port_info *pi, u32 agg_id, u8 tc,
+				 u32 min_bw, u32 max_bw, u32 shared_bw);
+enum ice_status
+ice_cfg_agg_bw_no_shared_lmt_per_tc(struct ice_port_info *pi, u32 agg_id,
+				    u8 tc);
+enum ice_status
 ice_cfg_vsi_q_priority(struct ice_port_info *pi, u16 num_qs, u32 *q_ids,
 		       u8 *q_prio);
+enum ice_status
+ice_sched_cfg_sibl_node_prio_lock(struct ice_port_info *pi,
+				  struct ice_sched_node *node, u8 priority);
+enum ice_status
+ice_cfg_q_bw_alloc(struct ice_port_info *pi, u16 vsi_handle, u8 tc,
+		   u16 q_handle, enum ice_rl_type rl_type, u32 bw_alloc);
 enum ice_status
 ice_cfg_vsi_bw_alloc(struct ice_port_info *pi, u16 vsi_handle, u8 ena_tcmap,
 		     enum ice_rl_type rl_type, u8 *bw_alloc);
@@ -184,9 +215,14 @@ ice_sched_set_node_bw_lmt_per_tc(struct ice_port_info *pi, u32 id,
 				 enum ice_rl_type rl_type, u32 bw);
 enum ice_status
 ice_sched_set_vsi_bw_shared_lmt(struct ice_port_info *pi, u16 vsi_handle,
-				u32 bw);
+				u32 min_bw, u32 max_bw, u32 shared_bw);
 enum ice_status
-ice_sched_set_agg_bw_shared_lmt(struct ice_port_info *pi, u32 agg_id, u32 bw);
+ice_sched_set_agg_bw_shared_lmt(struct ice_port_info *pi, u32 agg_id, u32 min_bw,
+				u32 max_bw, u32 shared_bw);
+enum ice_status
+ice_sched_set_agg_bw_shared_lmt_per_tc(struct ice_port_info *pi, u32 agg_id,
+				       u8 tc, u32 min_bw, u32 max_bw,
+				       u32 shared_bw);
 enum ice_status
 ice_sched_cfg_sibl_node_prio(struct ice_port_info *pi,
 			     struct ice_sched_node *node, u8 priority);
@@ -194,4 +230,17 @@ enum ice_status
 ice_cfg_tc_node_bw_alloc(struct ice_port_info *pi, u8 tc,
 			 enum ice_rl_type rl_type, u8 bw_alloc);
 enum ice_status ice_cfg_rl_burst_size(struct ice_hw *hw, u32 bytes);
+void ice_sched_replay_agg_vsi_preinit(struct ice_hw *hw);
+void ice_sched_replay_agg(struct ice_hw *hw);
+enum ice_status ice_sched_replay_tc_node_bw(struct ice_port_info *pi);
+enum ice_status ice_replay_vsi_agg(struct ice_hw *hw, u16 vsi_handle);
+enum ice_status ice_sched_replay_root_node_bw(struct ice_port_info *pi);
+enum ice_status
+ice_sched_replay_q_bw(struct ice_port_info *pi, struct ice_q_ctx *q_ctx);
+enum ice_status
+ice_sched_set_node_bw_lmt(struct ice_port_info *pi, struct ice_sched_node *node,
+			  enum ice_rl_type rl_type, u32 bw);
+enum ice_status
+ice_sched_cfg_node_bw_alloc(struct ice_hw *hw, struct ice_sched_node *node,
+			    enum ice_rl_type rl_type, u16 bw_alloc);
 #endif /* _ICE_SCHED_H_ */

@@ -38,6 +38,13 @@ enum i40e_status_code i40e_asq_send_command(struct i40e_hw *hw,
 				void *buff, /* can be NULL */
 				u16  buff_size,
 				struct i40e_asq_cmd_details *cmd_details);
+enum i40e_status_code
+i40e_asq_send_command_v2(struct i40e_hw *hw,
+			 struct i40e_aq_desc *desc,
+			 void *buff, /* can be NULL */
+			 u16  buff_size,
+			 struct i40e_asq_cmd_details *cmd_details,
+			 enum i40e_admin_queue_err *aq_status);
 #ifdef VF_DRIVER
 bool i40e_asq_done(struct i40e_hw *hw);
 #endif
@@ -188,9 +195,19 @@ enum i40e_status_code i40e_aq_get_veb_parameters(struct i40e_hw *hw,
 enum i40e_status_code i40e_aq_add_macvlan(struct i40e_hw *hw, u16 vsi_id,
 			struct i40e_aqc_add_macvlan_element_data *mv_list,
 			u16 count, struct i40e_asq_cmd_details *cmd_details);
+enum i40e_status_code
+i40e_aq_add_macvlan_v2(struct i40e_hw *hw, u16 seid,
+		       struct i40e_aqc_add_macvlan_element_data *mv_list,
+		       u16 count, struct i40e_asq_cmd_details *cmd_details,
+		       enum i40e_admin_queue_err *aq_status);
 enum i40e_status_code i40e_aq_remove_macvlan(struct i40e_hw *hw, u16 vsi_id,
 			struct i40e_aqc_remove_macvlan_element_data *mv_list,
 			u16 count, struct i40e_asq_cmd_details *cmd_details);
+enum i40e_status_code
+i40e_aq_remove_macvlan_v2(struct i40e_hw *hw, u16 seid,
+			  struct i40e_aqc_remove_macvlan_element_data *mv_list,
+			  u16 count, struct i40e_asq_cmd_details *cmd_details,
+			  enum i40e_admin_queue_err *aq_status);
 enum i40e_status_code i40e_aq_add_mirrorrule(struct i40e_hw *hw, u16 sw_seid,
 			u16 rule_type, u16 dest_vsi, u16 count, __le16 *mr_list,
 			struct i40e_asq_cmd_details *cmd_details,
@@ -240,6 +257,10 @@ enum i40e_status_code i40e_aq_write_nvm_config(struct i40e_hw *hw,
 				u8 cmd_flags, void *data, u16 buf_size,
 				u16 element_count,
 				struct i40e_asq_cmd_details *cmd_details);
+enum i40e_status_code
+i40e_aq_min_rollback_rev_update(struct i40e_hw *hw, u8 mode, u8 module,
+				u32 min_rrev,
+				struct i40e_asq_cmd_details *cmd_details);
 enum i40e_status_code i40e_aq_oem_post_update(struct i40e_hw *hw,
 				void *buff, u16 buff_size,
 				struct i40e_asq_cmd_details *cmd_details);
@@ -254,8 +275,10 @@ enum i40e_status_code i40e_aq_update_nvm(struct i40e_hw *hw, u8 module_pointer,
 enum i40e_status_code i40e_aq_rearrange_nvm(struct i40e_hw *hw,
 				u8 rearrange_nvm,
 				struct i40e_asq_cmd_details *cmd_details);
-enum i40e_status_code i40e_aq_nvm_progress(struct i40e_hw *hw, u8 *progress,
-				struct i40e_asq_cmd_details *cmd_details);
+enum i40e_status_code
+i40e_aq_nvm_update_in_process(struct i40e_hw *hw,
+			      bool update_flow_state,
+			      struct i40e_asq_cmd_details *cmd_details);
 enum i40e_status_code i40e_aq_get_lldp_mib(struct i40e_hw *hw, u8 bridge_type,
 				u8 mib_type, void *buff, u16 buff_size,
 				u16 *local_len, u16 *remote_len,
@@ -523,11 +546,6 @@ i40e_virtchnl_link_speed(enum i40e_aq_link_speed link_speed)
 	}
 }
 #endif /* PF_DRIVER */
-/* prototype for functions used for SW spinlocks */
-void i40e_init_spinlock(struct i40e_spinlock *sp);
-void i40e_acquire_spinlock(struct i40e_spinlock *sp);
-void i40e_release_spinlock(struct i40e_spinlock *sp);
-void i40e_destroy_spinlock(struct i40e_spinlock *sp);
 
 /* i40e_common for VF drivers*/
 void i40e_vf_parse_hw_config(struct i40e_hw *hw,

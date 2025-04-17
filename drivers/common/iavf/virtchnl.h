@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2001-2020 Intel Corporation
+ * Copyright(c) 2001-2021 Intel Corporation
  */
 
 #ifndef _VIRTCHNL_H_
 #define _VIRTCHNL_H_
 
 /* Description:
- * This header file describes the VF-PF communication protocol used
- * by the drivers for all devices starting from our 40G product line
+ * This header file describes the Virtual Function (VF) - Physical Function
+ * (PF) communication protocol used by the drivers for all devices starting
+ * from our 40G product line
  *
  * Admin queue buffer usage:
  * desc->opcode is always aqc_opc_send_msg_to_pf
@@ -21,8 +22,8 @@
  * have a maximum of sixteen queues for all of its VSIs.
  *
  * The PF is required to return a status code in v_retval for all messages
- * except RESET_VF, which does not require any response. The return value
- * is of status_code type, defined in the shared type.h.
+ * except RESET_VF, which does not require any response. The returned value
+ * is of virtchnl_status_code type, defined in the shared type.h.
  *
  * In general, VF driver initialization should roughly follow the order of
  * these opcodes. The VF driver must first validate the API version of the
@@ -36,6 +37,8 @@
  * Need to ensure the following enums and defines hold the same meaning and
  * value in current and future projects
  */
+
+#include "virtchnl_inline_ipsec.h"
 
 /* Error Codes */
 enum virtchnl_status_code {
@@ -84,6 +87,10 @@ enum virtchnl_rx_hsplit {
 	VIRTCHNL_RX_HSPLIT_SPLIT_SCTP    = 8,
 };
 
+enum virtchnl_bw_limit_type {
+	VIRTCHNL_BW_SHAPER = 0,
+};
+
 #define VIRTCHNL_ETH_LENGTH_OF_ADDRESS	6
 /* END GENERIC DEFINES */
 
@@ -128,7 +135,10 @@ enum virtchnl_ops {
 	VIRTCHNL_OP_DISABLE_CHANNELS = 31,
 	VIRTCHNL_OP_ADD_CLOUD_FILTER = 32,
 	VIRTCHNL_OP_DEL_CLOUD_FILTER = 33,
-	/* opcodes 34, 35, 36, 37 and 38 are reserved */
+	VIRTCHNL_OP_INLINE_IPSEC_CRYPTO = 34,
+	/* opcodes 35 and 36 are reserved */
+	VIRTCHNL_OP_DCF_CONFIG_BW = 37,
+	VIRTCHNL_OP_DCF_VLAN_OFFLOAD = 38,
 	VIRTCHNL_OP_DCF_CMD_DESC = 39,
 	VIRTCHNL_OP_DCF_CMD_BUFF = 40,
 	VIRTCHNL_OP_DCF_DISABLE = 41,
@@ -139,8 +149,151 @@ enum virtchnl_ops {
 	VIRTCHNL_OP_DEL_RSS_CFG = 46,
 	VIRTCHNL_OP_ADD_FDIR_FILTER = 47,
 	VIRTCHNL_OP_DEL_FDIR_FILTER = 48,
-	VIRTCHNL_OP_QUERY_FDIR_FILTER = 49,
+	VIRTCHNL_OP_GET_MAX_RSS_QREGION = 50,
+	VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS = 51,
+	VIRTCHNL_OP_ADD_VLAN_V2 = 52,
+	VIRTCHNL_OP_DEL_VLAN_V2 = 53,
+	VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 = 54,
+	VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2 = 55,
+	VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2 = 56,
+	VIRTCHNL_OP_DISABLE_VLAN_INSERTION_V2 = 57,
+	VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2 = 58,
+	VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2 = 59,
+	VIRTCHNL_OP_1588_PTP_GET_CAPS = 60,
+	VIRTCHNL_OP_1588_PTP_GET_TIME = 61,
+	VIRTCHNL_OP_GET_QOS_CAPS = 66,
+	VIRTCHNL_OP_CONFIG_QUEUE_TC_MAP = 67,
+	VIRTCHNL_OP_ENABLE_QUEUES_V2 = 107,
+	VIRTCHNL_OP_DISABLE_QUEUES_V2 = 108,
+	VIRTCHNL_OP_MAP_QUEUE_VECTOR = 111,
+	VIRTCHNL_OP_CONFIG_QUEUE_BW = 112,
+	VIRTCHNL_OP_CONFIG_QUANTA = 113,
+	VIRTCHNL_OP_FLOW_SUBSCRIBE = 114,
+	VIRTCHNL_OP_FLOW_UNSUBSCRIBE = 115,
+	VIRTCHNL_OP_MAX,
 };
+
+static inline const char *virtchnl_op_str(enum virtchnl_ops v_opcode)
+{
+	switch (v_opcode) {
+	case VIRTCHNL_OP_UNKNOWN:
+		return "VIRTCHNL_OP_UNKNOWN";
+	case VIRTCHNL_OP_VERSION:
+		return "VIRTCHNL_OP_VERSION";
+	case VIRTCHNL_OP_RESET_VF:
+		return "VIRTCHNL_OP_RESET_VF";
+	case VIRTCHNL_OP_GET_VF_RESOURCES:
+		return "VIRTCHNL_OP_GET_VF_RESOURCES";
+	case VIRTCHNL_OP_CONFIG_TX_QUEUE:
+		return "VIRTCHNL_OP_CONFIG_TX_QUEUE";
+	case VIRTCHNL_OP_CONFIG_RX_QUEUE:
+		return "VIRTCHNL_OP_CONFIG_RX_QUEUE";
+	case VIRTCHNL_OP_CONFIG_VSI_QUEUES:
+		return "VIRTCHNL_OP_CONFIG_VSI_QUEUES";
+	case VIRTCHNL_OP_CONFIG_IRQ_MAP:
+		return "VIRTCHNL_OP_CONFIG_IRQ_MAP";
+	case VIRTCHNL_OP_ENABLE_QUEUES:
+		return "VIRTCHNL_OP_ENABLE_QUEUES";
+	case VIRTCHNL_OP_DISABLE_QUEUES:
+		return "VIRTCHNL_OP_DISABLE_QUEUES";
+	case VIRTCHNL_OP_ADD_ETH_ADDR:
+		return "VIRTCHNL_OP_ADD_ETH_ADDR";
+	case VIRTCHNL_OP_DEL_ETH_ADDR:
+		return "VIRTCHNL_OP_DEL_ETH_ADDR";
+	case VIRTCHNL_OP_ADD_VLAN:
+		return "VIRTCHNL_OP_ADD_VLAN";
+	case VIRTCHNL_OP_DEL_VLAN:
+		return "VIRTCHNL_OP_DEL_VLAN";
+	case VIRTCHNL_OP_CONFIG_PROMISCUOUS_MODE:
+		return "VIRTCHNL_OP_CONFIG_PROMISCUOUS_MODE";
+	case VIRTCHNL_OP_GET_STATS:
+		return "VIRTCHNL_OP_GET_STATS";
+	case VIRTCHNL_OP_RSVD:
+		return "VIRTCHNL_OP_RSVD";
+	case VIRTCHNL_OP_EVENT:
+		return "VIRTCHNL_OP_EVENT";
+	case VIRTCHNL_OP_CONFIG_RSS_KEY:
+		return "VIRTCHNL_OP_CONFIG_RSS_KEY";
+	case VIRTCHNL_OP_CONFIG_RSS_LUT:
+		return "VIRTCHNL_OP_CONFIG_RSS_LUT";
+	case VIRTCHNL_OP_GET_RSS_HENA_CAPS:
+		return "VIRTCHNL_OP_GET_RSS_HENA_CAPS";
+	case VIRTCHNL_OP_SET_RSS_HENA:
+		return "VIRTCHNL_OP_SET_RSS_HENA";
+	case VIRTCHNL_OP_ENABLE_VLAN_STRIPPING:
+		return "VIRTCHNL_OP_ENABLE_VLAN_STRIPPING";
+	case VIRTCHNL_OP_DISABLE_VLAN_STRIPPING:
+		return "VIRTCHNL_OP_DISABLE_VLAN_STRIPPING";
+	case VIRTCHNL_OP_REQUEST_QUEUES:
+		return "VIRTCHNL_OP_REQUEST_QUEUES";
+	case VIRTCHNL_OP_ENABLE_CHANNELS:
+		return "VIRTCHNL_OP_ENABLE_CHANNELS";
+	case VIRTCHNL_OP_DISABLE_CHANNELS:
+		return "VIRTCHNL_OP_DISABLE_CHANNELS";
+	case VIRTCHNL_OP_ADD_CLOUD_FILTER:
+		return "VIRTCHNL_OP_ADD_CLOUD_FILTER";
+	case VIRTCHNL_OP_DEL_CLOUD_FILTER:
+		return "VIRTCHNL_OP_DEL_CLOUD_FILTER";
+	case VIRTCHNL_OP_INLINE_IPSEC_CRYPTO:
+		return "VIRTCHNL_OP_INLINE_IPSEC_CRYPTO";
+	case VIRTCHNL_OP_DCF_CMD_DESC:
+		return "VIRTCHNL_OP_DCF_CMD_DESC";
+	case VIRTCHNL_OP_DCF_CMD_BUFF:
+		return "VIRTCHNL_OP_DCF_CMD_BUFF";
+	case VIRTCHNL_OP_DCF_DISABLE:
+		return "VIRTCHNL_OP_DCF_DISABLE";
+	case VIRTCHNL_OP_DCF_GET_VSI_MAP:
+		return "VIRTCHNL_OP_DCF_GET_VSI_MAP";
+	case VIRTCHNL_OP_GET_SUPPORTED_RXDIDS:
+		return "VIRTCHNL_OP_GET_SUPPORTED_RXDIDS";
+	case VIRTCHNL_OP_ADD_RSS_CFG:
+		return "VIRTCHNL_OP_ADD_RSS_CFG";
+	case VIRTCHNL_OP_DEL_RSS_CFG:
+		return "VIRTCHNL_OP_DEL_RSS_CFG";
+	case VIRTCHNL_OP_ADD_FDIR_FILTER:
+		return "VIRTCHNL_OP_ADD_FDIR_FILTER";
+	case VIRTCHNL_OP_DEL_FDIR_FILTER:
+		return "VIRTCHNL_OP_DEL_FDIR_FILTER";
+	case VIRTCHNL_OP_GET_MAX_RSS_QREGION:
+		return "VIRTCHNL_OP_GET_MAX_RSS_QREGION";
+	case VIRTCHNL_OP_ENABLE_QUEUES_V2:
+		return "VIRTCHNL_OP_ENABLE_QUEUES_V2";
+	case VIRTCHNL_OP_DISABLE_QUEUES_V2:
+		return "VIRTCHNL_OP_DISABLE_QUEUES_V2";
+	case VIRTCHNL_OP_MAP_QUEUE_VECTOR:
+		return "VIRTCHNL_OP_MAP_QUEUE_VECTOR";
+	case VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS:
+		return "VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS";
+	case VIRTCHNL_OP_ADD_VLAN_V2:
+		return "VIRTCHNL_OP_ADD_VLAN_V2";
+	case VIRTCHNL_OP_DEL_VLAN_V2:
+		return "VIRTCHNL_OP_DEL_VLAN_V2";
+	case VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2:
+		return "VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2";
+	case VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2:
+		return "VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2";
+	case VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2:
+		return "VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2";
+	case VIRTCHNL_OP_DISABLE_VLAN_INSERTION_V2:
+		return "VIRTCHNL_OP_DISABLE_VLAN_INSERTION_V2";
+	case VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2:
+		return "VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2";
+	case VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2:
+		return "VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2";
+	case VIRTCHNL_OP_1588_PTP_GET_CAPS:
+		return "VIRTCHNL_OP_1588_PTP_GET_CAPS";
+	case VIRTCHNL_OP_1588_PTP_GET_TIME:
+		return "VIRTCHNL_OP_1588_PTP_GET_TIME";
+	case VIRTCHNL_OP_FLOW_SUBSCRIBE:
+		return "VIRTCHNL_OP_FLOW_SUBSCRIBE";
+	case VIRTCHNL_OP_FLOW_UNSUBSCRIBE:
+		return "VIRTCHNL_OP_FLOW_UNSUBSCRIBE";
+	case VIRTCHNL_OP_MAX:
+		return "VIRTCHNL_OP_MAX";
+	default:
+		return "Unsupported (update virtchnl.h)";
+	}
+}
 
 /* These macros are used to generate compilation errors if a structure/union
  * is not exactly the correct length. It gives a divide by zero error if the
@@ -158,8 +311,12 @@ enum virtchnl_ops {
 
 struct virtchnl_msg {
 	u8 pad[8];			 /* AQ flags/opcode/len/retval fields */
-	enum virtchnl_ops v_opcode; /* avoid confusion with desc->opcode */
-	enum virtchnl_status_code v_retval;  /* ditto for desc->retval */
+
+	/* avoid confusion with desc->opcode */
+	enum virtchnl_ops v_opcode;
+
+	/* ditto for desc->retval */
+	enum virtchnl_status_code v_retval;
 	u32 vfid;			 /* used by PF when sending to VF */
 };
 
@@ -225,7 +382,9 @@ enum virtchnl_vsi_type {
 struct virtchnl_vsi_resource {
 	u16 vsi_id;
 	u16 num_queue_pairs;
-	enum virtchnl_vsi_type vsi_type;
+
+	/* see enum virtchnl_vsi_type */
+	s32 vsi_type;
 	u16 qset_handle;
 	u8 default_mac_addr[VIRTCHNL_ETH_LENGTH_OF_ADDRESS];
 };
@@ -236,32 +395,37 @@ VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_vsi_resource);
  * VIRTCHNL_VF_OFFLOAD_L2 flag is inclusive of base mode L2 offloads including
  * TX/RX Checksum offloading and TSO for non-tunnelled packets.
  */
-#define VIRTCHNL_VF_OFFLOAD_L2			0x00000001
-#define VIRTCHNL_VF_OFFLOAD_IWARP		0x00000002
-#define VIRTCHNL_VF_OFFLOAD_RSVD		0x00000004
-#define VIRTCHNL_VF_OFFLOAD_RSS_AQ		0x00000008
-#define VIRTCHNL_VF_OFFLOAD_RSS_REG		0x00000010
-#define VIRTCHNL_VF_OFFLOAD_WB_ON_ITR		0x00000020
-#define VIRTCHNL_VF_OFFLOAD_REQ_QUEUES		0x00000040
-#define VIRTCHNL_VF_OFFLOAD_CRC			0x00000080
-#define VIRTCHNL_VF_OFFLOAD_VLAN		0x00010000
-#define VIRTCHNL_VF_OFFLOAD_RX_POLLING		0x00020000
-#define VIRTCHNL_VF_OFFLOAD_RSS_PCTYPE_V2	0x00040000
-#define VIRTCHNL_VF_OFFLOAD_RSS_PF		0X00080000
-#define VIRTCHNL_VF_OFFLOAD_ENCAP		0X00100000
-#define VIRTCHNL_VF_OFFLOAD_ENCAP_CSUM		0X00200000
-#define VIRTCHNL_VF_OFFLOAD_RX_ENCAP_CSUM	0X00400000
-#define VIRTCHNL_VF_OFFLOAD_ADQ			0X00800000
-#define VIRTCHNL_VF_OFFLOAD_ADQ_V2		0X01000000
-#define VIRTCHNL_VF_OFFLOAD_USO			0X02000000
-#define VIRTCHNL_VF_CAP_DCF			0X40000000
-#define VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC	0X04000000
-#define VIRTCHNL_VF_OFFLOAD_ADV_RSS_PF		0X08000000
-#define VIRTCHNL_VF_OFFLOAD_FDIR_PF		0X10000000
-	/* 0X80000000 is reserved */
+#define VIRTCHNL_VF_OFFLOAD_L2			BIT(0)
+#define VIRTCHNL_VF_OFFLOAD_IWARP		BIT(1)
+#define VIRTCHNL_VF_OFFLOAD_RSVD		BIT(2)
+#define VIRTCHNL_VF_OFFLOAD_RSS_AQ		BIT(3)
+#define VIRTCHNL_VF_OFFLOAD_RSS_REG		BIT(4)
+#define VIRTCHNL_VF_OFFLOAD_WB_ON_ITR		BIT(5)
+#define VIRTCHNL_VF_OFFLOAD_REQ_QUEUES		BIT(6)
+/* used to negotiate communicating link speeds in Mbps */
+#define VIRTCHNL_VF_CAP_ADV_LINK_SPEED		BIT(7)
+#define VIRTCHNL_VF_OFFLOAD_INLINE_IPSEC_CRYPTO	BIT(8)
+#define VIRTCHNL_VF_LARGE_NUM_QPAIRS		BIT(9)
+#define VIRTCHNL_VF_OFFLOAD_CRC			BIT(10)
+#define VIRTCHNL_VF_OFFLOAD_FSUB_PF		BIT(14)
+#define VIRTCHNL_VF_OFFLOAD_VLAN_V2		BIT(15)
+#define VIRTCHNL_VF_OFFLOAD_VLAN		BIT(16)
+#define VIRTCHNL_VF_OFFLOAD_RX_POLLING		BIT(17)
+#define VIRTCHNL_VF_OFFLOAD_RSS_PCTYPE_V2	BIT(18)
+#define VIRTCHNL_VF_OFFLOAD_RSS_PF		BIT(19)
+#define VIRTCHNL_VF_OFFLOAD_ENCAP		BIT(20)
+#define VIRTCHNL_VF_OFFLOAD_ENCAP_CSUM		BIT(21)
+#define VIRTCHNL_VF_OFFLOAD_RX_ENCAP_CSUM	BIT(22)
+#define VIRTCHNL_VF_OFFLOAD_ADQ			BIT(23)
+#define VIRTCHNL_VF_OFFLOAD_ADQ_V2		BIT(24)
+#define VIRTCHNL_VF_OFFLOAD_USO			BIT(25)
+#define VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC	BIT(26)
+#define VIRTCHNL_VF_OFFLOAD_ADV_RSS_PF		BIT(27)
+#define VIRTCHNL_VF_OFFLOAD_FDIR_PF		BIT(28)
+#define VIRTCHNL_VF_OFFLOAD_QOS		BIT(29)
+#define VIRTCHNL_VF_CAP_DCF			BIT(30)
+#define VIRTCHNL_VF_CAP_PTP			BIT(31)
 
-/* Define below the capability flags that are not offloads */
-#define VIRTCHNL_VF_CAP_ADV_LINK_SPEED		0x00000080
 #define VF_BASE_MODE_OFFLOADS (VIRTCHNL_VF_OFFLOAD_L2 | \
 			       VIRTCHNL_VF_OFFLOAD_VLAN | \
 			       VIRTCHNL_VF_OFFLOAD_RSS_PF)
@@ -299,6 +463,66 @@ struct virtchnl_txq_info {
 
 VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_txq_info);
 
+/* RX descriptor IDs (range from 0 to 63) */
+enum virtchnl_rx_desc_ids {
+	VIRTCHNL_RXDID_0_16B_BASE		= 0,
+	/* 32B_BASE and FLEX_SPLITQ share desc ids as default descriptors
+	 * because they can be differentiated based on queue model; e.g. single
+	 * queue model can only use 32B_BASE and split queue model can only use
+	 * FLEX_SPLITQ.  Having these as 1 allows them to be used as default
+	 * descriptors without negotiation.
+	 */
+	VIRTCHNL_RXDID_1_32B_BASE		= 1,
+	VIRTCHNL_RXDID_1_FLEX_SPLITQ		= 1,
+	VIRTCHNL_RXDID_2_FLEX_SQ_NIC		= 2,
+	VIRTCHNL_RXDID_3_FLEX_SQ_SW		= 3,
+	VIRTCHNL_RXDID_4_FLEX_SQ_NIC_VEB	= 4,
+	VIRTCHNL_RXDID_5_FLEX_SQ_NIC_ACL	= 5,
+	VIRTCHNL_RXDID_6_FLEX_SQ_NIC_2		= 6,
+	VIRTCHNL_RXDID_7_HW_RSVD		= 7,
+	/* 9 through 15 are reserved */
+	VIRTCHNL_RXDID_16_COMMS_GENERIC		= 16,
+	VIRTCHNL_RXDID_17_COMMS_AUX_VLAN	= 17,
+	VIRTCHNL_RXDID_18_COMMS_AUX_IPV4	= 18,
+	VIRTCHNL_RXDID_19_COMMS_AUX_IPV6	= 19,
+	VIRTCHNL_RXDID_20_COMMS_AUX_FLOW	= 20,
+	VIRTCHNL_RXDID_21_COMMS_AUX_TCP		= 21,
+	/* 22 through 63 are reserved */
+};
+
+/* RX descriptor ID bitmasks */
+enum virtchnl_rx_desc_id_bitmasks {
+	VIRTCHNL_RXDID_0_16B_BASE_M		= BIT(VIRTCHNL_RXDID_0_16B_BASE),
+	VIRTCHNL_RXDID_1_32B_BASE_M		= BIT(VIRTCHNL_RXDID_1_32B_BASE),
+	VIRTCHNL_RXDID_1_FLEX_SPLITQ_M		= BIT(VIRTCHNL_RXDID_1_FLEX_SPLITQ),
+	VIRTCHNL_RXDID_2_FLEX_SQ_NIC_M		= BIT(VIRTCHNL_RXDID_2_FLEX_SQ_NIC),
+	VIRTCHNL_RXDID_3_FLEX_SQ_SW_M		= BIT(VIRTCHNL_RXDID_3_FLEX_SQ_SW),
+	VIRTCHNL_RXDID_4_FLEX_SQ_NIC_VEB_M	= BIT(VIRTCHNL_RXDID_4_FLEX_SQ_NIC_VEB),
+	VIRTCHNL_RXDID_5_FLEX_SQ_NIC_ACL_M	= BIT(VIRTCHNL_RXDID_5_FLEX_SQ_NIC_ACL),
+	VIRTCHNL_RXDID_6_FLEX_SQ_NIC_2_M	= BIT(VIRTCHNL_RXDID_6_FLEX_SQ_NIC_2),
+	VIRTCHNL_RXDID_7_HW_RSVD_M		= BIT(VIRTCHNL_RXDID_7_HW_RSVD),
+	/* 9 through 15 are reserved */
+	VIRTCHNL_RXDID_16_COMMS_GENERIC_M	= BIT(VIRTCHNL_RXDID_16_COMMS_GENERIC),
+	VIRTCHNL_RXDID_17_COMMS_AUX_VLAN_M	= BIT(VIRTCHNL_RXDID_17_COMMS_AUX_VLAN),
+	VIRTCHNL_RXDID_18_COMMS_AUX_IPV4_M	= BIT(VIRTCHNL_RXDID_18_COMMS_AUX_IPV4),
+	VIRTCHNL_RXDID_19_COMMS_AUX_IPV6_M	= BIT(VIRTCHNL_RXDID_19_COMMS_AUX_IPV6),
+	VIRTCHNL_RXDID_20_COMMS_AUX_FLOW_M	= BIT(VIRTCHNL_RXDID_20_COMMS_AUX_FLOW),
+	VIRTCHNL_RXDID_21_COMMS_AUX_TCP_M	= BIT(VIRTCHNL_RXDID_21_COMMS_AUX_TCP),
+	/* 22 through 63 are reserved */
+};
+
+/* virtchnl_rxq_info_flags
+ *
+ * Definition of bits in the flags field of the virtchnl_rxq_info structure.
+ */
+enum virtchnl_rxq_info_flags {
+	/* If the VIRTCHNL_PTP_RX_TSTAMP bit of the flag field is set, this is
+	 * a request to enable Rx timestamp. Other flag bits are currently
+	 * reserved and they may be extended in the future.
+	 */
+	VIRTCHNL_PTP_RX_TSTAMP = BIT(0),
+};
+
 /* VIRTCHNL_OP_CONFIG_RX_QUEUE
  * VF sends this message to set up parameters for one RX queue.
  * External data buffer contains one instance of virtchnl_rxq_info.
@@ -321,11 +545,18 @@ struct virtchnl_rxq_info {
 	u32 databuffer_size;
 	u32 max_pkt_size;
 	u8 crc_disable;
-	/* only used when VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC is supported */
+	/* see enum virtchnl_rx_desc_ids;
+	 * only used when VIRTCHNL_VF_OFFLOAD_RX_FLEX_DESC is supported. Note
+	 * that when the offload is not supported, the descriptor format aligns
+	 * with VIRTCHNL_RXDID_1_32B_BASE.
+	 */
 	u8 rxdid;
-	u8 pad1[2];
+	u8 flags; /* see virtchnl_rxq_info_flags */
+	u8 pad1;
 	u64 dma_ring_addr;
-	enum virtchnl_rx_hsplit rx_split_pos; /* deprecated with AVF 1.0 */
+
+	/* see enum virtchnl_rx_hsplit; deprecated with AVF 1.0 */
+	s32 rx_split_pos;
 	u32 pad2;
 };
 
@@ -423,6 +654,35 @@ struct virtchnl_queue_select {
 
 VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_queue_select);
 
+/* VIRTCHNL_OP_GET_MAX_RSS_QREGION
+ *
+ * if VIRTCHNL_VF_LARGE_NUM_QPAIRS was negotiated in VIRTCHNL_OP_GET_VF_RESOURCES
+ * then this op must be supported.
+ *
+ * VF sends this message in order to query the max RSS queue region
+ * size supported by PF, when VIRTCHNL_VF_LARGE_NUM_QPAIRS is enabled.
+ * This information should be used when configuring the RSS LUT and/or
+ * configuring queue region based filters.
+ *
+ * The maximum RSS queue region is 2^qregion_width. So, a qregion_width
+ * of 6 would inform the VF that the PF supports a maximum RSS queue region
+ * of 64.
+ *
+ * A queue region represents a range of queues that can be used to configure
+ * a RSS LUT. For example, if a VF is given 64 queues, but only a max queue
+ * region size of 16 (i.e. 2^qregion_width = 16) then it will only be able
+ * to configure the RSS LUT with queue indices from 0 to 15. However, other
+ * filters can be used to direct packets to queues >15 via specifying a queue
+ * base/offset and queue region width.
+ */
+struct virtchnl_max_rss_qregion {
+	u16 vport_id;
+	u16 qregion_width;
+	u8 pad[4];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(8, virtchnl_max_rss_qregion);
+
 /* VIRTCHNL_OP_ADD_ETH_ADDR
  * VF sends this message in order to add one or more unicast or multicast
  * address filters for the specified VSI.
@@ -435,9 +695,36 @@ VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_queue_select);
  * PF removes the filters and returns status.
  */
 
+/* VIRTCHNL_ETHER_ADDR_LEGACY
+ * Prior to adding the @type member to virtchnl_ether_addr, there were 2 pad
+ * bytes. Moving forward all VF drivers should not set type to
+ * VIRTCHNL_ETHER_ADDR_LEGACY. This is only here to not break previous/legacy
+ * behavior. The control plane function (i.e. PF) can use a best effort method
+ * of tracking the primary/device unicast in this case, but there is no
+ * guarantee and functionality depends on the implementation of the PF.
+ */
+
+/* VIRTCHNL_ETHER_ADDR_PRIMARY
+ * All VF drivers should set @type to VIRTCHNL_ETHER_ADDR_PRIMARY for the
+ * primary/device unicast MAC address filter for VIRTCHNL_OP_ADD_ETH_ADDR and
+ * VIRTCHNL_OP_DEL_ETH_ADDR. This allows for the underlying control plane
+ * function (i.e. PF) to accurately track and use this MAC address for
+ * displaying on the host and for VM/function reset.
+ */
+
+/* VIRTCHNL_ETHER_ADDR_EXTRA
+ * All VF drivers should set @type to VIRTCHNL_ETHER_ADDR_EXTRA for any extra
+ * unicast and/or multicast filters that are being added/deleted via
+ * VIRTCHNL_OP_DEL_ETH_ADDR/VIRTCHNL_OP_ADD_ETH_ADDR respectively.
+ */
 struct virtchnl_ether_addr {
 	u8 addr[VIRTCHNL_ETH_LENGTH_OF_ADDRESS];
-	u8 pad[2];
+	u8 type;
+#define VIRTCHNL_ETHER_ADDR_LEGACY	0
+#define VIRTCHNL_ETHER_ADDR_PRIMARY	1
+#define VIRTCHNL_ETHER_ADDR_EXTRA	2
+#define VIRTCHNL_ETHER_ADDR_TYPE_MASK	3 /* first two bits of type are valid */
+	u8 pad;
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(8, virtchnl_ether_addr);
@@ -471,6 +758,388 @@ struct virtchnl_vlan_filter_list {
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(6, virtchnl_vlan_filter_list);
+
+/* This enum is used for all of the VIRTCHNL_VF_OFFLOAD_VLAN_V2_CAPS related
+ * structures and opcodes.
+ *
+ * VIRTCHNL_VLAN_UNSUPPORTED - This field is not supported and if a VF driver
+ * populates it the PF should return VIRTCHNL_STATUS_ERR_NOT_SUPPORTED.
+ *
+ * VIRTCHNL_VLAN_ETHERTYPE_8100 - This field supports 0x8100 ethertype.
+ * VIRTCHNL_VLAN_ETHERTYPE_88A8 - This field supports 0x88A8 ethertype.
+ * VIRTCHNL_VLAN_ETHERTYPE_9100 - This field supports 0x9100 ethertype.
+ *
+ * VIRTCHNL_VLAN_ETHERTYPE_AND - Used when multiple ethertypes can be supported
+ * by the PF concurrently. For example, if the PF can support
+ * VIRTCHNL_VLAN_ETHERTYPE_8100 AND VIRTCHNL_VLAN_ETHERTYPE_88A8 filters it
+ * would OR the following bits:
+ *
+ *	VIRTHCNL_VLAN_ETHERTYPE_8100 |
+ *	VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *	VIRTCHNL_VLAN_ETHERTYPE_AND;
+ *
+ * The VF would interpret this as VLAN filtering can be supported on both 0x8100
+ * and 0x88A8 VLAN ethertypes.
+ *
+ * VIRTCHNL_ETHERTYPE_XOR - Used when only a single ethertype can be supported
+ * by the PF concurrently. For example if the PF can support
+ * VIRTCHNL_VLAN_ETHERTYPE_8100 XOR VIRTCHNL_VLAN_ETHERTYPE_88A8 stripping
+ * offload it would OR the following bits:
+ *
+ *	VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *	VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *	VIRTCHNL_VLAN_ETHERTYPE_XOR;
+ *
+ * The VF would interpret this as VLAN stripping can be supported on either
+ * 0x8100 or 0x88a8 VLAN ethertypes. So when requesting VLAN stripping via
+ * VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 the specified ethertype will override
+ * the previously set value.
+ *
+ * VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1 - Used to tell the VF to insert and/or
+ * strip the VLAN tag using the L2TAG1 field of the Tx/Rx descriptors.
+ *
+ * VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2 - Used to tell the VF to insert hardware
+ * offloaded VLAN tags using the L2TAG2 field of the Tx descriptor.
+ *
+ * VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2 - Used to tell the VF to strip hardware
+ * offloaded VLAN tags using the L2TAG2_2 field of the Rx descriptor.
+ *
+ * VIRTCHNL_VLAN_PRIO - This field supports VLAN priority bits. This is used for
+ * VLAN filtering if the underlying PF supports it.
+ *
+ * VIRTCHNL_VLAN_TOGGLE_ALLOWED - This field is used to say whether a
+ * certain VLAN capability can be toggled. For example if the underlying PF/CP
+ * allows the VF to toggle VLAN filtering, stripping, and/or insertion it should
+ * set this bit along with the supported ethertypes.
+ */
+enum virtchnl_vlan_support {
+	VIRTCHNL_VLAN_UNSUPPORTED =		0,
+	VIRTCHNL_VLAN_ETHERTYPE_8100 =		0x00000001,
+	VIRTCHNL_VLAN_ETHERTYPE_88A8 =		0x00000002,
+	VIRTCHNL_VLAN_ETHERTYPE_9100 =		0x00000004,
+	VIRTCHNL_VLAN_TAG_LOCATION_L2TAG1 =	0x00000100,
+	VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2 =	0x00000200,
+	VIRTCHNL_VLAN_TAG_LOCATION_L2TAG2_2 =	0x00000400,
+	VIRTCHNL_VLAN_PRIO =			0x01000000,
+	VIRTCHNL_VLAN_FILTER_MASK =		0x10000000,
+	VIRTCHNL_VLAN_ETHERTYPE_AND =		0x20000000,
+	VIRTCHNL_VLAN_ETHERTYPE_XOR =		0x40000000,
+	VIRTCHNL_VLAN_TOGGLE =			0x80000000
+};
+
+/* This structure is used as part of the VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS
+ * for filtering, insertion, and stripping capabilities.
+ *
+ * If only outer capabilities are supported (for filtering, insertion, and/or
+ * stripping) then this refers to the outer most or single VLAN from the VF's
+ * perspective.
+ *
+ * If only inner capabilities are supported (for filtering, insertion, and/or
+ * stripping) then this refers to the outer most or single VLAN from the VF's
+ * perspective. Functionally this is the same as if only outer capabilities are
+ * supported. The VF driver is just forced to use the inner fields when
+ * adding/deleting filters and enabling/disabling offloads (if supported).
+ *
+ * If both outer and inner capabilities are supported (for filtering, insertion,
+ * and/or stripping) then outer refers to the outer most or single VLAN and
+ * inner refers to the second VLAN, if it exists, in the packet.
+ *
+ * There is no support for tunneled VLAN offloads, so outer or inner are never
+ * referring to a tunneled packet from the VF's perspective.
+ */
+struct virtchnl_vlan_supported_caps {
+	u32 outer;
+	u32 inner;
+};
+
+/* The PF populates these fields based on the supported VLAN filtering. If a
+ * field is VIRTCHNL_VLAN_UNSUPPORTED then it's not supported and the PF will
+ * reject any VIRTCHNL_OP_ADD_VLAN_V2 or VIRTCHNL_OP_DEL_VLAN_V2 messages using
+ * the unsupported fields.
+ *
+ * Also, a VF is only allowed to toggle its VLAN filtering setting if the
+ * VIRTCHNL_VLAN_TOGGLE bit is set.
+ *
+ * The ethertype(s) specified in the ethertype_init field are the ethertypes
+ * enabled for VLAN filtering. VLAN filtering in this case refers to the outer
+ * most VLAN from the VF's perspective. If both inner and outer filtering are
+ * allowed then ethertype_init only refers to the outer most VLAN as only
+ * VLAN ethertype supported for inner VLAN filtering is
+ * VIRTCHNL_VLAN_ETHERTYPE_8100. By default, inner VLAN filtering is disabled
+ * when both inner and outer filtering are allowed.
+ *
+ * The max_filters field tells the VF how many VLAN filters it's allowed to have
+ * at any one time. If it exceeds this amount and tries to add another filter,
+ * then the request will be rejected by the PF. To prevent failures, the VF
+ * should keep track of how many VLAN filters it has added and not attempt to
+ * add more than max_filters.
+ */
+struct virtchnl_vlan_filtering_caps {
+	struct virtchnl_vlan_supported_caps filtering_support;
+	u32 ethertype_init;
+	u16 max_filters;
+	u8 pad[2];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_vlan_filtering_caps);
+
+/* This enum is used for the virtchnl_vlan_offload_caps structure to specify
+ * if the PF supports a different ethertype for stripping and insertion.
+ *
+ * VIRTCHNL_ETHERTYPE_STRIPPING_MATCHES_INSERTION - The ethertype(s) specified
+ * for stripping affect the ethertype(s) specified for insertion and visa versa
+ * as well. If the VF tries to configure VLAN stripping via
+ * VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 with VIRTCHNL_VLAN_ETHERTYPE_8100 then
+ * that will be the ethertype for both stripping and insertion.
+ *
+ * VIRTCHNL_ETHERTYPE_MATCH_NOT_REQUIRED - The ethertype(s) specified for
+ * stripping do not affect the ethertype(s) specified for insertion and visa
+ * versa.
+ */
+enum virtchnl_vlan_ethertype_match {
+	VIRTCHNL_ETHERTYPE_STRIPPING_MATCHES_INSERTION = 0,
+	VIRTCHNL_ETHERTYPE_MATCH_NOT_REQUIRED = 1,
+};
+
+/* The PF populates these fields based on the supported VLAN offloads. If a
+ * field is VIRTCHNL_VLAN_UNSUPPORTED then it's not supported and the PF will
+ * reject any VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 or
+ * VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2 messages using the unsupported fields.
+ *
+ * Also, a VF is only allowed to toggle its VLAN offload setting if the
+ * VIRTCHNL_VLAN_TOGGLE_ALLOWED bit is set.
+ *
+ * The VF driver needs to be aware of how the tags are stripped by hardware and
+ * inserted by the VF driver based on the level of offload support. The PF will
+ * populate these fields based on where the VLAN tags are expected to be
+ * offloaded via the VIRTHCNL_VLAN_TAG_LOCATION_* bits. The VF will need to
+ * interpret these fields. See the definition of the
+ * VIRTCHNL_VLAN_TAG_LOCATION_* bits above the virtchnl_vlan_support
+ * enumeration.
+ */
+struct virtchnl_vlan_offload_caps {
+	struct virtchnl_vlan_supported_caps stripping_support;
+	struct virtchnl_vlan_supported_caps insertion_support;
+	u32 ethertype_init;
+	u8 ethertype_match;
+	u8 pad[3];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_vlan_offload_caps);
+
+/* VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS
+ * VF sends this message to determine its VLAN capabilities.
+ *
+ * PF will mark which capabilities it supports based on hardware support and
+ * current configuration. For example, if a port VLAN is configured the PF will
+ * not allow outer VLAN filtering, stripping, or insertion to be configured so
+ * it will block these features from the VF.
+ *
+ * The VF will need to cross reference its capabilities with the PFs
+ * capabilities in the response message from the PF to determine the VLAN
+ * support.
+ */
+struct virtchnl_vlan_caps {
+	struct virtchnl_vlan_filtering_caps filtering;
+	struct virtchnl_vlan_offload_caps offloads;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(40, virtchnl_vlan_caps);
+
+struct virtchnl_vlan {
+	u16 tci;	/* tci[15:13] = PCP and tci[11:0] = VID */
+	u16 tci_mask;	/* only valid if VIRTCHNL_VLAN_FILTER_MASK set in
+			 * filtering caps
+			 */
+	u16 tpid;	/* 0x8100, 0x88a8, etc. and only type(s) set in
+			 * filtering caps. Note that tpid here does not refer to
+			 * VIRTCHNL_VLAN_ETHERTYPE_*, but it refers to the
+			 * actual 2-byte VLAN TPID
+			 */
+	u8 pad[2];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(8, virtchnl_vlan);
+
+struct virtchnl_vlan_filter {
+	struct virtchnl_vlan inner;
+	struct virtchnl_vlan outer;
+	u8 pad[16];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(32, virtchnl_vlan_filter);
+
+/* VIRTCHNL_OP_ADD_VLAN_V2
+ * VIRTCHNL_OP_DEL_VLAN_V2
+ *
+ * VF sends these messages to add/del one or more VLAN tag filters for Rx
+ * traffic.
+ *
+ * The PF attempts to add the filters and returns status.
+ *
+ * The VF should only ever attempt to add/del virtchnl_vlan_filter(s) using the
+ * supported fields negotiated via VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS.
+ */
+struct virtchnl_vlan_filter_list_v2 {
+	u16 vport_id;
+	u16 num_elements;
+	u8 pad[4];
+	struct virtchnl_vlan_filter filters[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(40, virtchnl_vlan_filter_list_v2);
+
+/* VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2
+ * VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2
+ * VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2
+ * VIRTCHNL_OP_DISABLE_VLAN_INSERTION_V2
+ *
+ * VF sends this message to enable or disable VLAN stripping or insertion. It
+ * also needs to specify an ethertype. The VF knows which VLAN ethertypes are
+ * allowed and whether or not it's allowed to enable/disable the specific
+ * offload via the VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS message. The VF needs to
+ * parse the virtchnl_vlan_caps.offloads fields to determine which offload
+ * messages are allowed.
+ *
+ * For example, if the PF populates the virtchnl_vlan_caps.offloads in the
+ * following manner the VF will be allowed to enable and/or disable 0x8100 inner
+ * VLAN insertion and/or stripping via the opcodes listed above. Inner in this
+ * case means the outer most or single VLAN from the VF's perspective. This is
+ * because no outer offloads are supported. See the comments above the
+ * virtchnl_vlan_supported_caps structure for more details.
+ *
+ * virtchnl_vlan_caps.offloads.stripping_support.inner =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100;
+ *
+ * virtchnl_vlan_caps.offloads.insertion_support.inner =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100;
+ *
+ * In order to enable inner (again note that in this case inner is the outer
+ * most or single VLAN from the VF's perspective) VLAN stripping for 0x8100
+ * VLANs, the VF would populate the virtchnl_vlan_setting structure in the
+ * following manner and send the VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 message.
+ *
+ * virtchnl_vlan_setting.inner_ethertype_setting =
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100;
+ *
+ * virtchnl_vlan_setting.vport_id = vport_id or vsi_id assigned to the VF on
+ * initialization.
+ *
+ * The reason that VLAN TPID(s) are not being used for the
+ * outer_ethertype_setting and inner_ethertype_setting fields is because it's
+ * possible a device could support VLAN insertion and/or stripping offload on
+ * multiple ethertypes concurrently, so this method allows a VF to request
+ * multiple ethertypes in one message using the virtchnl_vlan_support
+ * enumeration.
+ *
+ * For example, if the PF populates the virtchnl_vlan_caps.offloads in the
+ * following manner the VF will be allowed to enable 0x8100 and 0x88a8 outer
+ * VLAN insertion and stripping simultaneously. The
+ * virtchnl_vlan_caps.offloads.ethertype_match field will also have to be
+ * populated based on what the PF can support.
+ *
+ * virtchnl_vlan_caps.offloads.stripping_support.outer =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_AND;
+ *
+ * virtchnl_vlan_caps.offloads.insertion_support.outer =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_AND;
+ *
+ * In order to enable outer VLAN stripping for 0x8100 and 0x88a8 VLANs, the VF
+ * would populate the virthcnl_vlan_offload_structure in the following manner
+ * and send the VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2 message.
+ *
+ * virtchnl_vlan_setting.outer_ethertype_setting =
+ *			VIRTHCNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTHCNL_VLAN_ETHERTYPE_88A8;
+ *
+ * virtchnl_vlan_setting.vport_id = vport_id or vsi_id assigned to the VF on
+ * initialization.
+ *
+ * There is also the case where a PF and the underlying hardware can support
+ * VLAN offloads on multiple ethertypes, but not concurrently. For example, if
+ * the PF populates the virtchnl_vlan_caps.offloads in the following manner the
+ * VF will be allowed to enable and/or disable 0x8100 XOR 0x88a8 outer VLAN
+ * offloads. The ethertypes must match for stripping and insertion.
+ *
+ * virtchnl_vlan_caps.offloads.stripping_support.outer =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_XOR;
+ *
+ * virtchnl_vlan_caps.offloads.insertion_support.outer =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_88A8 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_XOR;
+ *
+ * virtchnl_vlan_caps.offloads.ethertype_match =
+ *			VIRTCHNL_ETHERTYPE_STRIPPING_MATCHES_INSERTION;
+ *
+ * In order to enable outer VLAN stripping for 0x88a8 VLANs, the VF would
+ * populate the virtchnl_vlan_setting structure in the following manner and send
+ * the VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2. Also, this will change the
+ * ethertype for VLAN insertion if it's enabled. So, for completeness, a
+ * VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2 with the same ethertype should be sent.
+ *
+ * virtchnl_vlan_setting.outer_ethertype_setting = VIRTHCNL_VLAN_ETHERTYPE_88A8;
+ *
+ * virtchnl_vlan_setting.vport_id = vport_id or vsi_id assigned to the VF on
+ * initialization.
+ *
+ * VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2
+ * VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2
+ *
+ * VF sends this message to enable or disable VLAN filtering. It also needs to
+ * specify an ethertype. The VF knows which VLAN ethertypes are allowed and
+ * whether or not it's allowed to enable/disable filtering via the
+ * VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS message. The VF needs to
+ * parse the virtchnl_vlan_caps.filtering fields to determine which, if any,
+ * filtering messages are allowed.
+ *
+ * For example, if the PF populates the virtchnl_vlan_caps.filtering in the
+ * following manner the VF will be allowed to enable/disable 0x8100 and 0x88a8
+ * outer VLAN filtering together. Note, that the VIRTCHNL_VLAN_ETHERTYPE_AND
+ * means that all filtering ethertypes will to be enabled and disabled together
+ * regardless of the request from the VF. This means that the underlying
+ * hardware only supports VLAN filtering for all VLAN the specified ethertypes
+ * or none of them.
+ *
+ * virtchnl_vlan_caps.filtering.filtering_support.outer =
+ *			VIRTCHNL_VLAN_TOGGLE |
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTHCNL_VLAN_ETHERTYPE_88A8 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_9100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_AND;
+ *
+ * In order to enable outer VLAN filtering for 0x88a8 and 0x8100 VLANs (0x9100
+ * VLANs aren't supported by the VF driver), the VF would populate the
+ * virtchnl_vlan_setting structure in the following manner and send the
+ * VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2. The same message format would be used
+ * to disable outer VLAN filtering for 0x88a8 and 0x8100 VLANs, but the
+ * VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2 opcode is used.
+ *
+ * virtchnl_vlan_setting.outer_ethertype_setting =
+ *			VIRTCHNL_VLAN_ETHERTYPE_8100 |
+ *			VIRTCHNL_VLAN_ETHERTYPE_88A8;
+ *
+ */
+struct virtchnl_vlan_setting {
+	u32 outer_ethertype_setting;
+	u32 inner_ethertype_setting;
+	u16 vport_id;
+	u8 pad[6];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_vlan_setting);
 
 /* VIRTCHNL_OP_CONFIG_PROMISCUOUS_MODE
  * VF sends VSI id and flags.
@@ -596,8 +1265,8 @@ VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_tc_info);
  */
 
 struct virtchnl_l4_spec {
-	u8	src_mac[ETH_ALEN];
-	u8	dst_mac[ETH_ALEN];
+	u8	src_mac[VIRTCHNL_ETH_LENGTH_OF_ADDRESS];
+	u8	dst_mac[VIRTCHNL_ETH_LENGTH_OF_ADDRESS];
 	/* vlan_prio is part of this 16 bit field even from OS perspective
 	 * vlan_id:12 is actual vlan_id, then vlanid:bit14..12 is vlan_prio
 	 * in future, when decided to offload vlan_prio, pass that information
@@ -642,13 +1311,25 @@ enum virtchnl_flow_type {
 struct virtchnl_filter {
 	union	virtchnl_flow_spec data;
 	union	virtchnl_flow_spec mask;
-	enum	virtchnl_flow_type flow_type;
-	enum	virtchnl_action action;
+
+	/* see enum virtchnl_flow_type */
+	s32	flow_type;
+
+	/* see enum virtchnl_action */
+	s32	action;
 	u32	action_meta;
 	u8	field_flags;
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(272, virtchnl_filter);
+
+struct virtchnl_shaper_bw {
+	/* Unit is Kbps */
+	u32 committed;
+	u32 peak;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(8, virtchnl_shaper_bw);
 
 /* VIRTCHNL_OP_DCF_GET_VSI_MAP
  * VF sends this message to get VSI mapping table.
@@ -663,7 +1344,7 @@ struct virtchnl_dcf_vsi_map {
 	u16 num_vfs;	/* The actual number of VFs allocated */
 #define VIRTCHNL_DCF_VF_VSI_ID_S	0
 #define VIRTCHNL_DCF_VF_VSI_ID_M	(0xFFF << VIRTCHNL_DCF_VF_VSI_ID_S)
-#define VIRTCHNL_DCF_VF_VSI_VALID	(1 << 15)
+#define VIRTCHNL_DCF_VF_VSI_VALID	BIT(15)
 	u16 vf_vsi[1];
 };
 
@@ -690,7 +1371,71 @@ struct virtchnl_pkg_info {
 
 VIRTCHNL_CHECK_STRUCT_LEN(48, virtchnl_pkg_info);
 
+/* VIRTCHNL_OP_DCF_VLAN_OFFLOAD
+ * DCF negotiates the VIRTCHNL_VF_OFFLOAD_VLAN_V2 capability firstly to get
+ * the double VLAN configuration, then DCF sends this message to configure the
+ * outer or inner VLAN offloads (insertion and strip) for the target VF.
+ */
+struct virtchnl_dcf_vlan_offload {
+	u16 vf_id;
+	u16 tpid;
+	u16 vlan_flags;
+#define VIRTCHNL_DCF_VLAN_TYPE_S		0
+#define VIRTCHNL_DCF_VLAN_TYPE_M		\
+			(0x1 << VIRTCHNL_DCF_VLAN_TYPE_S)
+#define VIRTCHNL_DCF_VLAN_TYPE_INNER		0x0
+#define VIRTCHNL_DCF_VLAN_TYPE_OUTER		0x1
+#define VIRTCHNL_DCF_VLAN_INSERT_MODE_S		1
+#define VIRTCHNL_DCF_VLAN_INSERT_MODE_M	\
+			(0x7 << VIRTCHNL_DCF_VLAN_INSERT_MODE_S)
+#define VIRTCHNL_DCF_VLAN_INSERT_DISABLE	0x1
+#define VIRTCHNL_DCF_VLAN_INSERT_PORT_BASED	0x2
+#define VIRTCHNL_DCF_VLAN_INSERT_VIA_TX_DESC	0x3
+#define VIRTCHNL_DCF_VLAN_STRIP_MODE_S		4
+#define VIRTCHNL_DCF_VLAN_STRIP_MODE_M		\
+			(0x7 << VIRTCHNL_DCF_VLAN_STRIP_MODE_S)
+#define VIRTCHNL_DCF_VLAN_STRIP_DISABLE		0x1
+#define VIRTCHNL_DCF_VLAN_STRIP_ONLY		0x2
+#define VIRTCHNL_DCF_VLAN_STRIP_INTO_RX_DESC	0x3
+	u16 vlan_id;
+	u16 pad[4];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_dcf_vlan_offload);
+
+struct virtchnl_dcf_bw_cfg {
+	u8 tc_num;
+#define VIRTCHNL_DCF_BW_CIR		BIT(0)
+#define VIRTCHNL_DCF_BW_PIR		BIT(1)
+	u8 bw_type;
+	u8 pad[2];
+	enum virtchnl_bw_limit_type type;
+	union {
+		struct virtchnl_shaper_bw shaper;
+		u8 pad2[32];
+	};
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(40, virtchnl_dcf_bw_cfg);
+
+/* VIRTCHNL_OP_DCF_CONFIG_BW
+ * VF send this message to set the bandwidth configuration of each
+ * TC with a specific vf id. The flag node_type is to indicate that
+ * this message is to configure VSI node or TC node bandwidth.
+ */
+struct virtchnl_dcf_bw_cfg_list {
+	u16 vf_id;
+	u8 num_elem;
+#define VIRTCHNL_DCF_TARGET_TC_BW	0
+#define VIRTCHNL_DCF_TARGET_VF_BW	1
+	u8 node_type;
+	struct virtchnl_dcf_bw_cfg cfg[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(44, virtchnl_dcf_bw_cfg_list);
+
 struct virtchnl_supported_rxdids {
+	/* see enum virtchnl_rx_desc_id_bitmasks */
 	u64 supported_rxdids;
 };
 
@@ -715,7 +1460,8 @@ enum virtchnl_event_codes {
 #define PF_EVENT_SEVERITY_CERTAIN_DOOM	255
 
 struct virtchnl_pf_event {
-	enum virtchnl_event_codes event;
+	/* see enum virtchnl_event_codes */
+	s32 event;
 	union {
 		/* If the PF driver does not support the new speed reporting
 		 * capabilities then use link_event else use link_event_adv to
@@ -746,33 +1492,6 @@ struct virtchnl_pf_event {
 VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_pf_event);
 
 
-/* Since VF messages are limited by u16 size, precalculate the maximum possible
- * values of nested elements in virtchnl structures that virtual channel can
- * possibly handle in a single message.
- */
-enum virtchnl_vector_limits {
-	VIRTCHNL_OP_CONFIG_VSI_QUEUES_MAX	=
-		((u16)(~0) - sizeof(struct virtchnl_vsi_queue_config_info)) /
-		sizeof(struct virtchnl_queue_pair_info),
-
-	VIRTCHNL_OP_CONFIG_IRQ_MAP_MAX		=
-		((u16)(~0) - sizeof(struct virtchnl_irq_map_info)) /
-		sizeof(struct virtchnl_vector_map),
-
-	VIRTCHNL_OP_ADD_DEL_ETH_ADDR_MAX	=
-		((u16)(~0) - sizeof(struct virtchnl_ether_addr_list)) /
-		sizeof(struct virtchnl_ether_addr),
-
-	VIRTCHNL_OP_ADD_DEL_VLAN_MAX		=
-		((u16)(~0) - sizeof(struct virtchnl_vlan_filter_list)) /
-		sizeof(u16),
-
-
-	VIRTCHNL_OP_ENABLE_CHANNELS_MAX		=
-		((u16)(~0) - sizeof(struct virtchnl_tc_info)) /
-		sizeof(struct virtchnl_channel_info),
-};
-
 /* VF reset states - these are written into the RSTAT register:
  * VFGEN_RSTAT on the VF
  * When the PF initiates a reset, it writes 0
@@ -791,6 +1510,8 @@ enum virtchnl_vfr_states {
 };
 
 #define VIRTCHNL_MAX_NUM_PROTO_HDRS	32
+#define VIRTCHNL_MAX_NUM_PROTO_HDRS_W_MSK	16
+#define VIRTCHNL_MAX_SIZE_RAW_PACKET	1024
 #define PROTO_HDR_SHIFT			5
 #define PROTO_HDR_FIELD_START(proto_hdr_type) \
 					(proto_hdr_type << PROTO_HDR_SHIFT)
@@ -852,6 +1573,17 @@ enum virtchnl_proto_hdr_type {
 	VIRTCHNL_PROTO_HDR_ESP,
 	VIRTCHNL_PROTO_HDR_AH,
 	VIRTCHNL_PROTO_HDR_PFCP,
+	VIRTCHNL_PROTO_HDR_GTPC,
+	VIRTCHNL_PROTO_HDR_ECPRI,
+	VIRTCHNL_PROTO_HDR_L2TPV2,
+	VIRTCHNL_PROTO_HDR_PPP,
+	/* IPv4 and IPv6 Fragment header types are only associated to
+	 * VIRTCHNL_PROTO_HDR_IPV4 and VIRTCHNL_PROTO_HDR_IPV6 respectively,
+	 * cannot be used independently.
+	 */
+	VIRTCHNL_PROTO_HDR_IPV4_FRAG,
+	VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG,
+	VIRTCHNL_PROTO_HDR_GRE,
 };
 
 /* Protocol header field within a protocol header. */
@@ -874,6 +1606,7 @@ enum virtchnl_proto_hdr_field {
 	VIRTCHNL_PROTO_HDR_IPV4_DSCP,
 	VIRTCHNL_PROTO_HDR_IPV4_TTL,
 	VIRTCHNL_PROTO_HDR_IPV4_PROT,
+	VIRTCHNL_PROTO_HDR_IPV4_CHKSUM,
 	/* IPV6 */
 	VIRTCHNL_PROTO_HDR_IPV6_SRC =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_IPV6),
@@ -881,18 +1614,34 @@ enum virtchnl_proto_hdr_field {
 	VIRTCHNL_PROTO_HDR_IPV6_TC,
 	VIRTCHNL_PROTO_HDR_IPV6_HOP_LIMIT,
 	VIRTCHNL_PROTO_HDR_IPV6_PROT,
+	/* IPV6 Prefix */
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX32_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX32_DST,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX40_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX40_DST,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX48_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX48_DST,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX56_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX56_DST,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX64_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX64_DST,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX96_SRC,
+	VIRTCHNL_PROTO_HDR_IPV6_PREFIX96_DST,
 	/* TCP */
 	VIRTCHNL_PROTO_HDR_TCP_SRC_PORT =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_TCP),
 	VIRTCHNL_PROTO_HDR_TCP_DST_PORT,
+	VIRTCHNL_PROTO_HDR_TCP_CHKSUM,
 	/* UDP */
 	VIRTCHNL_PROTO_HDR_UDP_SRC_PORT =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_UDP),
 	VIRTCHNL_PROTO_HDR_UDP_DST_PORT,
+	VIRTCHNL_PROTO_HDR_UDP_CHKSUM,
 	/* SCTP */
 	VIRTCHNL_PROTO_HDR_SCTP_SRC_PORT =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_SCTP),
 	VIRTCHNL_PROTO_HDR_SCTP_DST_PORT,
+	VIRTCHNL_PROTO_HDR_SCTP_CHKSUM,
 	/* GTPU_IP */
 	VIRTCHNL_PROTO_HDR_GTPU_IP_TEID =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_GTPU_IP),
@@ -916,10 +1665,33 @@ enum virtchnl_proto_hdr_field {
 	VIRTCHNL_PROTO_HDR_PFCP_S_FIELD =
 		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_PFCP),
 	VIRTCHNL_PROTO_HDR_PFCP_SEID,
+	/* GTPC */
+	VIRTCHNL_PROTO_HDR_GTPC_TEID =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_GTPC),
+	/* ECPRI */
+	VIRTCHNL_PROTO_HDR_ECPRI_MSG_TYPE =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_ECPRI),
+	VIRTCHNL_PROTO_HDR_ECPRI_PC_RTC_ID,
+	/* IPv4 Dummy Fragment */
+	VIRTCHNL_PROTO_HDR_IPV4_FRAG_PKID =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_IPV4_FRAG),
+	/* IPv6 Extension Fragment */
+	VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG_PKID =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG),
+	/* GTPU_DWN/UP */
+	VIRTCHNL_PROTO_HDR_GTPU_DWN_QFI =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_GTPU_EH_PDU_DWN),
+	VIRTCHNL_PROTO_HDR_GTPU_UP_QFI =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_GTPU_EH_PDU_UP),
+	/* L2TPv2 */
+	VIRTCHNL_PROTO_HDR_L2TPV2_SESS_ID =
+		PROTO_HDR_FIELD_START(VIRTCHNL_PROTO_HDR_L2TPV2),
+	VIRTCHNL_PROTO_HDR_L2TPV2_LEN_SESS_ID,
 };
 
 struct virtchnl_proto_hdr {
-	enum virtchnl_proto_hdr_type type;
+	/* see enum virtchnl_proto_hdr_type */
+	s32 type;
 	u32 field_selector; /* a bit mask to select field for header type */
 	u8 buffer[64];
 	/**
@@ -931,32 +1703,69 @@ struct virtchnl_proto_hdr {
 
 VIRTCHNL_CHECK_STRUCT_LEN(72, virtchnl_proto_hdr);
 
+struct virtchnl_proto_hdr_w_msk {
+	/* see enum virtchnl_proto_hdr_type */
+	s32 type;
+	u32 pad;
+	/**
+	 * binary buffer in network order for specific header type.
+	 * For example, if type = VIRTCHNL_PROTO_HDR_IPV4, a IPv4
+	 * header is expected to be copied into the buffer.
+	 */
+	u8 buffer_spec[64];
+	/* binary buffer for bit-mask applied to specific header type */
+	u8 buffer_mask[64];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(136, virtchnl_proto_hdr_w_msk);
+
 struct virtchnl_proto_hdrs {
 	u8 tunnel_level;
 	/**
-	 * specify where protocol header start from.
+	 * specify where protocol header start from. must be 0 when sending a raw packet request.
 	 * 0 - from the outer layer
 	 * 1 - from the first inner layer
 	 * 2 - from the second inner layer
 	 * ....
-	 **/
-	int count; /* the proto layers must < VIRTCHNL_MAX_NUM_PROTO_HDRS */
-	struct virtchnl_proto_hdr proto_hdr[VIRTCHNL_MAX_NUM_PROTO_HDRS];
+	 */
+	int count;
+	/**
+	 * count must <=
+	 * VIRTCHNL_MAX_NUM_PROTO_HDRS + VIRTCHNL_MAX_NUM_PROTO_HDRS_W_MSK
+	 * count = 0 :					select raw
+	 * 1 < count <= VIRTCHNL_MAX_NUM_PROTO_HDRS :	select proto_hdr
+	 * count > VIRTCHNL_MAX_NUM_PROTO_HDRS :	select proto_hdr_w_msk
+	 * last valid index = count - VIRTCHNL_MAX_NUM_PROTO_HDRS
+	 */
+	union {
+		struct virtchnl_proto_hdr
+			proto_hdr[VIRTCHNL_MAX_NUM_PROTO_HDRS];
+		struct virtchnl_proto_hdr_w_msk
+			proto_hdr_w_msk[VIRTCHNL_MAX_NUM_PROTO_HDRS_W_MSK];
+		struct {
+			u16 pkt_len;
+			u8 spec[VIRTCHNL_MAX_SIZE_RAW_PACKET];
+			u8 mask[VIRTCHNL_MAX_SIZE_RAW_PACKET];
+		} raw;
+	};
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(2312, virtchnl_proto_hdrs);
 
 struct virtchnl_rss_cfg {
 	struct virtchnl_proto_hdrs proto_hdrs;	   /* protocol headers */
-	enum virtchnl_rss_algorithm rss_algorithm; /* rss algorithm type */
+
+	/* see enum virtchnl_rss_algorithm; rss algorithm type */
+	s32 rss_algorithm;
 	u8 reserved[128];                          /* reserve for future */
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(2444, virtchnl_rss_cfg);
 
-/* action configuration for FDIR */
+/* action configuration for FDIR and FSUB */
 struct virtchnl_filter_action {
-	enum virtchnl_action type;
+	/* see enum virtchnl_action type */
+	s32 type;
 	union {
 		/* used for queue and qgroup action */
 		struct {
@@ -994,20 +1803,6 @@ struct virtchnl_fdir_rule {
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(2604, virtchnl_fdir_rule);
-
-/* query information to retrieve fdir rule counters.
- * PF will fill out this structure to reset counter.
- */
-struct virtchnl_fdir_query_info {
-	u32 match_packets_valid:1;
-	u32 match_bytes_valid:1;
-	u32 reserved:30;  /* Reserved, must be zero. */
-	u32 pad;
-	u64 matched_packets; /* Number of packets for this rule. */
-	u64 matched_bytes;   /* Number of bytes through this rule. */
-};
-
-VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_fdir_query_info);
 
 /* Status returned to VF after VF requests FDIR commands
  * VIRTCHNL_FDIR_SUCCESS
@@ -1063,7 +1858,9 @@ struct virtchnl_fdir_add {
 	u16 validate_only; /* INPUT */
 	u32 flow_id;       /* OUTPUT */
 	struct virtchnl_fdir_rule rule_cfg; /* INPUT */
-	enum virtchnl_fdir_prgm_status status; /* OUTPUT */
+
+	/* see enum virtchnl_fdir_prgm_status; OUTPUT */
+	s32 status;
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(2616, virtchnl_fdir_add);
@@ -1076,27 +1873,330 @@ struct virtchnl_fdir_del {
 	u16 vsi_id;  /* INPUT */
 	u16 pad;
 	u32 flow_id; /* INPUT */
-	enum virtchnl_fdir_prgm_status status; /* OUTPUT */
+
+	/* see enum virtchnl_fdir_prgm_status; OUTPUT */
+	s32 status;
 };
 
 VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_fdir_del);
 
-/* VIRTCHNL_OP_QUERY_FDIR_FILTER
- * VF sends this request to PF by filling out vsi_id,
- * flow_id and reset_counter. PF will return query_info
- * and query_status to VF.
+/* Status returned to VF after VF requests FSUB commands
+ * VIRTCHNL_FSUB_SUCCESS
+ * VF FLOW related request is successfully done by PF
+ * The request can be OP_FLOW_SUBSCRIBE/UNSUBSCRIBE.
+ *
+ * VIRTCHNL_FSUB_FAILURE_RULE_NORESOURCE
+ * OP_FLOW_SUBSCRIBE request is failed due to no Hardware resource.
+ *
+ * VIRTCHNL_FSUB_FAILURE_RULE_EXIST
+ * OP_FLOW_SUBSCRIBE request is failed due to the rule is already existed.
+ *
+ * VIRTCHNL_FSUB_FAILURE_RULE_NONEXIST
+ * OP_FLOW_UNSUBSCRIBE request is failed due to this rule doesn't exist.
+ *
+ * VIRTCHNL_FSUB_FAILURE_RULE_INVALID
+ * OP_FLOW_SUBSCRIBE request is failed due to parameters validation
+ * or HW doesn't support.
  */
-struct virtchnl_fdir_query {
-	u16 vsi_id;   /* INPUT */
-	u16 pad1[3];
-	u32 flow_id;  /* INPUT */
-	u32 reset_counter:1; /* INPUT */
-	struct virtchnl_fdir_query_info query_info; /* OUTPUT */
-	enum virtchnl_fdir_prgm_status status;  /* OUTPUT */
-	u32 pad2;
+enum virtchnl_fsub_prgm_status {
+	VIRTCHNL_FSUB_SUCCESS = 0,
+	VIRTCHNL_FSUB_FAILURE_RULE_NORESOURCE,
+	VIRTCHNL_FSUB_FAILURE_RULE_EXIST,
+	VIRTCHNL_FSUB_FAILURE_RULE_NONEXIST,
+	VIRTCHNL_FSUB_FAILURE_RULE_INVALID,
 };
 
-VIRTCHNL_CHECK_STRUCT_LEN(48, virtchnl_fdir_query);
+/* VIRTCHNL_OP_FLOW_SUBSCRIBE
+ * VF sends this request to PF by filling out vsi_id,
+ * validate_only, priority, proto_hdrs and actions.
+ * PF will return flow_id
+ * if the request is successfully done and return status to VF.
+ */
+struct virtchnl_flow_sub {
+	u16 vsi_id; /* INPUT */
+	u8 validate_only; /* INPUT */
+	u8 priority; /* INPUT */
+	u32 flow_id; /* OUTPUT */
+	struct virtchnl_proto_hdrs proto_hdrs; /* INPUT */
+	struct virtchnl_filter_action_set actions; /* INPUT */
+	/* see enum virtchnl_fsub_prgm_status; OUTPUT */
+	s32 status;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(2616, virtchnl_flow_sub);
+
+/* VIRTCHNL_OP_FLOW_UNSUBSCRIBE
+ * VF sends this request to PF by filling out vsi_id
+ * and flow_id. PF will return status to VF.
+ */
+struct virtchnl_flow_unsub {
+	u16 vsi_id; /* INPUT */
+	u16 pad;
+	u32 flow_id; /* INPUT */
+	/* see enum virtchnl_fsub_prgm_status; OUTPUT */
+	s32 status;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_flow_unsub);
+
+/* VIRTCHNL_OP_GET_QOS_CAPS
+ * VF sends this message to get its QoS Caps, such as
+ * TC number, Arbiter and Bandwidth.
+ */
+struct virtchnl_qos_cap_elem {
+	u8 tc_num;
+	u8 tc_prio;
+#define VIRTCHNL_ABITER_STRICT      0
+#define VIRTCHNL_ABITER_ETS         2
+	u8 arbiter;
+#define VIRTCHNL_STRICT_WEIGHT      1
+	u8 weight;
+	enum virtchnl_bw_limit_type type;
+	union {
+		struct virtchnl_shaper_bw shaper;
+		u8 pad2[32];
+	};
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(40, virtchnl_qos_cap_elem);
+
+struct virtchnl_qos_cap_list {
+	u16 vsi_id;
+	u16 num_elem;
+	struct virtchnl_qos_cap_elem cap[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(44, virtchnl_qos_cap_list);
+
+/* VIRTCHNL_OP_CONFIG_QUEUE_TC_MAP
+ * VF sends message virtchnl_queue_tc_mapping to set queue to tc
+ * mapping for all the Tx and Rx queues with a specified VSI, and
+ * would get response about bitmap of valid user priorities
+ * associated with queues.
+ */
+struct virtchnl_queue_tc_mapping {
+	u16 vsi_id;
+	u16 num_tc;
+	u16 num_queue_pairs;
+	u8 pad[2];
+	union {
+		struct {
+			u16 start_queue_id;
+			u16 queue_count;
+		} req;
+		struct {
+#define VIRTCHNL_USER_PRIO_TYPE_UP	0
+#define VIRTCHNL_USER_PRIO_TYPE_DSCP	1
+			u16 prio_type;
+			u16 valid_prio_bitmap;
+		} resp;
+	} tc[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_queue_tc_mapping);
+
+/* VIRTCHNL_OP_CONFIG_QUEUE_BW */
+struct virtchnl_queue_bw {
+	u16 queue_id;
+	u8 tc;
+	u8 pad;
+	struct virtchnl_shaper_bw shaper;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_queue_bw);
+
+struct virtchnl_queues_bw_cfg {
+	u16 vsi_id;
+	u16 num_queues;
+	struct virtchnl_queue_bw cfg[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_queues_bw_cfg);
+
+/* TX and RX queue types are valid in legacy as well as split queue models.
+ * With Split Queue model, 2 additional types are introduced - TX_COMPLETION
+ * and RX_BUFFER. In split queue model, RX corresponds to the queue where HW
+ * posts completions.
+ */
+enum virtchnl_queue_type {
+	VIRTCHNL_QUEUE_TYPE_TX			= 0,
+	VIRTCHNL_QUEUE_TYPE_RX			= 1,
+	VIRTCHNL_QUEUE_TYPE_TX_COMPLETION	= 2,
+	VIRTCHNL_QUEUE_TYPE_RX_BUFFER		= 3,
+	VIRTCHNL_QUEUE_TYPE_CONFIG_TX		= 4,
+	VIRTCHNL_QUEUE_TYPE_CONFIG_RX		= 5
+};
+
+
+/* structure to specify a chunk of contiguous queues */
+struct virtchnl_queue_chunk {
+	/* see enum virtchnl_queue_type */
+	s32 type;
+	u16 start_queue_id;
+	u16 num_queues;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(8, virtchnl_queue_chunk);
+
+/* structure to specify several chunks of contiguous queues */
+struct virtchnl_queue_chunks {
+	u16 num_chunks;
+	u16 rsvd;
+	struct virtchnl_queue_chunk chunks[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_queue_chunks);
+
+
+/* VIRTCHNL_OP_ENABLE_QUEUES_V2
+ * VIRTCHNL_OP_DISABLE_QUEUES_V2
+ * VIRTCHNL_OP_DEL_QUEUES
+ *
+ * If VIRTCHNL_CAP_EXT_FEATURES was negotiated in VIRTCHNL_OP_GET_VF_RESOURCES
+ * then all of these ops are available.
+ *
+ * If VIRTCHNL_VF_LARGE_NUM_QPAIRS was negotiated in VIRTCHNL_OP_GET_VF_RESOURCES
+ * then VIRTCHNL_OP_ENABLE_QUEUES_V2 and VIRTCHNL_OP_DISABLE_QUEUES_V2 are
+ * available.
+ *
+ * PF sends these messages to enable, disable or delete queues specified in
+ * chunks. PF sends virtchnl_del_ena_dis_queues struct to specify the queues
+ * to be enabled/disabled/deleted. Also applicable to single queue RX or
+ * TX. CP performs requested action and returns status.
+ */
+struct virtchnl_del_ena_dis_queues {
+	u16 vport_id;
+	u16 pad;
+	struct virtchnl_queue_chunks chunks;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_del_ena_dis_queues);
+
+/* Virtchannel interrupt throttling rate index */
+enum virtchnl_itr_idx {
+	VIRTCHNL_ITR_IDX_0	= 0,
+	VIRTCHNL_ITR_IDX_1	= 1,
+	VIRTCHNL_ITR_IDX_NO_ITR	= 3,
+};
+
+/* Queue to vector mapping */
+struct virtchnl_queue_vector {
+	u16 queue_id;
+	u16 vector_id;
+	u8 pad[4];
+
+	/* see enum virtchnl_itr_idx */
+	s32 itr_idx;
+
+	/* see enum virtchnl_queue_type */
+	s32 queue_type;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_queue_vector);
+
+/* VIRTCHNL_OP_MAP_QUEUE_VECTOR
+ * VIRTCHNL_OP_UNMAP_QUEUE_VECTOR
+ *
+ * If VIRTCHNL_CAP_EXT_FEATURES was negotiated in VIRTCHNL_OP_GET_VF_RESOURCES
+ * then all of these ops are available.
+ *
+ * If VIRTCHNL_VF_LARGE_NUM_QPAIRS was negotiated in VIRTCHNL_OP_GET_VF_RESOURCES
+ * then only VIRTCHNL_OP_MAP_QUEUE_VECTOR is available.
+ *
+ * PF sends this message to map or unmap queues to vectors and ITR index
+ * registers. External data buffer contains virtchnl_queue_vector_maps structure
+ * that contains num_qv_maps of virtchnl_queue_vector structures.
+ * CP maps the requested queue vector maps after validating the queue and vector
+ * ids and returns a status code.
+ */
+struct virtchnl_queue_vector_maps {
+	u16 vport_id;
+	u16 num_qv_maps;
+	u8 pad[4];
+	struct virtchnl_queue_vector qv_maps[1];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_queue_vector_maps);
+
+struct virtchnl_quanta_cfg {
+	u16 quanta_size;
+	struct virtchnl_queue_chunk queue_select;
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(12, virtchnl_quanta_cfg);
+
+#define VIRTCHNL_1588_PTP_CAP_RX_TSTAMP		BIT(1)
+#define VIRTCHNL_1588_PTP_CAP_READ_PHC		BIT(2)
+
+struct virtchnl_phc_regs {
+	u32 clock_hi;
+	u32 clock_lo;
+	u8 pcie_region;
+	u8 rsvd[15];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(24, virtchnl_phc_regs);
+
+struct virtchnl_ptp_caps {
+	struct virtchnl_phc_regs phc_regs;
+	u32 caps;
+	s32 max_adj;
+	u8 tx_tstamp_idx;
+	u8 n_ext_ts;
+	u8 n_per_out;
+	u8 n_pins;
+	u8 tx_tstamp_format;
+	u8 rsvd[11];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(48, virtchnl_ptp_caps);
+
+struct virtchnl_phc_time {
+	u64 time;
+	u8 rsvd[8];
+};
+
+VIRTCHNL_CHECK_STRUCT_LEN(16, virtchnl_phc_time);
+
+/* Since VF messages are limited by u16 size, precalculate the maximum possible
+ * values of nested elements in virtchnl structures that virtual channel can
+ * possibly handle in a single message.
+ */
+enum virtchnl_vector_limits {
+	VIRTCHNL_OP_CONFIG_VSI_QUEUES_MAX	=
+		((u16)(~0) - sizeof(struct virtchnl_vsi_queue_config_info)) /
+		sizeof(struct virtchnl_queue_pair_info),
+
+	VIRTCHNL_OP_CONFIG_IRQ_MAP_MAX		=
+		((u16)(~0) - sizeof(struct virtchnl_irq_map_info)) /
+		sizeof(struct virtchnl_vector_map),
+
+	VIRTCHNL_OP_ADD_DEL_ETH_ADDR_MAX	=
+		((u16)(~0) - sizeof(struct virtchnl_ether_addr_list)) /
+		sizeof(struct virtchnl_ether_addr),
+
+	VIRTCHNL_OP_ADD_DEL_VLAN_MAX		=
+		((u16)(~0) - sizeof(struct virtchnl_vlan_filter_list)) /
+		sizeof(u16),
+
+
+	VIRTCHNL_OP_ENABLE_CHANNELS_MAX		=
+		((u16)(~0) - sizeof(struct virtchnl_tc_info)) /
+		sizeof(struct virtchnl_channel_info),
+
+	VIRTCHNL_OP_ENABLE_DISABLE_DEL_QUEUES_V2_MAX	=
+		((u16)(~0) - sizeof(struct virtchnl_del_ena_dis_queues)) /
+		sizeof(struct virtchnl_queue_chunk),
+
+	VIRTCHNL_OP_MAP_UNMAP_QUEUE_VECTOR_MAX	=
+		((u16)(~0) - sizeof(struct virtchnl_queue_vector_maps)) /
+		sizeof(struct virtchnl_queue_vector),
+
+	VIRTCHNL_OP_ADD_DEL_VLAN_V2_MAX		=
+		((u16)(~0) - sizeof(struct virtchnl_vlan_filter_list_v2)) /
+		sizeof(struct virtchnl_vlan_filter),
+};
+
 /**
  * virtchnl_vc_validate_vf_msg
  * @ver: Virtchnl version info
@@ -1166,6 +2266,8 @@ virtchnl_vc_validate_vf_msg(struct virtchnl_version_info *ver, u32 v_opcode,
 	case VIRTCHNL_OP_ENABLE_QUEUES:
 	case VIRTCHNL_OP_DISABLE_QUEUES:
 		valid_len = sizeof(struct virtchnl_queue_select);
+		break;
+	case VIRTCHNL_OP_GET_MAX_RSS_QREGION:
 		break;
 	case VIRTCHNL_OP_ADD_ETH_ADDR:
 	case VIRTCHNL_OP_DEL_ETH_ADDR:
@@ -1267,19 +2369,32 @@ virtchnl_vc_validate_vf_msg(struct virtchnl_version_info *ver, u32 v_opcode,
 	case VIRTCHNL_OP_DEL_CLOUD_FILTER:
 		valid_len = sizeof(struct virtchnl_filter);
 		break;
+	case VIRTCHNL_OP_DCF_VLAN_OFFLOAD:
+		valid_len = sizeof(struct virtchnl_dcf_vlan_offload);
+		break;
 	case VIRTCHNL_OP_DCF_CMD_DESC:
 	case VIRTCHNL_OP_DCF_CMD_BUFF:
 		/* These two opcodes are specific to handle the AdminQ command,
 		 * so the validation needs to be done in PF's context.
 		 */
-		return 0;
+		valid_len = msglen;
+		break;
 	case VIRTCHNL_OP_DCF_DISABLE:
 	case VIRTCHNL_OP_DCF_GET_VSI_MAP:
-		/* The two opcodes are required by DCF without message buffer,
-		 * so the valid length keeps the default value 0.
-		 */
-		break;
 	case VIRTCHNL_OP_DCF_GET_PKG_INFO:
+		break;
+	case VIRTCHNL_OP_DCF_CONFIG_BW:
+		valid_len = sizeof(struct virtchnl_dcf_bw_cfg_list);
+		if (msglen >= valid_len) {
+			struct virtchnl_dcf_bw_cfg_list *cfg_list =
+				(struct virtchnl_dcf_bw_cfg_list *)msg;
+			if (cfg_list->num_elem == 0) {
+				err_msg_format = true;
+				break;
+			}
+			valid_len += (cfg_list->num_elem - 1) *
+					 sizeof(struct virtchnl_dcf_bw_cfg);
+		}
 		break;
 	case VIRTCHNL_OP_GET_SUPPORTED_RXDIDS:
 		break;
@@ -1293,9 +2408,122 @@ virtchnl_vc_validate_vf_msg(struct virtchnl_version_info *ver, u32 v_opcode,
 	case VIRTCHNL_OP_DEL_FDIR_FILTER:
 		valid_len = sizeof(struct virtchnl_fdir_del);
 		break;
-	case VIRTCHNL_OP_QUERY_FDIR_FILTER:
-		valid_len = sizeof(struct virtchnl_fdir_query);
+	case VIRTCHNL_OP_FLOW_SUBSCRIBE:
+		valid_len = sizeof(struct virtchnl_flow_sub);
 		break;
+	case VIRTCHNL_OP_FLOW_UNSUBSCRIBE:
+		valid_len = sizeof(struct virtchnl_flow_unsub);
+		break;
+	case VIRTCHNL_OP_GET_QOS_CAPS:
+		break;
+	case VIRTCHNL_OP_CONFIG_QUEUE_TC_MAP:
+		valid_len = sizeof(struct virtchnl_queue_tc_mapping);
+		if (msglen >= valid_len) {
+			struct virtchnl_queue_tc_mapping *q_tc =
+				(struct virtchnl_queue_tc_mapping *)msg;
+			if (q_tc->num_tc == 0) {
+				err_msg_format = true;
+				break;
+			}
+			valid_len += (q_tc->num_tc - 1) *
+					 sizeof(q_tc->tc[0]);
+		}
+		break;
+	case VIRTCHNL_OP_CONFIG_QUEUE_BW:
+		valid_len = sizeof(struct virtchnl_queues_bw_cfg);
+		if (msglen >= valid_len) {
+			struct virtchnl_queues_bw_cfg *q_bw =
+				(struct virtchnl_queues_bw_cfg *)msg;
+			if (q_bw->num_queues == 0) {
+				err_msg_format = true;
+				break;
+			}
+			valid_len += (q_bw->num_queues - 1) *
+					 sizeof(q_bw->cfg[0]);
+		}
+		break;
+	case VIRTCHNL_OP_CONFIG_QUANTA:
+		valid_len = sizeof(struct virtchnl_quanta_cfg);
+		if (msglen >= valid_len) {
+			struct virtchnl_quanta_cfg *q_quanta =
+				(struct virtchnl_quanta_cfg *)msg;
+			if (q_quanta->quanta_size == 0 ||
+			    q_quanta->queue_select.num_queues == 0) {
+				err_msg_format = true;
+				break;
+			}
+		}
+		break;
+	case VIRTCHNL_OP_GET_OFFLOAD_VLAN_V2_CAPS:
+		break;
+	case VIRTCHNL_OP_ADD_VLAN_V2:
+	case VIRTCHNL_OP_DEL_VLAN_V2:
+		valid_len = sizeof(struct virtchnl_vlan_filter_list_v2);
+		if (msglen >= valid_len) {
+			struct virtchnl_vlan_filter_list_v2 *vfl =
+			    (struct virtchnl_vlan_filter_list_v2 *)msg;
+
+			if (vfl->num_elements == 0 || vfl->num_elements >
+			    VIRTCHNL_OP_ADD_DEL_VLAN_V2_MAX) {
+				err_msg_format = true;
+				break;
+			}
+
+			valid_len += (vfl->num_elements - 1) *
+				sizeof(struct virtchnl_vlan_filter);
+		}
+		break;
+	case VIRTCHNL_OP_ENABLE_VLAN_STRIPPING_V2:
+	case VIRTCHNL_OP_DISABLE_VLAN_STRIPPING_V2:
+	case VIRTCHNL_OP_ENABLE_VLAN_INSERTION_V2:
+	case VIRTCHNL_OP_DISABLE_VLAN_INSERTION_V2:
+	case VIRTCHNL_OP_ENABLE_VLAN_FILTERING_V2:
+	case VIRTCHNL_OP_DISABLE_VLAN_FILTERING_V2:
+		valid_len = sizeof(struct virtchnl_vlan_setting);
+		break;
+	case VIRTCHNL_OP_1588_PTP_GET_CAPS:
+		valid_len = sizeof(struct virtchnl_ptp_caps);
+		break;
+	case VIRTCHNL_OP_1588_PTP_GET_TIME:
+		valid_len = sizeof(struct virtchnl_phc_time);
+		break;
+	case VIRTCHNL_OP_ENABLE_QUEUES_V2:
+	case VIRTCHNL_OP_DISABLE_QUEUES_V2:
+		valid_len = sizeof(struct virtchnl_del_ena_dis_queues);
+		if (msglen >= valid_len) {
+			struct virtchnl_del_ena_dis_queues *qs =
+				(struct virtchnl_del_ena_dis_queues *)msg;
+			if (qs->chunks.num_chunks == 0 ||
+			    qs->chunks.num_chunks > VIRTCHNL_OP_ENABLE_DISABLE_DEL_QUEUES_V2_MAX) {
+				err_msg_format = true;
+				break;
+			}
+			valid_len += (qs->chunks.num_chunks - 1) *
+				      sizeof(struct virtchnl_queue_chunk);
+		}
+		break;
+	case VIRTCHNL_OP_MAP_QUEUE_VECTOR:
+		valid_len = sizeof(struct virtchnl_queue_vector_maps);
+		if (msglen >= valid_len) {
+			struct virtchnl_queue_vector_maps *v_qp =
+				(struct virtchnl_queue_vector_maps *)msg;
+			if (v_qp->num_qv_maps == 0 ||
+			    v_qp->num_qv_maps > VIRTCHNL_OP_MAP_UNMAP_QUEUE_VECTOR_MAX) {
+				err_msg_format = true;
+				break;
+			}
+			valid_len += (v_qp->num_qv_maps - 1) *
+				      sizeof(struct virtchnl_queue_vector);
+		}
+		break;
+
+	case VIRTCHNL_OP_INLINE_IPSEC_CRYPTO:
+	{
+		struct inline_ipsec_msg *iim = (struct inline_ipsec_msg *)msg;
+		valid_len =
+			virtchnl_inline_ipsec_val_msg_len(iim->ipsec_opcode);
+		break;
+	}
 	/* These are always errors coming from the VF. */
 	case VIRTCHNL_OP_EVENT:
 	case VIRTCHNL_OP_UNKNOWN:

@@ -235,7 +235,7 @@ static void generate_random_rule_prefix(uint32_t ip_class, uint8_t depth)
 	/* Only generate rest bits except the most significant
 	 * fixed bits for IP address class
 	 */
-	start = lrand48() & mask;
+	start = rte_rand() & mask;
 	ptr_rule = &large_route_table[num_route_entries];
 	for (k = 0; k < rule_num; k++) {
 		ptr_rule->ip = (start << (RTE_FIB_MAX_DEPTH - depth))
@@ -254,7 +254,7 @@ static void insert_rule_in_random_pos(uint32_t ip, uint8_t depth)
 	struct route_rule tmp;
 
 	do {
-		pos = lrand48();
+		pos = rte_rand();
 		try_count++;
 	} while ((try_count < 10) && (pos > num_route_entries));
 
@@ -323,6 +323,7 @@ test_fib_perf(void)
 	struct rte_fib_conf config;
 
 	config.max_routes = 2000000;
+	config.rib_ext_sz = 0;
 	config.type = RTE_FIB_DIR24_8;
 	config.default_nh = 0;
 	config.dir24_8.nh_sz = RTE_FIB_DIR24_8_4B;
@@ -332,8 +333,6 @@ test_fib_perf(void)
 	uint32_t next_hop_add = 0xAA;
 	int status = 0;
 	int64_t count = 0;
-
-	rte_srand(rte_rdtsc());
 
 	generate_large_route_rule_table();
 
@@ -345,7 +344,7 @@ test_fib_perf(void)
 	fib = rte_fib_create(__func__, SOCKET_ID_ANY, &config);
 	TEST_FIB_ASSERT(fib != NULL);
 
-	/* Measue add. */
+	/* Measure add. */
 	begin = rte_rdtsc();
 
 	for (i = 0; i < NUM_ROUTE_ENTRIES; i++) {
@@ -408,4 +407,4 @@ test_fib_perf(void)
 	return 0;
 }
 
-REGISTER_TEST_COMMAND(fib_perf_autotest, test_fib_perf);
+REGISTER_PERF_TEST(fib_perf_autotest, test_fib_perf);

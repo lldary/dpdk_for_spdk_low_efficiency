@@ -13,11 +13,11 @@
 #include <rte_version.h>
 #include <rte_mbuf.h>
 #include <rte_ether.h>
-#include <rte_ethdev_driver.h>
-#include <rte_ethdev_vdev.h>
+#include <ethdev_driver.h>
+#include <ethdev_vdev.h>
 #include <rte_malloc.h>
 #include <rte_kvargs.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 #include <rte_hash.h>
 #include <rte_jhash.h>
 #include <rte_string_fns.h>
@@ -65,7 +65,11 @@ memif_msg_send_from_queue(struct memif_control_channel *cc)
 	if (e == NULL)
 		return 0;
 
-	size = memif_msg_send(cc->intr_handle.fd, &e->msg, e->fd);
+	if (rte_intr_fd_get(cc->intr_handle) < 0)
+		return -1;
+
+	size = memif_msg_send(rte_intr_fd_get(cc->intr_handle), &e->msg,
+			      e->fd);
 	if (size != sizeof(memif_msg_t)) {
 		MIF_LOG(ERR, "sendmsg fail: %s.", strerror(errno));
 		ret = -1;
@@ -143,8 +147,8 @@ memif_msg_enq_hello(struct memif_control_channel *cc)
 	e->msg.type = MEMIF_MSG_TYPE_HELLO;
 	h->min_version = MEMIF_VERSION;
 	h->max_version = MEMIF_VERSION;
-	h->max_s2m_ring = ETH_MEMIF_MAX_NUM_Q_PAIRS;
-	h->max_m2s_ring = ETH_MEMIF_MAX_NUM_Q_PAIRS;
+	h->max_c2s_ring = ETH_MEMIF_MAX_NUM_Q_PAIRS;
+	h->max_s2c_ring = ETH_MEMIF_MAX_NUM_Q_PAIRS;
 	h->max_region = ETH_MEMIF_MAX_REGION_NUM - 1;
 	h->max_log2_ring_size = ETH_MEMIF_MAX_LOG2_RING_SIZE;
 
@@ -165,10 +169,10 @@ memif_msg_receive_hello(struct rte_eth_dev *dev, memif_msg_t *msg)
 	}
 
 	/* Set parameters for active connection */
-	pmd->run.num_s2m_rings = RTE_MIN(h->max_s2m_ring + 1,
-					   pmd->cfg.num_s2m_rings);
-	pmd->run.num_m2s_rings = RTE_MIN(h->max_m2s_ring + 1,
-					   pmd->cfg.num_m2s_rings);
+	pmd->run.num_c2s_rings = RTE_MIN(h->max_c2s_ring + 1,
+					   pmd->cfg.num_c2s_rings);
+	pmd->run.num_s2c_rings = RTE_MIN(h->max_s2c_ring + 1,
+					   pmd->cfg.num_s2c_rings);
 	pmd->run.log2_ring_size = RTE_MIN(h->max_log2_ring_size,
 					    pmd->cfg.log2_ring_size);
 	pmd->run.pkt_buffer_size = pmd->cfg.pkt_buffer_size;
@@ -203,7 +207,7 @@ memif_msg_receive_init(struct memif_control_channel *cc, memif_msg_t *msg)
 		dev = elt->dev;
 		pmd = dev->data->dev_private;
 		if (((pmd->flags & ETH_MEMIF_FLAG_DISABLED) == 0) &&
-		    (pmd->id == i->id) && (pmd->role == MEMIF_ROLE_MASTER)) {
+		    (pmd->id == i->id) && (pmd->role == MEMIF_ROLE_SERVER)) {
 			if (pmd->flags & (ETH_MEMIF_FLAG_CONNECTING |
 					   ETH_MEMIF_FLAG_CONNECTED)) {
 				memif_msg_enq_disconnect(cc,
@@ -300,24 +304,26 @@ memif_msg_receive_add_ring(struct rte_eth_dev *dev, memif_msg_t *msg, int fd)
 	}
 
 	/* check if we have enough queues */
-	if (ar->flags & MEMIF_MSG_ADD_RING_FLAG_S2M) {
-		if (ar->index >= pmd->cfg.num_s2m_rings) {
+	if (ar->flags & MEMIF_MSG_ADD_RING_FLAG_C2S) {
+		if (ar->index >= pmd->cfg.num_c2s_rings) {
 			memif_msg_enq_disconnect(pmd->cc, "Invalid ring index", 0);
 			return -1;
 		}
-		pmd->run.num_s2m_rings++;
+		pmd->run.num_c2s_rings++;
 	} else {
-		if (ar->index >= pmd->cfg.num_m2s_rings) {
+		if (ar->index >= pmd->cfg.num_s2c_rings) {
 			memif_msg_enq_disconnect(pmd->cc, "Invalid ring index", 0);
 			return -1;
 		}
-		pmd->run.num_m2s_rings++;
+		pmd->run.num_s2c_rings++;
 	}
 
-	mq = (ar->flags & MEMIF_MSG_ADD_RING_FLAG_S2M) ?
+	mq = (ar->flags & MEMIF_MSG_ADD_RING_FLAG_C2S) ?
 	    dev->data->rx_queues[ar->index] : dev->data->tx_queues[ar->index];
 
-	mq->intr_handle.fd = fd;
+	if (rte_intr_fd_set(mq->intr_handle, fd))
+		return -1;
+
 	mq->log2_ring_size = ar->log2_ring_size;
 	mq->region = ar->region;
 	mq->ring_offset = ar->offset;
@@ -396,11 +402,10 @@ memif_msg_enq_init(struct rte_eth_dev *dev)
 {
 	struct pmd_internals *pmd = dev->data->dev_private;
 	struct memif_msg_queue_elt *e = memif_msg_enq(pmd->cc);
-	memif_msg_init_t *i = &e->msg.init;
+	memif_msg_init_t *i;
 
 	if (e == NULL)
 		return -1;
-
 	i = &e->msg.init;
 	e->msg.type = MEMIF_MSG_TYPE_INIT;
 	i->version = MEMIF_VERSION;
@@ -449,16 +454,16 @@ memif_msg_enq_add_ring(struct rte_eth_dev *dev, uint8_t idx,
 		return -1;
 
 	ar = &e->msg.add_ring;
-	mq = (type == MEMIF_RING_S2M) ? dev->data->tx_queues[idx] :
+	mq = (type == MEMIF_RING_C2S) ? dev->data->tx_queues[idx] :
 	    dev->data->rx_queues[idx];
 
 	e->msg.type = MEMIF_MSG_TYPE_ADD_RING;
-	e->fd = mq->intr_handle.fd;
+	e->fd = rte_intr_fd_get(mq->intr_handle);
 	ar->index = idx;
 	ar->offset = mq->ring_offset;
 	ar->region = mq->region;
 	ar->log2_ring_size = mq->log2_ring_size;
-	ar->flags = (type == MEMIF_RING_S2M) ? MEMIF_MSG_ADD_RING_FLAG_S2M : 0;
+	ar->flags = (type == MEMIF_RING_C2S) ? MEMIF_MSG_ADD_RING_FLAG_C2S : 0;
 	ar->private_hdr_size = 0;
 
 	return 0;
@@ -505,12 +510,14 @@ memif_intr_unregister_handler(struct rte_intr_handle *intr_handle, void *arg)
 	struct memif_control_channel *cc = arg;
 
 	/* close control channel fd */
-	close(intr_handle->fd);
+	if (rte_intr_fd_get(intr_handle) >= 0)
+		close(rte_intr_fd_get(intr_handle));
 	/* clear message queue */
 	while ((elt = TAILQ_FIRST(&cc->msg_queue)) != NULL) {
 		TAILQ_REMOVE(&cc->msg_queue, elt, next);
 		rte_free(elt);
 	}
+	rte_intr_instance_free(cc->intr_handle);
 	/* free control channel */
 	rte_free(cc);
 }
@@ -525,7 +532,7 @@ memif_disconnect(struct rte_eth_dev *dev)
 	int i;
 	int ret;
 
-	dev->data->dev_link.link_status = ETH_LINK_DOWN;
+	dev->data->dev_link.link_status = RTE_ETH_LINK_DOWN;
 	pmd->flags &= ~ETH_MEMIF_FLAG_CONNECTING;
 	pmd->flags &= ~ETH_MEMIF_FLAG_CONNECTED;
 
@@ -548,8 +555,8 @@ memif_disconnect(struct rte_eth_dev *dev)
 				"Unexpected message(s) in message queue.");
 		}
 
-		ih = &pmd->cc->intr_handle;
-		if (ih->fd > 0) {
+		ih = pmd->cc->intr_handle;
+		if (rte_intr_fd_get(ih) > 0) {
 			ret = rte_intr_callback_unregister(ih,
 							memif_intr_handler,
 							pmd->cc);
@@ -563,7 +570,8 @@ memif_disconnect(struct rte_eth_dev *dev)
 							pmd->cc,
 							memif_intr_unregister_handler);
 			} else if (ret > 0) {
-				close(ih->fd);
+				close(rte_intr_fd_get(ih));
+				rte_intr_instance_free(ih);
 				rte_free(pmd->cc);
 			}
 			pmd->cc = NULL;
@@ -575,8 +583,8 @@ memif_disconnect(struct rte_eth_dev *dev)
 	rte_spinlock_unlock(&pmd->cc_lock);
 
 	/* unconfig interrupts */
-	for (i = 0; i < pmd->cfg.num_s2m_rings; i++) {
-		if (pmd->role == MEMIF_ROLE_SLAVE) {
+	for (i = 0; i < pmd->cfg.num_c2s_rings; i++) {
+		if (pmd->role == MEMIF_ROLE_CLIENT) {
 			if (dev->data->tx_queues != NULL)
 				mq = dev->data->tx_queues[i];
 			else
@@ -587,13 +595,14 @@ memif_disconnect(struct rte_eth_dev *dev)
 			else
 				continue;
 		}
-		if (mq->intr_handle.fd > 0) {
-			close(mq->intr_handle.fd);
-			mq->intr_handle.fd = -1;
+
+		if (rte_intr_fd_get(mq->intr_handle) > 0) {
+			close(rte_intr_fd_get(mq->intr_handle));
+			rte_intr_fd_set(mq->intr_handle, -1);
 		}
 	}
-	for (i = 0; i < pmd->cfg.num_m2s_rings; i++) {
-		if (pmd->role == MEMIF_ROLE_MASTER) {
+	for (i = 0; i < pmd->cfg.num_s2c_rings; i++) {
+		if (pmd->role == MEMIF_ROLE_SERVER) {
 			if (dev->data->tx_queues != NULL)
 				mq = dev->data->tx_queues[i];
 			else
@@ -604,9 +613,10 @@ memif_disconnect(struct rte_eth_dev *dev)
 			else
 				continue;
 		}
-		if (mq->intr_handle.fd > 0) {
-			close(mq->intr_handle.fd);
-			mq->intr_handle.fd = -1;
+
+		if (rte_intr_fd_get(mq->intr_handle) > 0) {
+			close(rte_intr_fd_get(mq->intr_handle));
+			rte_intr_fd_set(mq->intr_handle, -1);
 		}
 	}
 
@@ -616,7 +626,7 @@ memif_disconnect(struct rte_eth_dev *dev)
 	memset(&pmd->run, 0, sizeof(pmd->run));
 
 	MIF_LOG(DEBUG, "Disconnected, id: %d, role: %s.", pmd->id,
-		(pmd->role == MEMIF_ROLE_MASTER) ? "master" : "slave");
+		(pmd->role == MEMIF_ROLE_SERVER) ? "server" : "client");
 }
 
 static int
@@ -644,7 +654,10 @@ memif_msg_receive(struct memif_control_channel *cc)
 	mh.msg_control = ctl;
 	mh.msg_controllen = sizeof(ctl);
 
-	size = recvmsg(cc->intr_handle.fd, &mh, 0);
+	if (rte_intr_fd_get(cc->intr_handle) < 0)
+		return -1;
+
+	size = recvmsg(rte_intr_fd_get(cc->intr_handle), &mh, 0);
 	if (size != sizeof(memif_msg_t)) {
 		MIF_LOG(DEBUG, "Invalid message size = %zd", size);
 		if (size > 0)
@@ -694,15 +707,15 @@ memif_msg_receive(struct memif_control_channel *cc)
 			if (ret < 0)
 				goto exit;
 		}
-		for (i = 0; i < pmd->run.num_s2m_rings; i++) {
+		for (i = 0; i < pmd->run.num_c2s_rings; i++) {
 			ret = memif_msg_enq_add_ring(cc->dev, i,
-						     MEMIF_RING_S2M);
+						     MEMIF_RING_C2S);
 			if (ret < 0)
 				goto exit;
 		}
-		for (i = 0; i < pmd->run.num_m2s_rings; i++) {
+		for (i = 0; i < pmd->run.num_s2c_rings; i++) {
 			ret = memif_msg_enq_add_ring(cc->dev, i,
-						     MEMIF_RING_M2S);
+						     MEMIF_RING_S2C);
 			if (ret < 0)
 				goto exit;
 		}
@@ -712,7 +725,7 @@ memif_msg_receive(struct memif_control_channel *cc)
 		break;
 	case MEMIF_MSG_TYPE_INIT:
 		/*
-		 * This cc does not have an interface asociated with it.
+		 * This cc does not have an interface associated with it.
 		 * If suitable interface is found it will be assigned here.
 		 */
 		ret = memif_msg_receive_init(cc, &msg);
@@ -774,7 +787,7 @@ memif_intr_handler(void *arg)
 	/* if driver failed to assign device */
 	if (cc->dev == NULL) {
 		memif_msg_send_from_queue(cc);
-		ret = rte_intr_callback_unregister_pending(&cc->intr_handle,
+		ret = rte_intr_callback_unregister_pending(cc->intr_handle,
 							   memif_intr_handler,
 							   cc,
 							   memif_intr_unregister_handler);
@@ -812,12 +825,12 @@ memif_listener_handler(void *arg)
 	int ret;
 
 	addr_len = sizeof(client);
-	sockfd = accept(socket->intr_handle.fd, (struct sockaddr *)&client,
-			(socklen_t *)&addr_len);
+	sockfd = accept(rte_intr_fd_get(socket->intr_handle),
+			(struct sockaddr *)&client, (socklen_t *)&addr_len);
 	if (sockfd < 0) {
 		MIF_LOG(ERR,
 			"Failed to accept connection request on socket fd %d",
-			socket->intr_handle.fd);
+			rte_intr_fd_get(socket->intr_handle));
 		return;
 	}
 
@@ -829,13 +842,25 @@ memif_listener_handler(void *arg)
 		goto error;
 	}
 
-	cc->intr_handle.fd = sockfd;
-	cc->intr_handle.type = RTE_INTR_HANDLE_EXT;
+	/* Allocate interrupt instance */
+	cc->intr_handle = rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
+	if (cc->intr_handle == NULL) {
+		MIF_LOG(ERR, "Failed to allocate intr handle");
+		goto error;
+	}
+
+	if (rte_intr_fd_set(cc->intr_handle, sockfd))
+		goto error;
+
+	if (rte_intr_type_set(cc->intr_handle, RTE_INTR_HANDLE_EXT))
+		goto error;
+
 	cc->socket = socket;
 	cc->dev = NULL;
 	TAILQ_INIT(&cc->msg_queue);
 
-	ret = rte_intr_callback_register(&cc->intr_handle, memif_intr_handler, cc);
+	ret = rte_intr_callback_register(cc->intr_handle, memif_intr_handler,
+					 cc);
 	if (ret < 0) {
 		MIF_LOG(ERR, "Failed to register control channel callback.");
 		goto error;
@@ -857,15 +882,18 @@ memif_listener_handler(void *arg)
 		close(sockfd);
 		sockfd = -1;
 	}
-	if (cc != NULL)
+	if (cc != NULL) {
+		rte_intr_instance_free(cc->intr_handle);
 		rte_free(cc);
+	}
 }
 
 static struct memif_socket *
-memif_socket_create(char *key, uint8_t listener)
+memif_socket_create(char *key, uint8_t listener, bool is_abstract, uid_t owner_uid, gid_t owner_gid)
 {
 	struct memif_socket *sock;
-	struct sockaddr_un un;
+	struct sockaddr_un un = { 0 };
+	uint32_t sunlen;
 	int sockfd;
 	int ret;
 	int on = 1;
@@ -886,14 +914,24 @@ memif_socket_create(char *key, uint8_t listener)
 			goto error;
 
 		un.sun_family = AF_UNIX;
-		strlcpy(un.sun_path, sock->filename, MEMIF_SOCKET_UN_SIZE);
+		if (is_abstract) {
+			/* abstract address */
+			un.sun_path[0] = '\0';
+			strlcpy(un.sun_path + 1, sock->filename, MEMIF_SOCKET_UN_SIZE - 1);
+			sunlen = RTE_MIN(1 + strlen(sock->filename),
+					 MEMIF_SOCKET_UN_SIZE) +
+				 sizeof(un) - sizeof(un.sun_path);
+		} else {
+			sunlen = sizeof(un);
+			strlcpy(un.sun_path, sock->filename, MEMIF_SOCKET_UN_SIZE);
+		}
 
 		ret = setsockopt(sockfd, SOL_SOCKET, SO_PASSCRED, &on,
 				 sizeof(on));
 		if (ret < 0)
 			goto error;
 
-		ret = bind(sockfd, (struct sockaddr *)&un, sizeof(un));
+		ret = bind(sockfd, (struct sockaddr *)&un, sunlen);
 		if (ret < 0)
 			goto error;
 
@@ -903,9 +941,29 @@ memif_socket_create(char *key, uint8_t listener)
 
 		MIF_LOG(DEBUG, "Memif listener socket %s created.", sock->filename);
 
-		sock->intr_handle.fd = sockfd;
-		sock->intr_handle.type = RTE_INTR_HANDLE_EXT;
-		ret = rte_intr_callback_register(&sock->intr_handle,
+		if (!is_abstract && (owner_uid != (uid_t)-1 || owner_gid != (gid_t)-1)) {
+			ret = chown(sock->filename, owner_uid, owner_gid);
+			if (ret < 0) {
+				MIF_LOG(ERR, "Failed to change listener socket owner");
+				goto error;
+			}
+		}
+
+		/* Allocate interrupt instance */
+		sock->intr_handle =
+			rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
+		if (sock->intr_handle == NULL) {
+			MIF_LOG(ERR, "Failed to allocate intr handle");
+			goto error;
+		}
+
+		if (rte_intr_fd_set(sock->intr_handle, sockfd))
+			goto error;
+
+		if (rte_intr_type_set(sock->intr_handle, RTE_INTR_HANDLE_EXT))
+			goto error;
+
+		ret = rte_intr_callback_register(sock->intr_handle,
 						 memif_listener_handler, sock);
 		if (ret < 0) {
 			MIF_LOG(ERR, "Failed to register interrupt "
@@ -918,8 +976,10 @@ memif_socket_create(char *key, uint8_t listener)
 
  error:
 	MIF_LOG(ERR, "Failed to setup socket %s: %s", key, strerror(errno));
-	if (sock != NULL)
+	if (sock != NULL) {
+		rte_intr_instance_free(sock->intr_handle);
 		rte_free(sock);
+	}
 	if (sockfd >= 0)
 		close(sockfd);
 	return NULL;
@@ -935,6 +995,7 @@ memif_create_socket_hash(void)
 	params.key_len = MEMIF_SOCKET_UN_SIZE;
 	params.hash_func = rte_jhash;
 	params.hash_func_init_val = 0;
+	params.socket_id = SOCKET_ID_ANY;
 	return rte_hash_create(&params);
 }
 
@@ -963,7 +1024,9 @@ memif_socket_init(struct rte_eth_dev *dev, const char *socket_filename)
 	ret = rte_hash_lookup_data(hash, key, (void **)&socket);
 	if (ret < 0) {
 		socket = memif_socket_create(key,
-					     (pmd->role == MEMIF_ROLE_SLAVE) ? 0 : 1);
+			(pmd->role == MEMIF_ROLE_CLIENT) ? 0 : 1,
+			pmd->flags & ETH_MEMIF_FLAG_SOCKET_ABSTRACT,
+			pmd->owner_uid, pmd->owner_gid);
 		if (socket == NULL)
 			return -1;
 		ret = rte_hash_add_key_data(hash, key, socket);
@@ -1025,7 +1088,7 @@ memif_socket_remove_device(struct rte_eth_dev *dev)
 	/* remove socket, if this was the last device using it */
 	if (TAILQ_EMPTY(&socket->dev_queue)) {
 		rte_hash_del_key(hash, socket->filename);
-		if (socket->listener) {
+		if (socket->listener && !(pmd->flags & ETH_MEMIF_FLAG_SOCKET_ABSTRACT)) {
 			/* remove listener socket file,
 			 * so we can create new one later.
 			 */
@@ -1034,12 +1097,14 @@ memif_socket_remove_device(struct rte_eth_dev *dev)
 				MIF_LOG(ERR, "Failed to remove socket file: %s",
 					socket->filename);
 		}
+		if (pmd->role != MEMIF_ROLE_CLIENT)
+			rte_intr_instance_free(socket->intr_handle);
 		rte_free(socket);
 	}
 }
 
 int
-memif_connect_master(struct rte_eth_dev *dev)
+memif_connect_server(struct rte_eth_dev *dev)
 {
 	struct pmd_internals *pmd = dev->data->dev_private;
 
@@ -1050,11 +1115,12 @@ memif_connect_master(struct rte_eth_dev *dev)
 }
 
 int
-memif_connect_slave(struct rte_eth_dev *dev)
+memif_connect_client(struct rte_eth_dev *dev)
 {
 	int sockfd;
 	int ret;
-	struct sockaddr_un sun;
+	uint32_t sunlen;
+	struct sockaddr_un sun = { 0 };
 	struct pmd_internals *pmd = dev->data->dev_private;
 
 	memset(pmd->local_disc_string, 0, ETH_MEMIF_DISC_STRING_SIZE);
@@ -1068,11 +1134,19 @@ memif_connect_slave(struct rte_eth_dev *dev)
 	}
 
 	sun.sun_family = AF_UNIX;
+	sunlen = sizeof(struct sockaddr_un);
+	if (pmd->flags & ETH_MEMIF_FLAG_SOCKET_ABSTRACT) {
+		/* abstract address */
+		sun.sun_path[0] = '\0';
+		strlcpy(sun.sun_path + 1,  pmd->socket_filename, MEMIF_SOCKET_UN_SIZE - 1);
+		sunlen = RTE_MIN(strlen(pmd->socket_filename) + 1,
+				 MEMIF_SOCKET_UN_SIZE) +
+			 sizeof(sun) - sizeof(sun.sun_path);
+	} else {
+		strlcpy(sun.sun_path,  pmd->socket_filename, MEMIF_SOCKET_UN_SIZE);
+	}
 
-	memcpy(sun.sun_path, pmd->socket_filename, sizeof(sun.sun_path) - 1);
-
-	ret = connect(sockfd, (struct sockaddr *)&sun,
-		      sizeof(struct sockaddr_un));
+	ret = connect(sockfd, (struct sockaddr *)&sun, sunlen);
 	if (ret < 0) {
 		MIF_LOG(ERR, "Failed to connect socket: %s.", pmd->socket_filename);
 		goto error;
@@ -1087,13 +1161,25 @@ memif_connect_slave(struct rte_eth_dev *dev)
 		goto error;
 	}
 
-	pmd->cc->intr_handle.fd = sockfd;
-	pmd->cc->intr_handle.type = RTE_INTR_HANDLE_EXT;
+	/* Allocate interrupt instance */
+	pmd->cc->intr_handle =
+		rte_intr_instance_alloc(RTE_INTR_INSTANCE_F_SHARED);
+	if (pmd->cc->intr_handle == NULL) {
+		MIF_LOG(ERR, "Failed to allocate intr handle");
+		goto error;
+	}
+
+	if (rte_intr_fd_set(pmd->cc->intr_handle, sockfd))
+		goto error;
+
+	if (rte_intr_type_set(pmd->cc->intr_handle, RTE_INTR_HANDLE_EXT))
+		goto error;
+
 	pmd->cc->socket = NULL;
 	pmd->cc->dev = dev;
 	TAILQ_INIT(&pmd->cc->msg_queue);
 
-	ret = rte_intr_callback_register(&pmd->cc->intr_handle,
+	ret = rte_intr_callback_register(pmd->cc->intr_handle,
 					 memif_intr_handler, pmd->cc);
 	if (ret < 0) {
 		MIF_LOG(ERR, "Failed to register interrupt callback for control fd");
@@ -1108,6 +1194,7 @@ memif_connect_slave(struct rte_eth_dev *dev)
 		sockfd = -1;
 	}
 	if (pmd->cc != NULL) {
+		rte_intr_instance_free(pmd->cc->intr_handle);
 		rte_free(pmd->cc);
 		pmd->cc = NULL;
 	}

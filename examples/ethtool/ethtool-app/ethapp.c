@@ -2,6 +2,8 @@
  * Copyright(c) 2015 Intel Corporation
  */
 
+#include <stdlib.h>
+
 #include <cmdline_parse.h>
 #include <cmdline_parse_num.h>
 #include <cmdline_parse_string.h>
@@ -49,6 +51,13 @@ struct pcmd_intintint_params {
 	uint16_t rx;
 };
 
+struct pcmd_pause_params {
+	cmdline_fixed_string_t cmd;
+	uint16_t port;
+	cmdline_fixed_string_t mode;
+	cmdline_fixed_string_t autoneg;
+	cmdline_fixed_string_t an_status;
+};
 
 /* Parameter-less commands */
 cmdline_parse_token_string_t pcmd_quit_token_cmd =
@@ -70,7 +79,7 @@ cmdline_parse_token_string_t pcmd_rxmode_token_cmd =
 cmdline_parse_token_string_t pcmd_portstats_token_cmd =
 	TOKEN_STRING_INITIALIZER(struct pcmd_int_params, cmd, "portstats");
 cmdline_parse_token_num_t pcmd_int_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_int_params, port, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_int_params, port, RTE_UINT16);
 
 /* Commands taking port id and string */
 cmdline_parse_token_string_t pcmd_eeprom_token_cmd =
@@ -84,7 +93,7 @@ cmdline_parse_token_string_t pcmd_regs_token_cmd =
 	TOKEN_STRING_INITIALIZER(struct pcmd_intstr_params, cmd, "regs");
 
 cmdline_parse_token_num_t pcmd_intstr_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intstr_params, port, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_intstr_params, port, RTE_UINT16);
 cmdline_parse_token_string_t pcmd_intstr_token_opt =
 	TOKEN_STRING_INITIALIZER(struct pcmd_intstr_params, opt, NULL);
 
@@ -92,7 +101,7 @@ cmdline_parse_token_string_t pcmd_intstr_token_opt =
 cmdline_parse_token_string_t pcmd_macaddr_token_cmd =
 	TOKEN_STRING_INITIALIZER(struct pcmd_intmac_params, cmd, "macaddr");
 cmdline_parse_token_num_t pcmd_intmac_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intmac_params, port, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_intmac_params, port, RTE_UINT16);
 cmdline_parse_token_etheraddr_t pcmd_intmac_token_mac =
 	TOKEN_ETHERADDR_INITIALIZER(struct pcmd_intmac_params, mac);
 
@@ -106,31 +115,38 @@ cmdline_parse_token_string_t pcmd_ringparam_token_cmd =
 	TOKEN_STRING_INITIALIZER(struct pcmd_intintint_params, cmd,
 		"ringparam");
 cmdline_parse_token_num_t pcmd_intintint_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, port, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, port,
+		RTE_UINT16);
 cmdline_parse_token_num_t pcmd_intintint_token_tx =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, tx, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, tx, RTE_UINT16);
 cmdline_parse_token_num_t pcmd_intintint_token_rx =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, rx, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_intintint_params, rx, RTE_UINT16);
 
 
 /* Pause commands */
 cmdline_parse_token_string_t pcmd_pause_token_cmd =
-	TOKEN_STRING_INITIALIZER(struct pcmd_intstr_params, cmd, "pause");
+	TOKEN_STRING_INITIALIZER(struct pcmd_pause_params, cmd, "pause");
 cmdline_parse_token_num_t pcmd_pause_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_intstr_params, port, UINT16);
-cmdline_parse_token_string_t pcmd_pause_token_opt =
-	TOKEN_STRING_INITIALIZER(struct pcmd_intstr_params,
-		opt, "all#tx#rx#none");
+	TOKEN_NUM_INITIALIZER(struct pcmd_pause_params, port, RTE_UINT16);
+cmdline_parse_token_string_t pcmd_pause_token_mode =
+	TOKEN_STRING_INITIALIZER(struct pcmd_pause_params,
+		mode, "full#tx#rx#none");
+cmdline_parse_token_string_t pcmd_pause_token_autoneg =
+	TOKEN_STRING_INITIALIZER(struct pcmd_pause_params,
+		autoneg, "autoneg");
+cmdline_parse_token_string_t pcmd_pause_token_an_status =
+	TOKEN_STRING_INITIALIZER(struct pcmd_pause_params,
+		an_status, "on#off");
 
 /* VLAN commands */
 cmdline_parse_token_string_t pcmd_vlan_token_cmd =
 	TOKEN_STRING_INITIALIZER(struct pcmd_vlan_params, cmd, "vlan");
 cmdline_parse_token_num_t pcmd_vlan_token_port =
-	TOKEN_NUM_INITIALIZER(struct pcmd_vlan_params, port, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_vlan_params, port, RTE_UINT16);
 cmdline_parse_token_string_t pcmd_vlan_token_mode =
 	TOKEN_STRING_INITIALIZER(struct pcmd_vlan_params, mode, "add#del");
 cmdline_parse_token_num_t pcmd_vlan_token_vid =
-	TOKEN_NUM_INITIALIZER(struct pcmd_vlan_params, vid, UINT16);
+	TOKEN_NUM_INITIALIZER(struct pcmd_vlan_params, vid, RTE_UINT16);
 
 
 static void
@@ -347,13 +363,12 @@ pcmd_module_eeprom_callback(void *ptr_params,
 	fclose(fp_eeprom);
 }
 
-
 static void
 pcmd_pause_callback(void *ptr_params,
 	__rte_unused struct cmdline *ctx,
 	void *ptr_data)
 {
-	struct pcmd_intstr_params *params = ptr_params;
+	struct pcmd_pause_params *params = ptr_params;
 	struct ethtool_pauseparam info;
 	int stat;
 
@@ -365,38 +380,37 @@ pcmd_pause_callback(void *ptr_params,
 		stat = rte_ethtool_get_pauseparam(params->port, &info);
 	} else {
 		memset(&info, 0, sizeof(info));
-		if (strcasecmp("all", params->opt) == 0) {
+		if (strcasecmp("full", params->mode) == 0) {
 			info.tx_pause = 1;
 			info.rx_pause = 1;
-		} else if (strcasecmp("tx", params->opt) == 0) {
+		} else if (strcasecmp("tx", params->mode) == 0) {
 			info.tx_pause = 1;
 			info.rx_pause = 0;
-		} else if (strcasecmp("rx", params->opt) == 0) {
+		} else if (strcasecmp("rx", params->mode) == 0) {
 			info.tx_pause = 0;
 			info.rx_pause = 1;
 		} else {
 			info.tx_pause = 0;
 			info.rx_pause = 0;
 		}
-		/* Assume auto-negotiation wanted */
-		info.autoneg = 1;
+
+		if (strcasecmp("on", params->an_status) == 0)
+			info.autoneg = 1;
+		else
+			info.autoneg = 0;
+
 		stat = rte_ethtool_set_pauseparam(params->port, &info);
 	}
 	if (stat == 0) {
-		if (info.rx_pause && info.tx_pause)
-			printf("Port %i: Tx & Rx Paused\n", params->port);
-		else if (info.rx_pause)
-			printf("Port %i: Rx Paused\n", params->port);
-		else if (info.tx_pause)
-			printf("Port %i: Tx Paused\n", params->port);
-		else
-			printf("Port %i: Tx & Rx not paused\n", params->port);
+		printf("Pause parameters for Port %i:\n", params->port);
+		printf("Rx pause: %s\n", info.rx_pause ? "on" : "off");
+		printf("Tx pause: %s\n", info.tx_pause ? "on" : "off");
+		printf("Autoneg: %s\n", info.autoneg ? "on" : "off");
 	} else if (stat == -ENOTSUP)
 		printf("Port %i: Operation not supported\n", params->port);
 	else
 		printf("Port %i: Error %i\n", params->port, stat);
 }
-
 
 static void
 pcmd_open_callback(__rte_unused void *ptr_params,
@@ -497,14 +511,8 @@ pcmd_macaddr_callback(void *ptr_params,
 		stat = rte_ethtool_net_get_mac_addr(params->port, &mac_addr);
 		if (stat == 0) {
 			printf(
-				"Port %i MAC Address: %02x:%02x:%02x:%02x:%02x:%02x\n",
-				params->port,
-				mac_addr.addr_bytes[0],
-				mac_addr.addr_bytes[1],
-				mac_addr.addr_bytes[2],
-				mac_addr.addr_bytes[3],
-				mac_addr.addr_bytes[4],
-				mac_addr.addr_bytes[5]);
+				"Port %i MAC Address: " RTE_ETHER_ADDR_PRT_FMT "\n",
+				params->port, RTE_ETHER_ADDR_BYTES(&mac_addr));
 			return;
 		}
 	}
@@ -527,7 +535,6 @@ pcmd_mtu_callback(void *ptr_params,
 		printf("Error: Invalid port number %i\n", params->port);
 		return;
 	}
-	new_mtu = atoi(params->opt);
 	new_mtu = strtoul(params->opt, &ptr_parse_end, 10);
 	if (*ptr_parse_end != '\0' ||
 			new_mtu < RTE_ETHER_MIN_MTU ||
@@ -741,11 +748,13 @@ cmdline_parse_inst_t pcmd_pause = {
 	.f = pcmd_pause_callback,
 	.data = NULL,
 	.help_str =
-		"pause <port_id> <all|tx|rx|none>\n     Pause/unpause port",
+		"pause <port_id> <full|tx|rx|none> autoneg <on|off>\n     Pause/unpause port",
 	.tokens = {
 		(void *)&pcmd_pause_token_cmd,
 		(void *)&pcmd_pause_token_port,
-		(void *)&pcmd_pause_token_opt,
+		(void *)&pcmd_pause_token_mode,
+		(void *)&pcmd_pause_token_autoneg,
+		(void *)&pcmd_pause_token_an_status,
 		NULL
 	},
 };

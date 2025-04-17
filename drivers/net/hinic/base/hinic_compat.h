@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <rte_common.h>
+#include <rte_bitops.h>
 #include <rte_byteorder.h>
 #include <rte_memzone.h>
 #include <rte_memcpy.h>
@@ -116,38 +117,6 @@ extern int hinic_logtype;
 
 #define HINIC_PAGE_SIZE_DPDK	6
 
-static inline int hinic_test_bit(int nr, volatile unsigned long *addr)
-{
-	int res;
-
-	res = ((*addr) & (1UL << nr)) != 0;
-	return res;
-}
-
-static inline void hinic_set_bit(unsigned int nr, volatile unsigned long *addr)
-{
-	__sync_fetch_and_or(addr, (1UL << nr));
-}
-
-static inline void hinic_clear_bit(int nr, volatile unsigned long *addr)
-{
-	__sync_fetch_and_and(addr, ~(1UL << nr));
-}
-
-static inline int hinic_test_and_clear_bit(int nr, volatile unsigned long *addr)
-{
-	unsigned long mask = (1UL << nr);
-
-	return __sync_fetch_and_and(addr, ~mask) & mask;
-}
-
-static inline int hinic_test_and_set_bit(int nr, volatile unsigned long *addr)
-{
-	unsigned long mask = (1UL << nr);
-
-	return __sync_fetch_and_or(addr, mask) & mask;
-}
-
 void *dma_zalloc_coherent(void *dev, size_t size, dma_addr_t *dma_handle,
 			  unsigned int socket_id);
 
@@ -197,16 +166,24 @@ static inline u32 readl(const volatile void *addr)
 #define spin_lock(spinlock_prt)		rte_spinlock_lock(spinlock_prt)
 #define spin_unlock(spinlock_prt)	rte_spinlock_unlock(spinlock_prt)
 
-static inline unsigned long get_timeofday_ms(void)
+#ifdef CLOCK_MONOTONIC_RAW /* Defined in glibc bits/time.h */
+#define CLOCK_TYPE CLOCK_MONOTONIC_RAW
+#else
+#define CLOCK_TYPE CLOCK_MONOTONIC
+#endif
+#define HINIC_MUTEX_TIMEOUT  10
+
+static inline unsigned long clock_gettime_ms(void)
 {
-	struct timeval tv;
+	struct timespec tv;
 
-	(void)gettimeofday(&tv, NULL);
+	(void)clock_gettime(CLOCK_TYPE, &tv);
 
-	return (unsigned long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+	return (unsigned long)tv.tv_sec * 1000 +
+	       (unsigned long)tv.tv_nsec / 1000000;
 }
 
-#define jiffies	get_timeofday_ms()
+#define jiffies	clock_gettime_ms()
 #define msecs_to_jiffies(ms)	(ms)
 #define time_before(now, end)	((now) < (end))
 
@@ -249,24 +226,14 @@ static inline int hinic_mutex_destroy(pthread_mutex_t *pthreadmutex)
 static inline int hinic_mutex_lock(pthread_mutex_t *pthreadmutex)
 {
 	int err;
+	struct timespec tout;
 
-	err = pthread_mutex_lock(pthreadmutex);
-	if (!err) {
-		return err;
-	} else if (err == EOWNERDEAD) {
-		PMD_DRV_LOG(ERR, "Mutex lock failed. (ErrorNo=%d)", errno);
-#if defined(__GLIBC__)
-#if __GLIBC_PREREQ(2, 12)
-		(void)pthread_mutex_consistent(pthreadmutex);
-#else
-		(void)pthread_mutex_consistent_np(pthreadmutex);
-#endif
-#else
-		(void)pthread_mutex_consistent(pthreadmutex);
-#endif
-	} else {
-		PMD_DRV_LOG(ERR, "Mutex lock failed. (ErrorNo=%d)", errno);
-	}
+	(void)clock_gettime(CLOCK_TYPE, &tout);
+
+	tout.tv_sec += HINIC_MUTEX_TIMEOUT;
+	err = pthread_mutex_timedlock(pthreadmutex, &tout);
+	if (err)
+		PMD_DRV_LOG(ERR, "Mutex lock failed. (ErrorNo=%d)", err);
 
 	return err;
 }

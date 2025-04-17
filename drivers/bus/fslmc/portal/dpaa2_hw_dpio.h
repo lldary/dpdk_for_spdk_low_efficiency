@@ -11,12 +11,11 @@
 #include <mc/fsl_dpio.h>
 #include <mc/fsl_mc_sys.h>
 
+#include <rte_compat.h>
+
 struct dpaa2_io_portal_t {
 	struct dpaa2_dpio_dev *dpio_dev;
 	struct dpaa2_dpio_dev *ethrx_dpio_dev;
-	uint64_t net_tid;
-	uint64_t sec_tid;
-	void *eventdev;
 };
 
 /*! Global per thread DPIO portal */
@@ -27,6 +26,13 @@ RTE_DECLARE_PER_LCORE(struct dpaa2_io_portal_t, _dpaa2_io);
 
 #define DPAA2_PER_LCORE_ETHRX_DPIO RTE_PER_LCORE(_dpaa2_io).ethrx_dpio_dev
 #define DPAA2_PER_LCORE_ETHRX_PORTAL DPAA2_PER_LCORE_ETHRX_DPIO->sw_portal
+
+#define DPAA2_PER_LCORE_DQRR_SIZE \
+	RTE_PER_LCORE(_dpaa2_io).dpio_dev->dpaa2_held_bufs.dqrr_size
+#define DPAA2_PER_LCORE_DQRR_HELD \
+	RTE_PER_LCORE(_dpaa2_io).dpio_dev->dpaa2_held_bufs.dqrr_held
+#define DPAA2_PER_LCORE_DQRR_MBUF(i) \
+	RTE_PER_LCORE(_dpaa2_io).dpio_dev->dpaa2_held_bufs.mbuf[i]
 
 /* Variable to store DPAA2 DQRR size */
 extern uint8_t dpaa2_dqrr_size;

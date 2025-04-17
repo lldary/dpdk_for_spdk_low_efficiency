@@ -235,7 +235,7 @@ static void i40e_parse_ieee_app_tlv(struct i40e_lldp_org_tlv *tlv,
 }
 
 /**
- * i40e_parse_ieee_etsrec_tlv
+ * i40e_parse_ieee_tlv
  * @tlv: IEEE 802.1Qaz TLV
  * @dcbcfg: Local store to update ETS REC data
  *
@@ -315,8 +315,14 @@ static void i40e_parse_cee_pgcfg_tlv(struct i40e_cee_feat_tlv *tlv,
 	 *        |pg0|pg1|pg2|pg3|pg4|pg5|pg6|pg7|
 	 *        ---------------------------------
 	 */
-	for (i = 0; i < I40E_MAX_TRAFFIC_CLASS; i++)
+	for (i = 0; i < I40E_MAX_TRAFFIC_CLASS; i++) {
 		etscfg->tcbwtable[i] = buf[offset++];
+
+		if (etscfg->prioritytable[i] == I40E_CEE_PGID_STRICT)
+			dcbcfg->etscfg.tsatable[i] = I40E_IEEE_TSA_STRICT;
+		else
+			dcbcfg->etscfg.tsatable[i] = I40E_IEEE_TSA_ETS;
+	}
 
 	/* Number of TCs supported (1 octet) */
 	etscfg->maxtcs = buf[offset];
@@ -1267,7 +1273,8 @@ enum i40e_status_code i40e_set_dcb_config(struct i40e_hw *hw)
 
 /**
  * i40e_dcb_config_to_lldp - Convert Dcbconfig to MIB format
- * @hw: pointer to the hw struct
+ * @lldpmib: pointer to mib to be output
+ * @miblen: pointer to u16 for length of lldpmib
  * @dcbcfg: store for LLDPDU data
  *
  * send DCB configuration to FW

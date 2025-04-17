@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2020 Broadcom
+ * Copyright(c) 2014-2023 Broadcom
  * All rights reserved.
  */
 
@@ -8,7 +8,7 @@
 
 #include <rte_log.h>
 #include "bnxt.h"
-#include "ulp_template_db.h"
+#include "ulp_template_db_enum.h"
 #include "ulp_template_struct.h"
 #include "bnxt_tf_common.h"
 
@@ -27,5 +27,4 @@ ulp_matcher_pattern_match(struct ulp_rte_parser_params *params,
 int32_t
 ulp_matcher_action_match(struct ulp_rte_parser_params *params,
 			 uint32_t *act_id);
-
 #endif /* ULP_MATCHER_H_ */

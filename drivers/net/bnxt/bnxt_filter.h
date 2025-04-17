@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright(c) 2014-2018 Broadcom
+ * Copyright(c) 2014-2023 Broadcom
  * All rights reserved.
  */
 
@@ -43,6 +43,7 @@ struct bnxt_filter_info {
 #define HWRM_CFA_EM_FILTER	1
 #define HWRM_CFA_NTUPLE_FILTER	2
 #define HWRM_CFA_TUNNEL_REDIRECT_FILTER	3
+#define HWRM_CFA_CONFIG		4
 	uint8_t                 filter_type;
 	uint32_t                dst_id;
 
@@ -172,4 +173,8 @@ struct bnxt_filter_info *bnxt_get_l2_filter(struct bnxt *bp,
 	HWRM_CFA_L2_FILTER_ALLOC_INPUT_ENABLES_T_NUM_VLANS
 #define L2_FILTER_ALLOC_INPUT_EN_NUM_VLANS \
 	HWRM_CFA_L2_FILTER_ALLOC_INPUT_ENABLES_NUM_VLANS
+#define CFA_FLTR_ALLOC_INPUT_IP_ADDR_TYPE_IPV4 \
+	HWRM_CFA_NTUPLE_FILTER_ALLOC_INPUT_IP_ADDR_TYPE_IPV4
+#define CFA_NTUPLE_FILTER_ALLOC_REQ_TUNNEL_TYPE_GENEVE	\
+	HWRM_CFA_NTUPLE_FILTER_ALLOC_INPUT_TUNNEL_TYPE_GENEVE
 #endif

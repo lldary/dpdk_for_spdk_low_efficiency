@@ -4,45 +4,8 @@
 DPDK Release 18.02
 ==================
 
-.. **Read this first.**
-
-   The text in the sections below explains how to update the release notes.
-
-   Use proper spelling, capitalization and punctuation in all sections.
-
-   Variable and config names should be quoted as fixed width text:
-   ``LIKE_THIS``.
-
-   Build the docs and view the output file to ensure the changes are correct::
-
-      make doc-guides-html
-
-      xdg-open build/doc/html/guides/rel_notes/release_18_02.html
-
-
 New Features
 ------------
-
-.. This section should contain new features added in this release. Sample
-   format:
-
-   * **Add a title in the past tense with a full stop.**
-
-     Add a short 1-2 sentence description in the past tense. The description
-     should be enough to allow someone scanning the release notes to
-     understand the new feature.
-
-     If the feature adds a lot of sub-features you can use a bullet list like
-     this:
-
-     * Added feature foo to do something.
-     * Enhanced feature bar to do something else.
-
-     Refer to the previous release notes for examples.
-
-     This section is a comment. do not overwrite or remove it.
-     Also, make sure to start the actual text at the margin.
-     =========================================================
 
 * **Added function to allow releasing internal EAL resources on exit.**
 
@@ -142,9 +105,9 @@ New Features
   * ``VIRTIO_NET_F_GUEST_UFO``, ``VIRTIO_NET_F_HOST_UFO``
   * ``VIRTIO_NET_F_GSO``
 
-  Also added ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature support in virtio pmd.
+  Also added ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature support in virtio PMD.
   In a scenario where the vhost backend doesn't have the ability to generate
-  RARP packets, the VM running virtio pmd can still be live migrated if
+  RARP packets, the VM running virtio PMD can still be live migrated if
   ``VIRTIO_NET_F_GUEST_ANNOUNCE`` feature is negotiated.
 
 * **Updated the AESNI-MB PMD.**
@@ -260,17 +223,6 @@ New Features
 Shared Library Versions
 -----------------------
 
-.. Update any library version updated in this release and prepend with a ``+``
-   sign, like this:
-
-     librte_acl.so.2
-   + librte_cfgfile.so.2
-     librte_cmdline.so.2
-
-   This section is a comment. do not overwrite or remove it.
-   =========================================================
-
-
 The libraries prepended with a plus sign were incremented in this version.
 
 .. code-block:: diff
@@ -326,25 +278,8 @@ The libraries prepended with a plus sign were incremented in this version.
      librte_vhost.so.3
 
 
-
 Tested Platforms
 ----------------
-
-.. This section should contain a list of platforms that were tested with this
-   release.
-
-   The format is:
-
-   * <vendor> platform with <vendor> <type of devices> combinations
-
-     * List of CPU
-     * List of OS
-     * List of devices
-     * Other relevant details...
-
-   This section is a comment. do not overwrite or remove it.
-   Also, make sure to start the actual text at the margin.
-   =========================================================
 
 * Intel(R) platforms with Intel(R) NICs combinations
 

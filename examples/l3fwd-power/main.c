@@ -24,7 +24,6 @@
 #include <rte_memcpy.h>
 #include <rte_eal.h>
 #include <rte_launch.h>
-#include <rte_atomic.h>
 #include <rte_cycles.h>
 #include <rte_prefetch.h>
 #include <rte_lcore.h>
@@ -44,14 +43,16 @@
 #include <rte_timer.h>
 #include <rte_power.h>
 #include <rte_spinlock.h>
-#include <rte_power_empty_poll.h>
 #include <rte_metrics.h>
 #include <rte_telemetry.h>
+#include <rte_power_pmd_mgmt.h>
+#include <rte_power_uncore.h>
 
 #include "perf_core.h"
 #include "main.h"
 
-#define RTE_LOGTYPE_L3FWD_POWER RTE_LOGTYPE_USER1
+RTE_LOG_REGISTER(l3fwd_power_logtype, l3fwd.power, INFO);
+#define RTE_LOGTYPE_L3FWD_POWER l3fwd_power_logtype
 
 #define MAX_PKT_BURST 32
 
@@ -121,21 +122,13 @@
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 1024
-#define RTE_TEST_TX_DESC_DEFAULT 1024
-
-/*
- * These two thresholds were decided on by running the training algorithm on
- * a 2.5GHz Xeon. These defaults can be overridden by supplying non-zero values
- * for the med_threshold and high_threshold parameters on the command line.
- */
-#define EMPTY_POLL_MED_THRESHOLD 350000UL
-#define EMPTY_POLL_HGH_THRESHOLD 580000UL
+#define RX_DESC_DEFAULT 1024
+#define TX_DESC_DEFAULT 1024
 
 #define NUM_TELSTATS RTE_DIM(telstats_strings)
 
-static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
-static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
+static uint16_t nb_rxd = RX_DESC_DEFAULT;
+static uint16_t nb_txd = TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
 static struct rte_ether_addr ports_eth_addr[RTE_MAX_ETHPORTS];
@@ -149,17 +142,15 @@ static uint32_t enabled_port_mask = 0;
 static int promiscuous_on = 0;
 /* NUMA is enabled by default. */
 static int numa_on = 1;
-static bool empty_poll_stop;
-static bool empty_poll_train;
 volatile bool quit_signal;
-static struct  ep_params *ep_params;
-static struct  ep_policy policy;
-static long  ep_med_edpi, ep_hgh_edpi;
 /* timer to update telemetry every 500ms */
 static struct rte_timer telemetry_timer;
 
 /* stats index returned by metrics lib */
 int telstats_index;
+
+/* flag to check if uncore option enabled */
+int enabled_uncore = -1;
 
 struct telstats_name {
 	char name[RTE_ETH_XSTATS_NAME_SIZE];
@@ -179,6 +170,12 @@ enum busy_rate {
 	FULL = 100
 };
 
+enum uncore_choice {
+	UNCORE_MIN = 0,
+	UNCORE_MAX = 1,
+	UNCORE_IDX = 2
+};
+
 /* reference poll count to measure core busyness */
 #define DEFAULT_COUNT 10000
 /*
@@ -195,12 +192,17 @@ static int parse_ptype; /**< Parse packet type using rx callback, and */
 			/**< disabled by default */
 
 enum appmode {
-	APP_MODE_LEGACY = 0,
-	APP_MODE_EMPTY_POLL,
-	APP_MODE_TELEMETRY
+	APP_MODE_DEFAULT = 0,
+	APP_MODE_LEGACY,
+	APP_MODE_TELEMETRY,
+	APP_MODE_INTERRUPT,
+	APP_MODE_PMD_MGMT
 };
 
 enum appmode app_mode;
+
+static enum rte_power_pmd_mgmt_type pmgmt_type;
+bool baseline_enabled;
 
 enum freq_scale_hint_t
 {
@@ -243,24 +245,25 @@ uint16_t nb_lcore_params = RTE_DIM(lcore_params_array_default);
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
-		.mq_mode        = ETH_MQ_RX_RSS,
-		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
-		.split_hdr_size = 0,
-		.offloads = DEV_RX_OFFLOAD_CHECKSUM,
+		.mq_mode        = RTE_ETH_MQ_RX_RSS,
+		.offloads = RTE_ETH_RX_OFFLOAD_CHECKSUM,
 	},
 	.rx_adv_conf = {
 		.rss_conf = {
 			.rss_key = NULL,
-			.rss_hf = ETH_RSS_UDP,
+			.rss_hf = RTE_ETH_RSS_UDP,
 		},
 	},
 	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
-	},
-	.intr_conf = {
-		.rxq = 1,
-	},
+		.mq_mode = RTE_ETH_MQ_TX_NONE,
+	}
 };
+
+static uint32_t max_pkt_len;
+static uint32_t max_empty_polls = 512;
+static uint32_t pause_duration = 1;
+static uint32_t scale_freq_min;
+static uint32_t scale_freq_max;
 
 static struct rte_mempool * pktmbuf_pool[NB_SOCKETS];
 
@@ -406,14 +409,6 @@ static inline uint32_t power_idle_heuristic(uint32_t zero_rx_packet_count);
 static inline enum freq_scale_hint_t power_freq_scaleup_heuristic( \
 		unsigned int lcore_id, uint16_t port_id, uint16_t queue_id);
 
-
-/*
- * These defaults are using the max frequency index (1), a medium index (9)
- * and a typical low frequency index (14). These can be adjusted to use
- * different indexes using the relevant command line parameters.
- */
-static uint8_t  freq_tlb[] = {14, 9, 1};
-
 static int is_done(void)
 {
 	return quit_signal;
@@ -429,7 +424,7 @@ signal_exit_now(int sigtype)
 
 }
 
-/*  Freqency scale down timer callback */
+/*  Frequency scale down timer callback */
 static void
 power_timer_cb(__rte_unused struct rte_timer *tim,
 			  __rte_unused void *arg)
@@ -501,7 +496,15 @@ is_valid_ipv4_pkt(struct rte_ipv4_hdr *pkt, uint32_t link_len)
 		return -1;
 
 	/* 2. The IP checksum must be correct. */
-	/* this is checked in H/W */
+	/* if this is not checked in H/W, check it. */
+	if ((port_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) == 0) {
+		uint16_t actual_cksum, expected_cksum;
+		actual_cksum = pkt->hdr_checksum;
+		pkt->hdr_checksum = 0;
+		expected_cksum = rte_ipv4_cksum(pkt);
+		if (actual_cksum != expected_cksum)
+			return -2;
+	}
 
 	/*
 	 * 3. The IP version number must be 4. If the version number is not 4
@@ -713,7 +716,7 @@ l3fwd_simple_forward(struct rte_mbuf *m, uint16_t portid,
 			dst_port = portid;
 
 		/* 02:00:00:00:00:xx */
-		d_addr_bytes = &eth_hdr->d_addr.addr_bytes[0];
+		d_addr_bytes = &eth_hdr->dst_addr.addr_bytes[0];
 		*((uint64_t *)d_addr_bytes) =
 			0x000000000002 + ((uint64_t)dst_port << 40);
 
@@ -725,7 +728,7 @@ l3fwd_simple_forward(struct rte_mbuf *m, uint16_t portid,
 
 		/* src addr */
 		rte_ether_addr_copy(&ports_eth_addr[dst_port],
-				&eth_hdr->s_addr);
+				&eth_hdr->src_addr);
 
 		send_single_packet(m, dst_port);
 	} else if (RTE_ETH_IS_IPV6_HDR(m->packet_type)) {
@@ -745,13 +748,13 @@ l3fwd_simple_forward(struct rte_mbuf *m, uint16_t portid,
 			dst_port = portid;
 
 		/* 02:00:00:00:00:xx */
-		d_addr_bytes = &eth_hdr->d_addr.addr_bytes[0];
+		d_addr_bytes = &eth_hdr->dst_addr.addr_bytes[0];
 		*((uint64_t *)d_addr_bytes) =
 			0x000000000002 + ((uint64_t)dst_port << 40);
 
 		/* src addr */
 		rte_ether_addr_copy(&ports_eth_addr[dst_port],
-				&eth_hdr->s_addr);
+				&eth_hdr->src_addr);
 
 		send_single_packet(m, dst_port);
 #else
@@ -822,20 +825,23 @@ power_freq_scaleup_heuristic(unsigned lcore_id,
  *  0 on success
  */
 static int
-sleep_until_rx_interrupt(int num)
+sleep_until_rx_interrupt(int num, int lcore)
 {
 	/*
 	 * we want to track when we are woken up by traffic so that we can go
-	 * back to sleep again without log spamming.
+	 * back to sleep again without log spamming. Avoid cache line sharing
+	 * to prevent threads stepping on each others' toes.
 	 */
-	static bool timeout;
+	static struct {
+		bool wakeup;
+	} __rte_cache_aligned status[RTE_MAX_LCORE];
 	struct rte_epoll_event event[num];
 	int n, i;
 	uint16_t port_id;
 	uint8_t queue_id;
 	void *data;
 
-	if (!timeout) {
+	if (status[lcore].wakeup) {
 		RTE_LOG(INFO, L3FWD_POWER,
 				"lcore %u sleeps until interrupt triggers\n",
 				rte_lcore_id());
@@ -852,7 +858,7 @@ sleep_until_rx_interrupt(int num)
 			" port %d queue %d\n",
 			rte_lcore_id(), port_id, queue_id);
 	}
-	timeout = n == 0;
+	status[lcore].wakeup = n != 0;
 
 	return 0;
 }
@@ -903,6 +909,172 @@ static int event_register(struct lcore_conf *qconf)
 
 	return 0;
 }
+
+/* Main processing loop. 8< */
+static int main_intr_loop(__rte_unused void *dummy)
+{
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	unsigned int lcore_id;
+	uint64_t prev_tsc, diff_tsc, cur_tsc;
+	int i, j, nb_rx;
+	uint8_t queueid;
+	uint16_t portid;
+	struct lcore_conf *qconf;
+	struct lcore_rx_queue *rx_queue;
+	uint32_t lcore_rx_idle_count = 0;
+	uint32_t lcore_idle_hint = 0;
+	int intr_en = 0;
+
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) /
+				   US_PER_S * BURST_TX_DRAIN_US;
+
+	prev_tsc = 0;
+
+	lcore_id = rte_lcore_id();
+	qconf = &lcore_conf[lcore_id];
+
+	if (qconf->n_rx_queue == 0) {
+		RTE_LOG(INFO, L3FWD_POWER, "lcore %u has nothing to do\n",
+				lcore_id);
+		return 0;
+	}
+
+	RTE_LOG(INFO, L3FWD_POWER, "entering main interrupt loop on lcore %u\n",
+			lcore_id);
+
+	for (i = 0; i < qconf->n_rx_queue; i++) {
+		portid = qconf->rx_queue_list[i].port_id;
+		queueid = qconf->rx_queue_list[i].queue_id;
+		RTE_LOG(INFO, L3FWD_POWER,
+				" -- lcoreid=%u portid=%u rxqueueid=%hhu\n",
+				lcore_id, portid, queueid);
+	}
+
+	/* add into event wait list */
+	if (event_register(qconf) == 0)
+		intr_en = 1;
+	else
+		RTE_LOG(INFO, L3FWD_POWER, "RX interrupt won't enable.\n");
+
+	while (!is_done()) {
+		stats[lcore_id].nb_iteration_looped++;
+
+		cur_tsc = rte_rdtsc();
+
+		/*
+		 * TX burst queue drain
+		 */
+		diff_tsc = cur_tsc - prev_tsc;
+		if (unlikely(diff_tsc > drain_tsc)) {
+			for (i = 0; i < qconf->n_tx_port; ++i) {
+				portid = qconf->tx_port_id[i];
+				rte_eth_tx_buffer_flush(portid,
+						qconf->tx_queue_id[portid],
+						qconf->tx_buffer[portid]);
+			}
+			prev_tsc = cur_tsc;
+		}
+
+start_rx:
+		/*
+		 * Read packet from RX queues
+		 */
+		lcore_rx_idle_count = 0;
+		for (i = 0; i < qconf->n_rx_queue; ++i) {
+			rx_queue = &(qconf->rx_queue_list[i]);
+			rx_queue->idle_hint = 0;
+			portid = rx_queue->port_id;
+			queueid = rx_queue->queue_id;
+
+			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
+					MAX_PKT_BURST);
+
+			stats[lcore_id].nb_rx_processed += nb_rx;
+			if (unlikely(nb_rx == 0)) {
+				/**
+				 * no packet received from rx queue, try to
+				 * sleep for a while forcing CPU enter deeper
+				 * C states.
+				 */
+				rx_queue->zero_rx_packet_count++;
+
+				if (rx_queue->zero_rx_packet_count <=
+						MIN_ZERO_POLL_COUNT)
+					continue;
+
+				rx_queue->idle_hint = power_idle_heuristic(
+						rx_queue->zero_rx_packet_count);
+				lcore_rx_idle_count++;
+			} else {
+				rx_queue->zero_rx_packet_count = 0;
+			}
+
+			/* Prefetch first packets */
+			for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
+				rte_prefetch0(rte_pktmbuf_mtod(
+						pkts_burst[j], void *));
+			}
+
+			/* Prefetch and forward already prefetched packets */
+			for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
+				rte_prefetch0(rte_pktmbuf_mtod(
+						pkts_burst[j + PREFETCH_OFFSET],
+						void *));
+				l3fwd_simple_forward(
+						pkts_burst[j], portid, qconf);
+			}
+
+			/* Forward remaining prefetched packets */
+			for (; j < nb_rx; j++) {
+				l3fwd_simple_forward(
+						pkts_burst[j], portid, qconf);
+			}
+		}
+
+		if (unlikely(lcore_rx_idle_count == qconf->n_rx_queue)) {
+			/**
+			 * All Rx queues empty in recent consecutive polls,
+			 * sleep in a conservative manner, meaning sleep as
+			 * less as possible.
+			 */
+			for (i = 1,
+			    lcore_idle_hint = qconf->rx_queue_list[0].idle_hint;
+					i < qconf->n_rx_queue; ++i) {
+				rx_queue = &(qconf->rx_queue_list[i]);
+				if (rx_queue->idle_hint < lcore_idle_hint)
+					lcore_idle_hint = rx_queue->idle_hint;
+			}
+
+			if (lcore_idle_hint < SUSPEND_THRESHOLD)
+				/**
+				 * execute "pause" instruction to avoid context
+				 * switch which generally take hundred of
+				 * microseconds for short sleep.
+				 */
+				rte_delay_us(lcore_idle_hint);
+			else {
+				/* suspend until rx interrupt triggers */
+				if (intr_en) {
+					turn_on_off_intr(qconf, 1);
+					sleep_until_rx_interrupt(
+							qconf->n_rx_queue,
+							lcore_id);
+					turn_on_off_intr(qconf, 0);
+					/**
+					 * start receiving packets immediately
+					 */
+					if (likely(!is_done()))
+						goto start_rx;
+				}
+			}
+			stats[lcore_id].sleep_time += lcore_idle_hint;
+		}
+	}
+
+	return 0;
+}
+/* >8 End of main processing loop. */
+
 /* main processing loop */
 static int
 main_telemetry_loop(__rte_unused void *dummy)
@@ -1023,113 +1195,10 @@ main_telemetry_loop(__rte_unused void *dummy)
 
 	return 0;
 }
+
 /* main processing loop */
 static int
-main_empty_poll_loop(__rte_unused void *dummy)
-{
-	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
-	unsigned int lcore_id;
-	uint64_t prev_tsc, diff_tsc, cur_tsc;
-	int i, j, nb_rx;
-	uint8_t queueid;
-	uint16_t portid;
-	struct lcore_conf *qconf;
-	struct lcore_rx_queue *rx_queue;
-
-	const uint64_t drain_tsc =
-		(rte_get_tsc_hz() + US_PER_S - 1) /
-		US_PER_S * BURST_TX_DRAIN_US;
-
-	prev_tsc = 0;
-
-	lcore_id = rte_lcore_id();
-	qconf = &lcore_conf[lcore_id];
-
-	if (qconf->n_rx_queue == 0) {
-		RTE_LOG(INFO, L3FWD_POWER, "lcore %u has nothing to do\n",
-			lcore_id);
-		return 0;
-	}
-
-	for (i = 0; i < qconf->n_rx_queue; i++) {
-		portid = qconf->rx_queue_list[i].port_id;
-		queueid = qconf->rx_queue_list[i].queue_id;
-		RTE_LOG(INFO, L3FWD_POWER, " -- lcoreid=%u portid=%u "
-				"rxqueueid=%hhu\n", lcore_id, portid, queueid);
-	}
-
-	while (!is_done()) {
-		stats[lcore_id].nb_iteration_looped++;
-
-		cur_tsc = rte_rdtsc();
-		/*
-		 * TX burst queue drain
-		 */
-		diff_tsc = cur_tsc - prev_tsc;
-		if (unlikely(diff_tsc > drain_tsc)) {
-			for (i = 0; i < qconf->n_tx_port; ++i) {
-				portid = qconf->tx_port_id[i];
-				rte_eth_tx_buffer_flush(portid,
-						qconf->tx_queue_id[portid],
-						qconf->tx_buffer[portid]);
-			}
-			prev_tsc = cur_tsc;
-		}
-
-		/*
-		 * Read packet from RX queues
-		 */
-		for (i = 0; i < qconf->n_rx_queue; ++i) {
-			rx_queue = &(qconf->rx_queue_list[i]);
-			rx_queue->idle_hint = 0;
-			portid = rx_queue->port_id;
-			queueid = rx_queue->queue_id;
-
-			nb_rx = rte_eth_rx_burst(portid, queueid, pkts_burst,
-					MAX_PKT_BURST);
-
-			stats[lcore_id].nb_rx_processed += nb_rx;
-
-			if (nb_rx == 0) {
-
-				rte_power_empty_poll_stat_update(lcore_id);
-
-				continue;
-			} else {
-				rte_power_poll_stat_update(lcore_id, nb_rx);
-			}
-
-
-			/* Prefetch first packets */
-			for (j = 0; j < PREFETCH_OFFSET && j < nb_rx; j++) {
-				rte_prefetch0(rte_pktmbuf_mtod(
-							pkts_burst[j], void *));
-			}
-
-			/* Prefetch and forward already prefetched packets */
-			for (j = 0; j < (nb_rx - PREFETCH_OFFSET); j++) {
-				rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[
-							j + PREFETCH_OFFSET],
-							void *));
-				l3fwd_simple_forward(pkts_burst[j], portid,
-						qconf);
-			}
-
-			/* Forward remaining prefetched packets */
-			for (; j < nb_rx; j++) {
-				l3fwd_simple_forward(pkts_burst[j], portid,
-						qconf);
-			}
-
-		}
-
-	}
-
-	return 0;
-}
-/* main processing loop */
-static int
-main_loop(__rte_unused void *dummy)
+main_legacy_loop(__rte_unused void *dummy)
 {
 	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 	unsigned lcore_id;
@@ -1310,7 +1379,8 @@ start_rx:
 				if (intr_en) {
 					turn_on_off_intr(qconf, 1);
 					sleep_until_rx_interrupt(
-						qconf->n_rx_queue);
+							qconf->n_rx_queue,
+							lcore_id);
 					turn_on_off_intr(qconf, 0);
 					/**
 					 * start receiving packets immediately
@@ -1351,7 +1421,7 @@ check_lcore_params(void)
 						"off\n", lcore, socketid);
 		}
 		if (app_mode == APP_MODE_TELEMETRY && lcore == rte_lcore_id()) {
-			printf("cannot enable master core %d in config for telemetry mode\n",
+			printf("cannot enable main core %d in config for telemetry mode\n",
 				rte_lcore_id());
 			return -1;
 		}
@@ -1427,22 +1497,48 @@ print_usage(const char *prgname)
 		"  [--config (port,queue,lcore)[,(port,queue,lcore]]"
 		"  [--high-perf-cores CORELIST"
 		"  [--perf-config (port,queue,hi_perf,lcore_index)[,(port,queue,hi_perf,lcore_index]]"
-		"  [--enable-jumbo [--max-pkt-len PKTLEN]]\n"
+		"  [--max-pkt-len PKTLEN]\n"
 		"  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
-		"  -P : enable promiscuous mode\n"
+		"  -P: enable promiscuous mode\n"
+		"  -u: set min/max frequency for uncore to minimum value\n"
+		"  -U: set min/max frequency for uncore to maximum value\n"
+		"  -i (frequency index): set min/max frequency for uncore to specified frequency index\n"
 		"  --config (port,queue,lcore): rx queues configuration\n"
 		"  --high-perf-cores CORELIST: list of high performance cores\n"
 		"  --perf-config: similar as config, cores specified as indices"
 		" for bins containing high or regular performance cores\n"
 		"  --no-numa: optional, disable numa awareness\n"
-		"  --enable-jumbo: enable jumbo frame"
-		" which max packet len is PKTLEN in decimal (64-9600)\n"
+		"  --max-pkt-len PKTLEN: maximum packet length in decimal (64-9600)\n"
 		"  --parse-ptype: parse packet type by software\n"
-		"  --empty-poll: enable empty poll detection"
-		" follow (training_flag, high_threshold, med_threshold)\n"
+		"  --legacy: use legacy interrupt-based scaling\n"
 		" --telemetry: enable telemetry mode, to update"
-		" empty polls, full polls, and core busyness to telemetry\n",
+		" empty polls, full polls, and core busyness to telemetry\n"
+		" --interrupt-only: enable interrupt-only mode\n"
+		" --pmd-mgmt MODE: enable PMD power management mode. "
+		"Currently supported modes: baseline, monitor, pause, scale\n"
+		"  --max-empty-polls MAX_EMPTY_POLLS: number of empty polls to"
+		" wait before entering sleep state\n"
+		"  --pause-duration DURATION: set the duration, in microseconds,"
+		" of the pause callback\n"
+		"  --scale-freq-min FREQ_MIN: set minimum frequency for scaling mode for"
+		" all application lcores (FREQ_MIN must be in kHz, in increments of 100MHz)\n"
+		"  --scale-freq-max FREQ_MAX: set maximum frequency for scaling mode for"
+		" all application lcores (FREQ_MAX must be in kHz, in increments of 100MHz)\n",
 		prgname);
+}
+
+static int
+parse_int(const char *opt)
+{
+	char *end = NULL;
+	unsigned long val;
+
+	/* parse integer string */
+	val = strtoul(opt, &end, 10);
+	if ((opt[0] == '\0') || (end == NULL) || (*end != '\0'))
+		return -1;
+
+	return val;
 }
 
 static int parse_max_pkt_len(const char *pktlen)
@@ -1462,6 +1558,80 @@ static int parse_max_pkt_len(const char *pktlen)
 }
 
 static int
+parse_uncore_options(enum uncore_choice choice, const char *argument)
+{
+	unsigned int die, pkg, max_pkg, max_die;
+	int ret = 0;
+	ret = rte_power_set_uncore_env(RTE_UNCORE_PM_ENV_AUTO_DETECT);
+	if (ret < 0) {
+		RTE_LOG(INFO, L3FWD_POWER, "Failed to set uncore env\n");
+		return ret;
+	}
+
+	max_pkg = rte_power_uncore_get_num_pkgs();
+	if (max_pkg == 0)
+		return -1;
+
+	for (pkg = 0; pkg < max_pkg; pkg++) {
+		max_die = rte_power_uncore_get_num_dies(pkg);
+		if (max_die == 0)
+			return -1;
+		for (die = 0; die < max_die; die++) {
+			ret = rte_power_uncore_init(pkg, die);
+			if (ret == -1) {
+				RTE_LOG(INFO, L3FWD_POWER, "Unable to initialize uncore for pkg %02u die %02u\n"
+				, pkg, die);
+				return ret;
+			}
+			if (choice == UNCORE_MIN) {
+				ret = rte_power_uncore_freq_min(pkg, die);
+				if (ret == -1) {
+					RTE_LOG(INFO, L3FWD_POWER,
+					"Unable to set the uncore min/max to minimum uncore frequency value for pkg %02u die %02u\n"
+					, pkg, die);
+					return ret;
+				}
+			} else if (choice == UNCORE_MAX) {
+				ret = rte_power_uncore_freq_max(pkg, die);
+				if (ret == -1) {
+					RTE_LOG(INFO, L3FWD_POWER,
+					"Unable to set uncore min/max to maximum uncore frequency value for pkg %02u die %02u\n"
+					, pkg, die);
+					return ret;
+				}
+			} else if (choice == UNCORE_IDX) {
+				char *ptr = NULL;
+				int frequency_index = strtol(argument, &ptr, 10);
+				if (argument == ptr) {
+					RTE_LOG(INFO, L3FWD_POWER, "Index given is not a valid number.");
+					return -1;
+				}
+				int freq_array_len = rte_power_uncore_get_num_freqs(pkg, die);
+				if (frequency_index > freq_array_len - 1) {
+					RTE_LOG(INFO, L3FWD_POWER,
+					"Frequency index given out of range, please choose a value from 0 to %d.\n",
+					freq_array_len);
+					return -1;
+				}
+				ret = rte_power_set_uncore_freq(pkg, die, frequency_index);
+				if (ret == -1) {
+					RTE_LOG(INFO, L3FWD_POWER,
+					"Unable to set min/max uncore index value for pkg %02u die %02u\n",
+					pkg, die);
+					return ret;
+				}
+			} else {
+				RTE_LOG(INFO, L3FWD_POWER, "Uncore choice provided invalid\n");
+				return -1;
+			}
+		}
+	}
+
+	RTE_LOG(INFO, L3FWD_POWER, "Successfully set max/min/index uncore frequency.\n");
+	return ret;
+}
+
+static int
 parse_portmask(const char *portmask)
 {
 	char *end = NULL;
@@ -1470,10 +1640,7 @@ parse_portmask(const char *portmask)
 	/* parse hexadecimal string */
 	pm = strtoul(portmask, &end, 16);
 	if ((portmask[0] == '\0') || (end == NULL) || (*end != '\0'))
-		return -1;
-
-	if (pm == 0)
-		return -1;
+		return 0;
 
 	return pm;
 }
@@ -1534,57 +1701,47 @@ parse_config(const char *q_arg)
 
 	return 0;
 }
+
 static int
-parse_ep_config(const char *q_arg)
+parse_pmd_mgmt_config(const char *name)
 {
-	char s[256];
-	const char *p = q_arg;
-	char *end;
-	int  num_arg;
+#define PMD_MGMT_MONITOR "monitor"
+#define PMD_MGMT_PAUSE   "pause"
+#define PMD_MGMT_SCALE   "scale"
+#define PMD_MGMT_BASELINE  "baseline"
 
-	char *str_fld[3];
-
-	int training_flag;
-	int med_edpi;
-	int hgh_edpi;
-
-	ep_med_edpi = EMPTY_POLL_MED_THRESHOLD;
-	ep_hgh_edpi = EMPTY_POLL_MED_THRESHOLD;
-
-	strlcpy(s, p, sizeof(s));
-
-	num_arg = rte_strsplit(s, sizeof(s), str_fld, 3, ',');
-
-	empty_poll_train = false;
-
-	if (num_arg == 0)
+	if (strncmp(PMD_MGMT_MONITOR, name, sizeof(PMD_MGMT_MONITOR)) == 0) {
+		pmgmt_type = RTE_POWER_MGMT_TYPE_MONITOR;
 		return 0;
-
-	if (num_arg == 3) {
-
-		training_flag = strtoul(str_fld[0], &end, 0);
-		med_edpi = strtoul(str_fld[1], &end, 0);
-		hgh_edpi = strtoul(str_fld[2], &end, 0);
-
-		if (training_flag == 1)
-			empty_poll_train = true;
-
-		if (med_edpi > 0)
-			ep_med_edpi = med_edpi;
-
-		if (med_edpi > 0)
-			ep_hgh_edpi = hgh_edpi;
-
-	} else {
-
-		return -1;
 	}
 
-	return 0;
+	if (strncmp(PMD_MGMT_PAUSE, name, sizeof(PMD_MGMT_PAUSE)) == 0) {
+		pmgmt_type = RTE_POWER_MGMT_TYPE_PAUSE;
+		return 0;
+	}
 
+	if (strncmp(PMD_MGMT_SCALE, name, sizeof(PMD_MGMT_SCALE)) == 0) {
+		pmgmt_type = RTE_POWER_MGMT_TYPE_SCALE;
+		return 0;
+	}
+	if (strncmp(PMD_MGMT_BASELINE, name, sizeof(PMD_MGMT_BASELINE)) == 0) {
+		baseline_enabled = true;
+		return 0;
+	}
+	/* unknown PMD power management mode */
+	return -1;
 }
+
 #define CMD_LINE_OPT_PARSE_PTYPE "parse-ptype"
+#define CMD_LINE_OPT_LEGACY "legacy"
+#define CMD_LINE_OPT_INTERRUPT_ONLY "interrupt-only"
 #define CMD_LINE_OPT_TELEMETRY "telemetry"
+#define CMD_LINE_OPT_PMD_MGMT "pmd-mgmt"
+#define CMD_LINE_OPT_MAX_PKT_LEN "max-pkt-len"
+#define CMD_LINE_OPT_MAX_EMPTY_POLLS "max-empty-polls"
+#define CMD_LINE_OPT_PAUSE_DURATION "pause-duration"
+#define CMD_LINE_OPT_SCALE_FREQ_MIN "scale-freq-min"
+#define CMD_LINE_OPT_SCALE_FREQ_MAX "scale-freq-max"
 
 /* Parse the argument given in the command line of the application */
 static int
@@ -1593,23 +1750,28 @@ parse_args(int argc, char **argv)
 	int opt, ret;
 	char **argvopt;
 	int option_index;
-	uint32_t limit;
 	char *prgname = argv[0];
 	static struct option lgopts[] = {
 		{"config", 1, 0, 0},
 		{"perf-config", 1, 0, 0},
 		{"high-perf-cores", 1, 0, 0},
 		{"no-numa", 0, 0, 0},
-		{"enable-jumbo", 0, 0, 0},
-		{"empty-poll", 1, 0, 0},
+		{CMD_LINE_OPT_MAX_PKT_LEN, 1, 0, 0},
 		{CMD_LINE_OPT_PARSE_PTYPE, 0, 0, 0},
+		{CMD_LINE_OPT_LEGACY, 0, 0, 0},
 		{CMD_LINE_OPT_TELEMETRY, 0, 0, 0},
+		{CMD_LINE_OPT_INTERRUPT_ONLY, 0, 0, 0},
+		{CMD_LINE_OPT_PMD_MGMT, 1, 0, 0},
+		{CMD_LINE_OPT_MAX_EMPTY_POLLS, 1, 0, 0},
+		{CMD_LINE_OPT_PAUSE_DURATION, 1, 0, 0},
+		{CMD_LINE_OPT_SCALE_FREQ_MIN, 1, 0, 0},
+		{CMD_LINE_OPT_SCALE_FREQ_MAX, 1, 0, 0},
 		{NULL, 0, 0, 0}
 	};
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, "p:l:m:h:P",
+	while ((opt = getopt_long(argc, argvopt, "p:PuUi:",
 				lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
@@ -1626,17 +1788,26 @@ parse_args(int argc, char **argv)
 			printf("Promiscuous mode selected\n");
 			promiscuous_on = 1;
 			break;
-		case 'l':
-			limit = parse_max_pkt_len(optarg);
-			freq_tlb[LOW] = limit;
+		case 'u':
+			enabled_uncore = parse_uncore_options(UNCORE_MIN, NULL);
+			if (enabled_uncore < 0) {
+				print_usage(prgname);
+				return -1;
+			}
 			break;
-		case 'm':
-			limit = parse_max_pkt_len(optarg);
-			freq_tlb[MED] = limit;
+		case 'U':
+			enabled_uncore = parse_uncore_options(UNCORE_MAX, NULL);
+			if (enabled_uncore < 0) {
+				print_usage(prgname);
+				return -1;
+			}
 			break;
-		case 'h':
-			limit = parse_max_pkt_len(optarg);
-			freq_tlb[HGH] = limit;
+		case 'i':
+			enabled_uncore = parse_uncore_options(UNCORE_IDX, optarg);
+			if (enabled_uncore < 0) {
+				print_usage(prgname);
+				return -1;
+			}
 			break;
 		/* long options */
 		case 0:
@@ -1676,27 +1847,21 @@ parse_args(int argc, char **argv)
 			}
 
 			if (!strncmp(lgopts[option_index].name,
-						"empty-poll", 10)) {
-				if (app_mode == APP_MODE_TELEMETRY) {
-					printf(" empty-poll cannot be enabled as telemetry mode is enabled\n");
+					CMD_LINE_OPT_LEGACY,
+					sizeof(CMD_LINE_OPT_LEGACY))) {
+				if (app_mode != APP_MODE_DEFAULT) {
+					printf(" legacy mode is mutually exclusive with other modes\n");
 					return -1;
 				}
-				app_mode = APP_MODE_EMPTY_POLL;
-				ret = parse_ep_config(optarg);
-
-				if (ret) {
-					printf("invalid empty poll config\n");
-					print_usage(prgname);
-					return -1;
-				}
-				printf("empty-poll is enabled\n");
+				app_mode = APP_MODE_LEGACY;
+				printf("legacy mode is enabled\n");
 			}
 
 			if (!strncmp(lgopts[option_index].name,
 					CMD_LINE_OPT_TELEMETRY,
 					sizeof(CMD_LINE_OPT_TELEMETRY))) {
-				if (app_mode == APP_MODE_EMPTY_POLL) {
-					printf("telemetry mode cannot be enabled as empty poll mode is enabled\n");
+				if (app_mode != APP_MODE_DEFAULT) {
+					printf(" telemetry mode is mutually exclusive with other modes\n");
 					return -1;
 				}
 				app_mode = APP_MODE_TELEMETRY;
@@ -1704,36 +1869,36 @@ parse_args(int argc, char **argv)
 			}
 
 			if (!strncmp(lgopts[option_index].name,
-					"enable-jumbo", 12)) {
-				struct option lenopts =
-					{"max-pkt-len", required_argument, \
-									0, 0};
-
-				printf("jumbo frame is enabled \n");
-				port_conf.rxmode.offloads |=
-						DEV_RX_OFFLOAD_JUMBO_FRAME;
-				port_conf.txmode.offloads |=
-						DEV_TX_OFFLOAD_MULTI_SEGS;
-
-				/**
-				 * if no max-pkt-len set, use the default value
-				 * RTE_ETHER_MAX_LEN
-				 */
-				if (0 == getopt_long(argc, argvopt, "",
-						&lenopts, &option_index)) {
-					ret = parse_max_pkt_len(optarg);
-					if ((ret < 64) ||
-						(ret > MAX_JUMBO_PKT_LEN)){
-						printf("invalid packet "
-								"length\n");
-						print_usage(prgname);
-						return -1;
-					}
-					port_conf.rxmode.max_rx_pkt_len = ret;
+					CMD_LINE_OPT_PMD_MGMT,
+					sizeof(CMD_LINE_OPT_PMD_MGMT))) {
+				if (app_mode != APP_MODE_DEFAULT) {
+					printf(" power mgmt mode is mutually exclusive with other modes\n");
+					return -1;
 				}
-				printf("set jumbo frame "
-					"max packet length to %u\n",
-				(unsigned int)port_conf.rxmode.max_rx_pkt_len);
+				if (parse_pmd_mgmt_config(optarg) < 0) {
+					printf(" Invalid PMD power management mode: %s\n",
+							optarg);
+					return -1;
+				}
+				app_mode = APP_MODE_PMD_MGMT;
+				printf("PMD power mgmt mode is enabled\n");
+			}
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_INTERRUPT_ONLY,
+					sizeof(CMD_LINE_OPT_INTERRUPT_ONLY))) {
+				if (app_mode != APP_MODE_DEFAULT) {
+					printf(" interrupt-only mode is mutually exclusive with other modes\n");
+					return -1;
+				}
+				app_mode = APP_MODE_INTERRUPT;
+				printf("interrupt-only mode is enabled\n");
+			}
+
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_MAX_PKT_LEN,
+					sizeof(CMD_LINE_OPT_MAX_PKT_LEN))) {
+				printf("Custom frame size is configured\n");
+				max_pkt_len = parse_max_pkt_len(optarg);
 			}
 
 			if (!strncmp(lgopts[option_index].name,
@@ -1741,6 +1906,34 @@ parse_args(int argc, char **argv)
 				     sizeof(CMD_LINE_OPT_PARSE_PTYPE))) {
 				printf("soft parse-ptype is enabled\n");
 				parse_ptype = 1;
+			}
+
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_MAX_EMPTY_POLLS,
+					sizeof(CMD_LINE_OPT_MAX_EMPTY_POLLS))) {
+				printf("Maximum empty polls configured\n");
+				max_empty_polls = parse_int(optarg);
+			}
+
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_PAUSE_DURATION,
+					sizeof(CMD_LINE_OPT_PAUSE_DURATION))) {
+				printf("Pause duration configured\n");
+				pause_duration = parse_int(optarg);
+			}
+
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_SCALE_FREQ_MIN,
+					sizeof(CMD_LINE_OPT_SCALE_FREQ_MIN))) {
+				printf("Scaling frequency minimum configured\n");
+				scale_freq_min = parse_int(optarg);
+			}
+
+			if (!strncmp(lgopts[option_index].name,
+					CMD_LINE_OPT_SCALE_FREQ_MAX,
+					sizeof(CMD_LINE_OPT_SCALE_FREQ_MAX))) {
+				printf("Scaling frequency maximum configured\n");
+				scale_freq_max = parse_int(optarg);
 			}
 
 			break;
@@ -1945,6 +2138,7 @@ check_all_ports_link_status(uint32_t port_mask)
 	uint16_t portid;
 	struct rte_eth_link link;
 	int ret;
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
 
 	printf("\nChecking link status");
 	fflush(stdout);
@@ -1964,19 +2158,14 @@ check_all_ports_link_status(uint32_t port_mask)
 			}
 			/* print link status if flag set */
 			if (print_flag == 1) {
-				if (link.link_status)
-					printf("Port %d Link Up - speed %u "
-						"Mbps - %s\n", (uint8_t)portid,
-						(unsigned)link.link_speed,
-				(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
-					("full-duplex") : ("half-duplex"));
-				else
-					printf("Port %d Link Down\n",
-						(uint8_t)portid);
+				rte_eth_link_to_str(link_status_text,
+					sizeof(link_status_text), &link);
+				printf("Port %d %s\n", portid,
+				       link_status_text);
 				continue;
 			}
 			/* clear all_ports_up flag if any link down */
-			if (link.link_status == ETH_LINK_DOWN) {
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
 				all_ports_up = 0;
 				break;
 			}
@@ -2046,6 +2235,7 @@ static int check_ptype(uint16_t portid)
 static int
 init_power_library(void)
 {
+	enum power_management_env env;
 	unsigned int lcore_id;
 	int ret = 0;
 
@@ -2053,10 +2243,20 @@ init_power_library(void)
 		/* init power management library */
 		ret = rte_power_init(lcore_id);
 		if (ret) {
-			RTE_LOG(ERR, POWER,
+			RTE_LOG(ERR, L3FWD_POWER,
 				"Library initialization failed on core %u\n",
 				lcore_id);
 			return ret;
+		}
+		/* we're not supporting the VM channel mode */
+		env = rte_power_get_env();
+		if (env != PM_ENV_ACPI_CPUFREQ &&
+				env != PM_ENV_PSTATE_CPUFREQ &&
+				env != PM_ENV_AMD_PSTATE_CPUFREQ &&
+				env != PM_ENV_CPPC_CPUFREQ) {
+			RTE_LOG(ERR, L3FWD_POWER,
+				"Only ACPI and PSTATE mode are supported\n");
+			return -1;
 		}
 	}
 	return ret;
@@ -2065,17 +2265,37 @@ init_power_library(void)
 static int
 deinit_power_library(void)
 {
-	unsigned int lcore_id;
+	unsigned int lcore_id, max_pkg, max_die, die, pkg;
 	int ret = 0;
 
 	RTE_LCORE_FOREACH(lcore_id) {
 		/* deinit power management library */
 		ret = rte_power_exit(lcore_id);
 		if (ret) {
-			RTE_LOG(ERR, POWER,
+			RTE_LOG(ERR, L3FWD_POWER,
 				"Library deinitialization failed on core %u\n",
 				lcore_id);
 			return ret;
+		}
+	}
+
+	/* if uncore option was set */
+	if (enabled_uncore == 0) {
+		max_pkg = rte_power_uncore_get_num_pkgs();
+		if (max_pkg == 0)
+			return -1;
+		for (pkg = 0; pkg < max_pkg; pkg++) {
+			max_die = rte_power_uncore_get_num_dies(pkg);
+			if (max_die == 0)
+				return -1;
+			for (die = 0; die < max_die; die++) {
+				ret = rte_power_uncore_exit(pkg, die);
+				if (ret < 0) {
+					RTE_LOG(ERR, L3FWD_POWER, "Failed to exit uncore deinit successfully for pkg %02u die %02u\n"
+						, pkg, die);
+					return -1;
+				}
+			}
 		}
 	}
 	return ret;
@@ -2089,7 +2309,7 @@ get_current_stat_values(uint64_t *values)
 	uint64_t app_eps = 0, app_fps = 0, app_br = 0;
 	uint64_t count = 0;
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		qconf = &lcore_conf[lcore_id];
 		if (qconf->n_rx_queue == 0)
 			continue;
@@ -2121,7 +2341,7 @@ update_telemetry(__rte_unused struct rte_timer *tim,
 	ret = rte_metrics_update_values(RTE_METRICS_GLOBAL, telstats_index,
 					values, RTE_DIM(values));
 	if (ret < 0)
-		RTE_LOG(WARNING, POWER, "failed to update metrcis\n");
+		RTE_LOG(WARNING, L3FWD_POWER, "failed to update metrics\n");
 }
 
 static int
@@ -2135,8 +2355,8 @@ handle_app_stats(const char *cmd __rte_unused,
 	rte_tel_data_start_dict(d);
 	get_current_stat_values(values);
 	for (i = 0; i < NUM_TELSTATS; i++)
-		rte_tel_data_add_dict_u64(d, telstats_strings[i].name,
-				values[i]);
+		rte_tel_data_add_dict_uint(d, telstats_strings[i].name,
+					   values[i]);
 	return 0;
 }
 
@@ -2155,24 +2375,7 @@ telemetry_setup_timer(void)
 			update_telemetry,
 			NULL);
 }
-static void
-empty_poll_setup_timer(void)
-{
-	int lcore_id = rte_lcore_id();
-	uint64_t hz = rte_get_timer_hz();
 
-	struct  ep_params *ep_ptr = ep_params;
-
-	ep_ptr->interval_ticks = hz / INTERVALS_PER_SECOND;
-
-	rte_timer_reset_sync(&ep_ptr->timer0,
-			ep_ptr->interval_ticks,
-			PERIODICAL,
-			lcore_id,
-			rte_empty_poll_detection,
-			(void *)ep_ptr);
-
-}
 static int
 launch_timer(unsigned int lcore_id)
 {
@@ -2181,18 +2384,15 @@ launch_timer(unsigned int lcore_id)
 	RTE_SET_USED(lcore_id);
 
 
-	if (rte_get_master_lcore() != lcore_id) {
-		rte_panic("timer on lcore:%d which is not master core:%d\n",
+	if (rte_get_main_lcore() != lcore_id) {
+		rte_panic("timer on lcore:%d which is not main core:%d\n",
 				lcore_id,
-				rte_get_master_lcore());
+				rte_get_main_lcore());
 	}
 
-	RTE_LOG(INFO, POWER, "Bring up the Timer\n");
+	RTE_LOG(INFO, L3FWD_POWER, "Bring up the Timer\n");
 
-	if (app_mode == APP_MODE_EMPTY_POLL)
-		empty_poll_setup_timer();
-	else
-		telemetry_setup_timer();
+	telemetry_setup_timer();
 
 	cycles_10ms = rte_get_timer_hz() / 100;
 
@@ -2206,12 +2406,88 @@ launch_timer(unsigned int lcore_id)
 		}
 	}
 
-	RTE_LOG(INFO, POWER, "Timer_subsystem is done\n");
+	RTE_LOG(INFO, L3FWD_POWER, "Timer_subsystem is done\n");
 
 	return 0;
 }
 
+static int
+autodetect_mode(void)
+{
+	RTE_LOG(NOTICE, L3FWD_POWER, "Operating mode not specified, probing frequency scaling support...\n");
 
+	/*
+	 * Empty poll and telemetry modes have to be specifically requested to
+	 * be enabled, but we can auto-detect between interrupt mode with or
+	 * without frequency scaling. Any of ACPI, pstate and CPPC can be used.
+	 */
+	if (rte_power_check_env_supported(PM_ENV_ACPI_CPUFREQ))
+		return APP_MODE_LEGACY;
+	if (rte_power_check_env_supported(PM_ENV_PSTATE_CPUFREQ))
+		return APP_MODE_LEGACY;
+	if (rte_power_check_env_supported(PM_ENV_AMD_PSTATE_CPUFREQ))
+		return APP_MODE_LEGACY;
+	if (rte_power_check_env_supported(PM_ENV_CPPC_CPUFREQ))
+		return APP_MODE_LEGACY;
+
+	RTE_LOG(NOTICE, L3FWD_POWER, "Frequency scaling not supported, selecting interrupt-only mode\n");
+
+	return APP_MODE_INTERRUPT;
+}
+
+static const char *
+mode_to_str(enum appmode mode)
+{
+	switch (mode) {
+	case APP_MODE_LEGACY:
+		return "legacy";
+	case APP_MODE_TELEMETRY:
+		return "telemetry";
+	case APP_MODE_INTERRUPT:
+		return "interrupt-only";
+	case APP_MODE_PMD_MGMT:
+		return "pmd mgmt";
+	default:
+		return "invalid";
+	}
+}
+
+static uint32_t
+eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
+{
+	uint32_t overhead_len;
+
+	if (max_mtu != UINT16_MAX && max_rx_pktlen > max_mtu)
+		overhead_len = max_rx_pktlen - max_mtu;
+	else
+		overhead_len = RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+
+	return overhead_len;
+}
+
+static int
+config_port_max_pkt_len(struct rte_eth_conf *conf,
+		struct rte_eth_dev_info *dev_info)
+{
+	uint32_t overhead_len;
+
+	if (max_pkt_len == 0)
+		return 0;
+
+	if (max_pkt_len < RTE_ETHER_MIN_LEN || max_pkt_len > MAX_JUMBO_PKT_LEN)
+		return -1;
+
+	overhead_len = eth_dev_get_overhead_len(dev_info->max_rx_pktlen,
+			dev_info->max_mtu);
+	conf->rxmode.mtu = max_pkt_len - overhead_len;
+
+	if (conf->rxmode.mtu > RTE_ETHER_MTU)
+		conf->txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	return 0;
+}
+
+/* Power library initialized in the main routine. 8< */
 int
 main(int argc, char **argv)
 {
@@ -2229,9 +2505,6 @@ main(int argc, char **argv)
 	uint16_t portid;
 	const char *ptr_strings[NUM_TELSTATS];
 
-	/* catch SIGINT and restore cpufreq governor to ondemand */
-	signal(SIGINT, signal_exit_now);
-
 	/* init EAL */
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
@@ -2239,15 +2512,28 @@ main(int argc, char **argv)
 	argc -= ret;
 	argv += ret;
 
+	/* catch SIGINT and restore cpufreq governor to ondemand */
+	signal(SIGINT, signal_exit_now);
+
 	/* init RTE timer library to be used late */
 	rte_timer_subsystem_init();
+
+	/* if we're running pmd-mgmt mode, don't default to baseline mode */
+	baseline_enabled = false;
 
 	/* parse application arguments (after the EAL ones) */
 	ret = parse_args(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid L3FWD parameters\n");
 
-	if (app_mode != APP_MODE_TELEMETRY && init_power_library())
+	if (app_mode == APP_MODE_DEFAULT)
+		app_mode = autodetect_mode();
+
+	RTE_LOG(INFO, L3FWD_POWER, "Selected operation mode: %s\n",
+			mode_to_str(app_mode));
+
+	/* only legacy mode relies on power library */
+	if ((app_mode == APP_MODE_LEGACY) && init_power_library())
 		rte_exit(EXIT_FAILURE, "init_power_library failed\n");
 
 	if (update_lcore_params() < 0)
@@ -2270,6 +2556,9 @@ main(int argc, char **argv)
 	/* initialize all ports */
 	RTE_ETH_FOREACH_DEV(portid) {
 		struct rte_eth_conf local_port_conf = port_conf;
+		/* not all app modes need interrupts */
+		bool need_intr = app_mode == APP_MODE_LEGACY ||
+				app_mode == APP_MODE_INTERRUPT;
 
 		/* skip ports that are not enabled */
 		if ((enabled_port_mask & (1 << portid)) == 0) {
@@ -2303,7 +2592,10 @@ main(int argc, char **argv)
 			nb_rx_queue, (unsigned)n_tx_queue );
 		/* If number of Rx queue is 0, no need to enable Rx interrupt */
 		if (nb_rx_queue == 0)
-			local_port_conf.intr_conf.rxq = 0;
+			need_intr = false;
+
+		if (need_intr)
+			local_port_conf.intr_conf.rxq = 1;
 
 		ret = rte_eth_dev_info_get(portid, &dev_info);
 		if (ret != 0)
@@ -2311,9 +2603,15 @@ main(int argc, char **argv)
 				"Error during getting device (port %u) info: %s\n",
 				portid, strerror(-ret));
 
-		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+		ret = config_port_max_pkt_len(&local_port_conf, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE,
+				"Invalid max packet length: %u (port %u)\n",
+				max_pkt_len, portid);
+
+		if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
 			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+				RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
 
 		local_port_conf.rx_adv_conf.rss_conf.rss_hf &=
 			dev_info.flow_type_rss_offloads;
@@ -2325,6 +2623,11 @@ main(int argc, char **argv)
 				port_conf.rx_adv_conf.rss_conf.rss_hf,
 				local_port_conf.rx_adv_conf.rss_conf.rss_hf);
 		}
+
+		if (local_port_conf.rx_adv_conf.rss_conf.rss_hf == 0)
+			local_port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
+		local_port_conf.rxmode.offloads &= dev_info.rx_offload_capa;
+		port_conf.rxmode.offloads = local_port_conf.rxmode.offloads;
 
 		ret = rte_eth_dev_configure(portid, nb_rx_queue,
 					(uint16_t)n_tx_queue, &local_port_conf);
@@ -2422,6 +2725,7 @@ main(int argc, char **argv)
 		qconf = &lcore_conf[lcore_id];
 		printf("\nInitializing rx queues on lcore %u ... ", lcore_id );
 		fflush(stdout);
+
 		/* init RX queues */
 		for(queue = 0; queue < qconf->n_rx_queue; ++queue) {
 			struct rte_eth_rxconf rxq_conf;
@@ -2458,11 +2762,42 @@ main(int argc, char **argv)
 				if (add_cb_parse_ptype(portid, queueid) < 0)
 					rte_exit(EXIT_FAILURE,
 						 "Fail to add ptype cb\n");
-			} else if (!check_ptype(portid))
-				rte_exit(EXIT_FAILURE,
-					 "PMD can not provide needed ptypes\n");
+			}
+
+			if (app_mode == APP_MODE_PMD_MGMT && !baseline_enabled) {
+				/* Set power_pmd_mgmt configs passed by user */
+				rte_power_pmd_mgmt_set_emptypoll_max(max_empty_polls);
+				ret = rte_power_pmd_mgmt_set_pause_duration(pause_duration);
+				if (ret < 0)
+					rte_exit(EXIT_FAILURE,
+						"Error setting pause_duration: err=%d, lcore=%d\n",
+							ret, lcore_id);
+
+				ret = rte_power_pmd_mgmt_set_scaling_freq_min(lcore_id,
+						scale_freq_min);
+				if (ret < 0)
+					rte_exit(EXIT_FAILURE,
+						"Error setting scaling freq min: err=%d, lcore=%d\n",
+							ret, lcore_id);
+
+				ret = rte_power_pmd_mgmt_set_scaling_freq_max(lcore_id,
+						scale_freq_max);
+				if (ret < 0)
+					rte_exit(EXIT_FAILURE,
+						"Error setting scaling freq max: err=%d, lcore %d\n",
+							ret, lcore_id);
+
+				ret = rte_power_ethdev_pmgmt_queue_enable(
+						lcore_id, portid, queueid,
+						pmgmt_type);
+				if (ret < 0)
+					rte_exit(EXIT_FAILURE,
+						"rte_power_ethdev_pmgmt_queue_enable: err=%d, port=%d\n",
+							ret, portid);
+			}
 		}
 	}
+	/* >8 End of power library initialization. */
 
 	printf("\n");
 
@@ -2491,36 +2826,19 @@ main(int argc, char **argv)
 		}
 		/* initialize spinlock for each port */
 		rte_spinlock_init(&(locks[portid]));
+
+		if (!parse_ptype)
+			if (!check_ptype(portid))
+				rte_exit(EXIT_FAILURE,
+					"PMD can not provide needed ptypes\n");
 	}
 
 	check_all_ports_link_status(enabled_port_mask);
 
-	if (app_mode == APP_MODE_EMPTY_POLL) {
-
-		if (empty_poll_train) {
-			policy.state = TRAINING;
-		} else {
-			policy.state = MED_NORMAL;
-			policy.med_base_edpi = ep_med_edpi;
-			policy.hgh_base_edpi = ep_hgh_edpi;
-		}
-
-		ret = rte_power_empty_poll_stat_init(&ep_params,
-				freq_tlb,
-				&policy);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "empty poll init failed");
-	}
-
-
 	/* launch per-lcore init on every lcore */
 	if (app_mode == APP_MODE_LEGACY) {
-		rte_eal_mp_remote_launch(main_loop, NULL, CALL_MASTER);
-	} else if (app_mode == APP_MODE_EMPTY_POLL) {
-		empty_poll_stop = false;
-		rte_eal_mp_remote_launch(main_empty_poll_loop, NULL,
-				SKIP_MASTER);
-	} else {
+		rte_eal_mp_remote_launch(main_legacy_loop, NULL, CALL_MAIN);
+	} else if (app_mode == APP_MODE_TELEMETRY) {
 		unsigned int i;
 
 		/* Init metrics library */
@@ -2535,7 +2853,7 @@ main(int argc, char **argv)
 		else
 			rte_exit(EXIT_FAILURE, "failed to register metrics names");
 
-		RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
 			rte_spinlock_init(&stats[lcore_id].telemetry_lock);
 		}
 		rte_timer_init(&telemetry_timer);
@@ -2543,15 +2861,35 @@ main(int argc, char **argv)
 				handle_app_stats,
 				"Returns global power stats. Parameters: None");
 		rte_eal_mp_remote_launch(main_telemetry_loop, NULL,
-						SKIP_MASTER);
+						SKIP_MAIN);
+	} else if (app_mode == APP_MODE_INTERRUPT) {
+		rte_eal_mp_remote_launch(main_intr_loop, NULL, CALL_MAIN);
+	} else if (app_mode == APP_MODE_PMD_MGMT) {
+		/* reuse telemetry loop for PMD power management mode */
+		rte_eal_mp_remote_launch(main_telemetry_loop, NULL, CALL_MAIN);
 	}
 
-	if (app_mode == APP_MODE_EMPTY_POLL || app_mode == APP_MODE_TELEMETRY)
+	if (app_mode == APP_MODE_TELEMETRY)
 		launch_timer(rte_lcore_id());
 
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		if (rte_eal_wait_lcore(lcore_id) < 0)
 			return -1;
+	}
+
+	if (app_mode == APP_MODE_PMD_MGMT) {
+		for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+			if (rte_lcore_is_enabled(lcore_id) == 0)
+				continue;
+			qconf = &lcore_conf[lcore_id];
+			for (queue = 0; queue < qconf->n_rx_queue; ++queue) {
+				portid = qconf->rx_queue_list[queue].port_id;
+				queueid = qconf->rx_queue_list[queue].queue_id;
+
+				rte_power_ethdev_pmgmt_queue_disable(lcore_id,
+						portid, queueid);
+			}
+		}
 	}
 
 	RTE_ETH_FOREACH_DEV(portid)
@@ -2559,14 +2897,15 @@ main(int argc, char **argv)
 		if ((enabled_port_mask & (1 << portid)) == 0)
 			continue;
 
-		rte_eth_dev_stop(portid);
+		ret = rte_eth_dev_stop(portid);
+		if (ret != 0)
+			RTE_LOG(ERR, L3FWD_POWER, "rte_eth_dev_stop: err=%d, port=%u\n",
+				ret, portid);
+
 		rte_eth_dev_close(portid);
 	}
 
-	if (app_mode == APP_MODE_EMPTY_POLL)
-		rte_power_empty_poll_stat_free();
-
-	if (app_mode != APP_MODE_TELEMETRY && deinit_power_library())
+	if ((app_mode == APP_MODE_LEGACY) && deinit_power_library())
 		rte_exit(EXIT_FAILURE, "deinit_power_library failed\n");
 
 	if (rte_eal_cleanup() < 0)

@@ -12,13 +12,13 @@
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_debug.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_eal.h>
 #include <rte_log.h>
 #include <rte_malloc.h>
 #include <rte_memory.h>
 #include <rte_lcore.h>
-#include <rte_bus_vdev.h>
+#include <bus_vdev_driver.h>
 
 #include "skeleton_eventdev.h"
 
@@ -101,7 +101,10 @@ skeleton_eventdev_info_get(struct rte_eventdev *dev,
 	dev_info->max_num_events = (1ULL << 20);
 	dev_info->event_dev_cap = RTE_EVENT_DEV_CAP_QUEUE_QOS |
 					RTE_EVENT_DEV_CAP_BURST_MODE |
-					RTE_EVENT_DEV_CAP_EVENT_QOS;
+					RTE_EVENT_DEV_CAP_EVENT_QOS |
+					RTE_EVENT_DEV_CAP_CARRY_FLOW_ID |
+					RTE_EVENT_DEV_CAP_MAINTENANCE_FREE;
+	dev_info->max_profiles_per_port = 1;
 }
 
 static int
@@ -209,7 +212,7 @@ skeleton_eventdev_port_def_conf(struct rte_eventdev *dev, uint8_t port_id,
 	port_conf->new_event_threshold = 32 * 1024;
 	port_conf->dequeue_depth = 16;
 	port_conf->enqueue_depth = 16;
-	port_conf->disable_implicit_release = 0;
+	port_conf->event_port_cfg = 0;
 }
 
 static void
@@ -319,7 +322,7 @@ skeleton_eventdev_dump(struct rte_eventdev *dev, FILE *f)
 
 
 /* Initialize and register event driver with DPDK Application */
-static struct rte_eventdev_ops skeleton_eventdev_ops = {
+static struct eventdev_ops skeleton_eventdev_ops = {
 	.dev_infos_get    = skeleton_eventdev_info_get,
 	.dev_configure    = skeleton_eventdev_configure,
 	.dev_start        = skeleton_eventdev_start,
@@ -370,7 +373,7 @@ skeleton_eventdev_init(struct rte_eventdev *eventdev)
 	skel->subsystem_device_id = pci_dev->id.subsystem_device_id;
 	skel->subsystem_vendor_id = pci_dev->id.subsystem_vendor_id;
 
-	PMD_DRV_LOG(DEBUG, "pci device (%x:%x) %u:%u:%u:%u",
+	PMD_DRV_LOG(DEBUG, "PCI device (%x:%x) " PCI_PRI_FMT,
 			pci_dev->id.vendor_id, pci_dev->id.device_id,
 			pci_dev->addr.domain, pci_dev->addr.bus,
 			pci_dev->addr.devid, pci_dev->addr.function);
@@ -425,12 +428,12 @@ RTE_PMD_REGISTER_PCI_TABLE(event_skeleton_pci, pci_id_skeleton_map);
 /* VDEV based event device */
 
 static int
-skeleton_eventdev_create(const char *name, int socket_id)
+skeleton_eventdev_create(const char *name, int socket_id, struct rte_vdev_device *vdev)
 {
 	struct rte_eventdev *eventdev;
 
 	eventdev = rte_event_pmd_vdev_init(name,
-			sizeof(struct skeleton_eventdev), socket_id);
+			sizeof(struct skeleton_eventdev), socket_id, vdev);
 	if (eventdev == NULL) {
 		PMD_DRV_ERR("Failed to create eventdev vdev %s", name);
 		goto fail;
@@ -442,6 +445,7 @@ skeleton_eventdev_create(const char *name, int socket_id)
 	eventdev->dequeue       = skeleton_eventdev_dequeue;
 	eventdev->dequeue_burst = skeleton_eventdev_dequeue_burst;
 
+	event_dev_probing_finish(eventdev);
 	return 0;
 fail:
 	return -EFAULT;
@@ -453,9 +457,8 @@ skeleton_eventdev_probe(struct rte_vdev_device *vdev)
 	const char *name;
 
 	name = rte_vdev_device_name(vdev);
-	RTE_LOG(INFO, PMD, "Initializing %s on NUMA node %d\n", name,
-			rte_socket_id());
-	return skeleton_eventdev_create(name, rte_socket_id());
+	PMD_DRV_LOG(INFO, "Initializing %s on NUMA node %d", name, rte_socket_id());
+	return skeleton_eventdev_create(name, rte_socket_id(), vdev);
 }
 
 static int
@@ -475,3 +478,4 @@ static struct rte_vdev_driver vdev_eventdev_skeleton_pmd = {
 };
 
 RTE_PMD_REGISTER_VDEV(EVENTDEV_NAME_SKELETON_PMD, vdev_eventdev_skeleton_pmd);
+RTE_LOG_REGISTER_DEFAULT(skeleton_eventdev_logtype, INFO);

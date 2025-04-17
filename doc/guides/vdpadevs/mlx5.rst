@@ -3,111 +3,158 @@
 
 .. include:: <isonum.txt>
 
-MLX5 vDPA driver
-================
+NVIDIA MLX5 vDPA Driver
+=======================
 
-The MLX5 vDPA (vhost data path acceleration) driver library
-(**librte_pmd_mlx5_vdpa**) provides support for **Mellanox ConnectX-6**,
-**Mellanox ConnectX-6 Dx** and **Mellanox BlueField** families of
-10/25/40/50/100/200 Gb/s adapters as well as their virtual functions (VF) in
+.. note::
+
+   NVIDIA acquired Mellanox Technologies in 2020.
+   The DPDK documentation and code might still include instances
+   of or references to Mellanox trademarks (like BlueField and ConnectX)
+   that are now NVIDIA trademarks.
+
+The mlx5 vDPA (vhost data path acceleration) driver library
+(**librte_vdpa_mlx5**) provides support for **NVIDIA ConnectX-6**,
+**NVIDIA ConnectX-6 Dx**, **NVIDIA ConnectX-6 Lx**, **NVIDIA ConnectX7**,
+**NVIDIA BlueField**, **NVIDIA BlueField-2** and **NVIDIA BlueField-3** families
+of 10/25/40/50/100/200 Gb/s adapters as well as their virtual functions (VF) in
 SR-IOV context.
 
 .. note::
 
-   Due to external dependencies, this driver is disabled in default
-   configuration of the "make" build. It can be enabled with
-   ``CONFIG_RTE_LIBRTE_MLX5_VDPA_PMD=y`` or by using "meson" build system which
+   This driver is enabled automatically when using "meson" build system which
    will detect dependencies.
 
-
-Design
-------
-
-For security reasons and robustness, this driver only deals with virtual
-memory addresses. The way resources allocations are handled by the kernel,
-combined with hardware specifications that allow to handle virtual memory
-addresses directly, ensure that DPDK applications cannot access random
-physical memory (or memory that does not belong to the current process).
-
-The PMD can use libibverbs and libmlx5 to access the device firmware
-or directly the hardware components.
-There are different levels of objects and bypassing abilities
-to get the best performances:
-
-- Verbs is a complete high-level generic API
-- Direct Verbs is a device-specific API
-- DevX allows to access firmware objects
-- Direct Rules manages flow steering at low-level hardware layer
-
-Enabling librte_pmd_mlx5_vdpa causes DPDK applications to be linked against
-libibverbs.
-
-A Mellanox mlx5 PCI device can be probed by either net/mlx5 driver or vdpa/mlx5
-driver but not in parallel. Hence, the user should decide the driver by the
-``class`` parameter in the device argument list.
-By default, the mlx5 device will be probed by the net/mlx5 driver.
+See :doc:`../../platform/mlx5` guide for design details,
+and which PMDs can be combined with vDPA PMD.
 
 Supported NICs
 --------------
 
-* Mellanox\ |reg| ConnectX\ |reg|-6 200G MCX654106A-HCAT (2x200G)
-* Mellanox\ |reg| ConnectX\ |reg|-6 Dx EN 100G MCX623106AN-CDAT (2x100G)
-* Mellanox\ |reg| ConnectX\ |reg|-6 Dx EN 200G MCX623105AN-VDAT (1x200G)
-* Mellanox\ |reg| BlueField SmartNIC 25G MBF1M332A-ASCAT (2x25G)
+* NVIDIA\ |reg| ConnectX\ |reg|-6 200G MCX654106A-HCAT (2x200G)
+* NVIDIA\ |reg| ConnectX\ |reg|-6 Dx EN 25G MCX621102AN-ADAT (2x25G)
+* NVIDIA\ |reg| ConnectX\ |reg|-6 Dx EN 100G MCX623106AN-CDAT (2x100G)
+* NVIDIA\ |reg| ConnectX\ |reg|-6 Dx EN 200G MCX623105AN-VDAT (1x200G)
+* NVIDIA\ |reg| ConnectX\ |reg|-6 Lx EN 25G MCX631102AN-ADAT (2x25G)
+* NVIDIA\ |reg| ConnectX\ |reg|-7 200G CX713106AE-HEA_QP1_Ax (2x200G)
+* NVIDIA\ |reg| BlueField SmartNIC 25G MBF1M332A-ASCAT (2x25G)
+* NVIDIA\ |reg| BlueField |reg|-2 SmartNIC MT41686 - MBF2H332A-AEEOT_A1 (2x25G)
+* NVIDIA\ |reg| BlueField\ |reg|-3 200GbE 900-9D3B6-00CV-AAB_Ax
 
 Prerequisites
 -------------
 
-- Mellanox OFED version: **5.0**
-  see :doc:`../../nics/mlx5` guide for more Mellanox OFED details.
-
-Compilation options
-~~~~~~~~~~~~~~~~~~~
-
-These options can be modified in the ``.config`` file.
-
-- ``CONFIG_RTE_LIBRTE_MLX5_VDPA_PMD`` (default **n**)
-
-  Toggle compilation of librte_pmd_mlx5 itself.
-
-- ``CONFIG_RTE_IBVERBS_LINK_DLOPEN`` (default **n**)
-
-  Build PMD with additional code to make it loadable without hard
-  dependencies on **libibverbs** nor **libmlx5**, which may not be installed
-  on the target system.
-
-  In this mode, their presence is still required for it to run properly,
-  however their absence won't prevent a DPDK application from starting (with
-  ``CONFIG_RTE_BUILD_SHARED_LIB`` disabled) and they won't show up as
-  missing with ``ldd(1)``.
-
-  It works by moving these dependencies to a purpose-built rdma-core "glue"
-  plug-in which must either be installed in a directory whose name is based
-  on ``CONFIG_RTE_EAL_PMD_PATH`` suffixed with ``-glue`` if set, or in a
-  standard location for the dynamic linker (e.g. ``/lib``) if left to the
-  default empty string (``""``).
-
-  This option has no performance impact.
-
-- ``CONFIG_RTE_IBVERBS_LINK_STATIC`` (default **n**)
-
-  Embed static flavor of the dependencies **libibverbs** and **libmlx5**
-  in the PMD shared library or the executable static binary.
-
-.. note::
-
-   For BlueField, target should be set to ``arm64-bluefield-linux-gcc``. This
-   will enable ``CONFIG_RTE_LIBRTE_MLX5_VDPA_PMD`` and set
-   ``RTE_CACHE_LINE_SIZE`` to 64. Default armv8a configuration of make build and
-   meson build set it to 128 then brings performance degradation.
+- NVIDIA MLNX_OFED version: **5.0**
+  See :ref:`mlx5 common prerequisites <mlx5_linux_prerequisites>` for more details.
 
 Run-time configuration
 ~~~~~~~~~~~~~~~~~~~~~~
 
-- **ethtool** operations on related kernel interfaces also affect the PMD.
+Driver options
+^^^^^^^^^^^^^^
 
-- ``class`` parameter [string]
+Please refer to :ref:`mlx5 common options <mlx5_common_driver_options>`
+for an additional list of options shared with other mlx5 drivers.
 
-  Select the class of the driver that should probe the device.
-  `vdpa` for the mlx5 vDPA driver.
+- ``event_mode`` parameter [int]
 
+  - 0, Completion queue scheduling will be managed by a timer thread which
+    automatically adjusts its delays to the coming traffic rate.
+
+  - 1, Completion queue scheduling will be managed by a timer thread with fixed
+    delay time.
+
+  - 2, Completion queue scheduling will be managed by interrupts. Each CQ burst
+    arms the CQ in order to get an interrupt event in the next traffic burst.
+
+  - Default mode is 1.
+
+- ``event_us`` parameter [int]
+
+  Per mode micro-seconds parameter - relevant only for event mode 0 and 1:
+
+  - 0, A nonzero value to set timer step in micro-seconds. The timer thread
+    dynamic delay change steps according to this value. Default value is 1us.
+
+  - 1, A value to set fixed timer delay in micro-seconds. Default value is 0us.
+
+- ``no_traffic_time`` parameter [int]
+
+  A nonzero value defines the traffic off time, in polling cycle time units,
+  that moves the driver to no-traffic mode. In this mode the polling is stopped
+  and interrupts are configured to the device in order to notify traffic for the
+  driver. Default value is 16.
+
+- ``event_core`` parameter [int]
+
+  The CPU core number of the timer thread, default: EAL main lcore.
+
+.. note::
+
+   This core can be shared among different mlx5 vDPA devices as `event_core`
+   but using it also for other tasks may affect the performance and the latency
+   of the mlx5 vDPA devices.
+
+- ``max_conf_threads`` parameter [int]
+
+  Allow the driver to use internal threads to obtain fast configuration.
+  All the threads will be open on the same core of the event completion queue scheduling thread.
+
+  - 0, default, don't use internal threads for configuration.
+
+  - 1 - 256, number of internal threads in addition to the caller thread (8 is suggested).
+    This value, if not 0, should be the same for all the devices;
+    the first probing will take it with the ``event_core``
+    for all the multi-thread configurations in the driver.
+
+- ``hw_latency_mode`` parameter [int]
+
+  The completion queue moderation mode:
+
+  - 0, HW default.
+
+  - 1, Latency is counted from the first packet completion report.
+
+  - 2, Latency is counted from the last packet completion.
+
+- ``hw_max_latency_us`` parameter [int]
+
+  - 1 - 4095, The maximum time in microseconds that packet completion report
+    can be delayed.
+
+  - 0, HW default.
+
+- ``hw_max_pending_comp`` parameter [int]
+
+  - 1 - 65535, The maximum number of pending packets completions in an HW queue.
+
+  - 0, HW default.
+
+- ``queue_size`` parameter [int]
+
+  - 1 - 1024, Virtio queue depth for pre-creating queue resource to speed up
+    first time queue creation. Set it together with ``queues`` parameter.
+
+  - 0, default value, no pre-create virtq resource.
+
+- ``queues`` parameter [int]
+
+  - 1 - 128, Maximum number of virtio queue pair (including 1 Rx queue and 1 Tx queue)
+    for pre-creating queue resource to speed up first time queue creation.
+    Set it together with ``queue_size`` parameter.
+
+  - 0, default value, no pre-create virtq resource.
+
+Error handling
+^^^^^^^^^^^^^^
+
+Upon potential hardware errors, mlx5 PMD try to recover, give up if failed 3
+times in 3 seconds, virtq will be put in disable state. User should check log
+to get error information, or query vdpa statistics counter to know error type
+and count report.
+
+Statistics
+^^^^^^^^^^
+
+The device statistics counter persists in reconfiguration until the device gets
+removed. User can reset counters by calling function rte_vdpa_reset_stats().

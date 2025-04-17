@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 #include <rte_common.h>
-#include <rte_ethdev_driver.h>
+#include <ethdev_driver.h>
 #include <rte_eventdev.h>
 #include <rte_mempool.h>
 #include <rte_memory.h>
@@ -44,6 +44,7 @@
 /* ETH_HLEN+ETH_FCS+2*VLAN_HLEN */
 #define OCCTX_L2_OVERHEAD	(RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN + \
 				 OCCTX_MAX_VTAG_ACT_SIZE)
+#define OCCTX_L2_MAX_LEN	(RTE_ETHER_MTU + OCCTX_L2_OVERHEAD)
 
 /* Since HW FRS includes NPC VTAG insertion space, user has reduced FRS */
 #define OCCTX_MAX_FRS	\
@@ -54,24 +55,23 @@
 #define OCCTX_MAX_MTU		(OCCTX_MAX_FRS - OCCTX_L2_OVERHEAD)
 
 #define OCTEONTX_RX_OFFLOADS		(				   \
-					 DEV_RX_OFFLOAD_CHECKSUM	 | \
-					 DEV_RX_OFFLOAD_SCTP_CKSUM       | \
-					 DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM | \
-					 DEV_RX_OFFLOAD_SCATTER	         | \
-					 DEV_RX_OFFLOAD_SCATTER		 | \
-					 DEV_RX_OFFLOAD_JUMBO_FRAME	 | \
-					 DEV_RX_OFFLOAD_VLAN_FILTER)
+					 RTE_ETH_RX_OFFLOAD_CHECKSUM	 | \
+					 RTE_ETH_RX_OFFLOAD_SCTP_CKSUM       | \
+					 RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM | \
+					 RTE_ETH_RX_OFFLOAD_SCATTER	         | \
+					 RTE_ETH_RX_OFFLOAD_SCATTER		 | \
+					 RTE_ETH_RX_OFFLOAD_VLAN_FILTER)
 
 #define OCTEONTX_TX_OFFLOADS		(				   \
-					 DEV_TX_OFFLOAD_MBUF_FAST_FREE	 | \
-					 DEV_TX_OFFLOAD_MT_LOCKFREE	 | \
-					 DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM | \
-					 DEV_TX_OFFLOAD_OUTER_UDP_CKSUM	 | \
-					 DEV_TX_OFFLOAD_IPV4_CKSUM	 | \
-					 DEV_TX_OFFLOAD_TCP_CKSUM	 | \
-					 DEV_TX_OFFLOAD_UDP_CKSUM	 | \
-					 DEV_TX_OFFLOAD_SCTP_CKSUM	 | \
-					 DEV_TX_OFFLOAD_MULTI_SEGS)
+					 RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE	 | \
+					 RTE_ETH_TX_OFFLOAD_MT_LOCKFREE	 | \
+					 RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM | \
+					 RTE_ETH_TX_OFFLOAD_OUTER_UDP_CKSUM	 | \
+					 RTE_ETH_TX_OFFLOAD_IPV4_CKSUM	 | \
+					 RTE_ETH_TX_OFFLOAD_TCP_CKSUM	 | \
+					 RTE_ETH_TX_OFFLOAD_UDP_CKSUM	 | \
+					 RTE_ETH_TX_OFFLOAD_SCTP_CKSUM	 | \
+					 RTE_ETH_TX_OFFLOAD_MULTI_SEGS)
 
 static inline struct octeontx_nic *
 octeontx_pmd_priv(struct rte_eth_dev *dev)
@@ -144,6 +144,7 @@ struct octeontx_nic {
 	struct octeontx_vlan_info vlan_info;
 	int print_flag;
 	struct octeontx_fc_info fc;
+	bool reconfigure;
 } __rte_cache_aligned;
 
 struct octeontx_txq {

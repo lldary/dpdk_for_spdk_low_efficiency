@@ -4,6 +4,8 @@
 #ifndef TEST_CRYPTODEV_H_
 #define TEST_CRYPTODEV_H_
 
+#include <rte_cryptodev.h>
+
 #define HEX_DUMP 0
 
 #define FALSE                           0
@@ -19,7 +21,7 @@
 #define DEFAULT_NUM_XFORMS              (2)
 #define NUM_MBUFS                       (8191)
 #define MBUF_CACHE_SIZE                 (256)
-#define MBUF_DATAPAYLOAD_SIZE		(2048 + DIGEST_BYTE_LENGTH_SHA512)
+#define MBUF_DATAPAYLOAD_SIZE		(4096 + DIGEST_BYTE_LENGTH_SHA512)
 #define MBUF_SIZE			(sizeof(struct rte_mbuf) + \
 		RTE_PKTMBUF_HEADROOM + MBUF_DATAPAYLOAD_SIZE)
 
@@ -59,6 +61,7 @@
 #define CRYPTODEV_NAME_SNOW3G_PMD	crypto_snow3g
 #define CRYPTODEV_NAME_KASUMI_PMD	crypto_kasumi
 #define CRYPTODEV_NAME_ZUC_PMD		crypto_zuc
+#define CRYPTODEV_NAME_CHACHA20_POLY1305_PMD	crypto_chacha20_poly1305
 #define CRYPTODEV_NAME_ARMV8_PMD	crypto_armv8
 #define CRYPTODEV_NAME_DPAA_SEC_PMD	crypto_dpaa_sec
 #define CRYPTODEV_NAME_DPAA2_SEC_PMD	crypto_dpaa2_sec
@@ -67,9 +70,35 @@
 #define CRYPTODEV_NAME_CCP_PMD		crypto_ccp
 #define CRYPTODEV_NAME_VIRTIO_PMD	crypto_virtio
 #define CRYPTODEV_NAME_OCTEONTX_SYM_PMD	crypto_octeontx
-#define CRYPTODEV_NAME_OCTEONTX2_PMD	crypto_octeontx2
 #define CRYPTODEV_NAME_CAAM_JR_PMD	crypto_caam_jr
 #define CRYPTODEV_NAME_NITROX_PMD	crypto_nitrox_sym
+#define CRYPTODEV_NAME_BCMFS_PMD	crypto_bcmfs
+#define CRYPTODEV_NAME_CN9K_PMD		crypto_cn9k
+#define CRYPTODEV_NAME_CN10K_PMD	crypto_cn10k
+#define CRYPTODEV_NAME_MLX5_PMD		crypto_mlx5
+#define CRYPTODEV_NAME_UADK_PMD		crypto_uadk
+
+
+enum cryptodev_api_test_type {
+	CRYPTODEV_API_TEST = 0,
+	CRYPTODEV_RAW_API_TEST
+};
+
+extern enum cryptodev_api_test_type global_api_test_type;
+
+extern struct crypto_testsuite_params *p_testsuite_params;
+struct crypto_testsuite_params {
+	struct rte_mempool *mbuf_pool;
+	struct rte_mempool *large_mbuf_pool;
+	struct rte_mempool *op_mpool;
+	struct rte_mempool *session_mpool;
+	struct rte_mempool *session_priv_mpool;
+	struct rte_cryptodev_config conf;
+	struct rte_cryptodev_qp_conf qp_conf;
+
+	uint8_t valid_devs[RTE_CRYPTO_MAX_DEVS];
+	uint8_t valid_dev_count;
+};
 
 /**
  * Write (spread) data from buffer to mbuf data
@@ -153,15 +182,8 @@ create_segmented_mbuf(struct rte_mempool *mbuf_pool, int pkt_len,
 		int nb_segs, uint8_t pattern) {
 
 	struct rte_mbuf *m = NULL, *mbuf = NULL;
+	int size, t_len, data_len = 0;
 	uint8_t *dst;
-	int data_len = 0;
-	int i, size;
-	int t_len;
-
-	if (pkt_len < 1) {
-		printf("Packet size must be 1 or more (is %d)\n", pkt_len);
-		return NULL;
-	}
 
 	if (nb_segs < 1) {
 		printf("Number of segments must be 1 or more (is %d)\n",
@@ -173,16 +195,16 @@ create_segmented_mbuf(struct rte_mempool *mbuf_pool, int pkt_len,
 	size = pkt_len;
 
 	/* Create chained mbuf_src and fill it generated data */
-	for (i = 0; size > 0; i++) {
+	do {
 
 		m = rte_pktmbuf_alloc(mbuf_pool);
-		if (i == 0)
-			mbuf = m;
-
 		if (m == NULL) {
 			printf("Cannot create segment for source mbuf");
 			goto fail;
 		}
+
+		if (mbuf == NULL)
+			mbuf = m;
 
 		/* Make sure if tailroom is zeroed */
 		memset(m->buf_addr, pattern, m->buf_len);
@@ -200,13 +222,36 @@ create_segmented_mbuf(struct rte_mempool *mbuf_pool, int pkt_len,
 
 		size -= data_len;
 
-	}
+	} while (size > 0);
+
 	return mbuf;
 
 fail:
-	if (mbuf)
-		rte_pktmbuf_free(mbuf);
+	rte_pktmbuf_free(mbuf);
 	return NULL;
 }
+
+int
+process_sym_raw_dp_op(uint8_t dev_id, uint16_t qp_id,
+		struct rte_crypto_op *op, uint8_t is_cipher, uint8_t is_auth,
+		uint8_t len_in_bits, uint8_t cipher_iv_len);
+
+int
+check_cipher_capabilities_supported(const enum rte_crypto_cipher_algorithm *ciphers,
+		uint16_t num_ciphers);
+
+int
+check_auth_capabilities_supported(const enum rte_crypto_auth_algorithm *auths,
+		uint16_t num_auths);
+
+int
+check_aead_capabilities_supported(const enum rte_crypto_aead_algorithm *aeads,
+		uint16_t num_aeads);
+
+int
+ut_setup(void);
+
+void
+ut_teardown(void);
 
 #endif /* TEST_CRYPTODEV_H_ */

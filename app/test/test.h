@@ -5,11 +5,14 @@
 #ifndef _TEST_H_
 #define _TEST_H_
 
+#include <errno.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <sys/queue.h>
 
 #include <rte_hexdump.h>
 #include <rte_common.h>
+#include <rte_os_shim.h>
 
 #define TEST_SUCCESS EXIT_SUCCESS
 #define TEST_FAILED  -1
@@ -108,24 +111,34 @@ struct unit_test_case {
 	int (*setup)(void);
 	void (*teardown)(void);
 	int (*testcase)(void);
+	int (*testcase_with_data)(const void *data);
 	const char *name;
 	unsigned enabled;
+	const void *data;
 };
 
-#define TEST_CASE(fn) { NULL, NULL, fn, #fn, 1 }
+#define TEST_CASE(fn) { NULL, NULL, fn, NULL, #fn, 1, NULL }
 
-#define TEST_CASE_NAMED(name, fn) { NULL, NULL, fn, name, 1 }
+#define TEST_CASE_NAMED(name, fn) { NULL, NULL, fn, NULL, name, 1, NULL }
 
 #define TEST_CASE_ST(setup, teardown, testcase) \
-		{ setup, teardown, testcase, #testcase, 1 }
+		{ setup, teardown, testcase, NULL, #testcase, 1, NULL }
 
+#define TEST_CASE_WITH_DATA(setup, teardown, testcase, data) \
+		{ setup, teardown, NULL, testcase, #testcase, 1, data }
 
-#define TEST_CASE_DISABLED(fn) { NULL, NULL, fn, #fn, 0 }
+#define TEST_CASE_NAMED_ST(name, setup, teardown, testcase) \
+		{ setup, teardown, testcase, NULL, name, 1, NULL }
+
+#define TEST_CASE_NAMED_WITH_DATA(name, setup, teardown, testcase, data) \
+		{ setup, teardown, NULL, testcase, name, 1, data }
+
+#define TEST_CASE_DISABLED(fn) { NULL, NULL, fn, NULL, #fn, 0, NULL }
 
 #define TEST_CASE_ST_DISABLED(setup, teardown, testcase) \
-		{ setup, teardown, testcase, #testcase, 0 }
+		{ setup, teardown, testcase, NULL, #testcase, 0, NULL }
 
-#define TEST_CASES_END() { NULL, NULL, NULL, NULL, 0 }
+#define TEST_CASES_END() { NULL, NULL, NULL, NULL, NULL, 0, NULL }
 
 static inline void
 debug_hexdump(FILE *file, const char *title, const void *buf, size_t len)
@@ -138,6 +151,13 @@ struct unit_test_suite {
 	const char *suite_name;
 	int (*setup)(void);
 	void (*teardown)(void);
+	unsigned int total;
+	unsigned int executed;
+	unsigned int succeeded;
+	unsigned int skipped;
+	unsigned int failed;
+	unsigned int unsupported;
+	struct unit_test_suite **unit_test_suites;
 	struct unit_test_case unit_test_cases[];
 };
 
@@ -152,6 +172,7 @@ extern int last_test_result;
 extern const char *prgname;
 
 int commands_init(void);
+int command_valid(const char *cmd);
 
 int test_mp_secondary(void);
 int test_timer_secondary(void);
@@ -170,7 +191,7 @@ struct test_command {
 
 void add_test_command(struct test_command *t);
 
-/* Register a test function with its command string */
+/* Register a test function with its command string. Should not be used directly */
 #define REGISTER_TEST_COMMAND(cmd, func) \
 	static struct test_command test_struct_##cmd = { \
 		.command = RTE_STR(cmd), \
@@ -180,5 +201,12 @@ void add_test_command(struct test_command *t);
 	{ \
 		add_test_command(&test_struct_##cmd); \
 	}
+
+/* Register a test function as a particular type.
+ * These can be used to build up test suites automatically
+ */
+#define REGISTER_FAST_TEST(cmd, no_huge, ASan, func)  REGISTER_TEST_COMMAND(cmd, func)
+#define REGISTER_PERF_TEST REGISTER_TEST_COMMAND
+#define REGISTER_DRIVER_TEST REGISTER_TEST_COMMAND
 
 #endif

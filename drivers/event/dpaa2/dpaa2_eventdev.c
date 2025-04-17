@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright 2017,2019 NXP
+ * Copyright 2017,2019-2022 NXP
  */
 
 #include <assert.h>
@@ -14,18 +14,19 @@
 #include <rte_byteorder.h>
 #include <rte_common.h>
 #include <rte_debug.h>
-#include <rte_dev.h>
+#include <dev_driver.h>
 #include <rte_eal.h>
-#include <rte_fslmc.h>
+#include <bus_fslmc_driver.h>
 #include <rte_lcore.h>
 #include <rte_log.h>
 #include <rte_malloc.h>
 #include <rte_memcpy.h>
 #include <rte_memory.h>
 #include <rte_pci.h>
-#include <rte_bus_vdev.h>
-#include <rte_ethdev_driver.h>
-#include <rte_cryptodev.h>
+#include <bus_vdev_driver.h>
+#include <ethdev_driver.h>
+#include <cryptodev_pmd.h>
+#include <rte_event_crypto_adapter.h>
 #include <rte_event_eth_rx_adapter.h>
 #include <rte_event_eth_tx_adapter.h>
 
@@ -48,8 +49,6 @@
  * Soft Event Flow is DPCI Instance
  */
 
-/* Dynamic logging identified for mempool */
-int dpaa2_logtype_event;
 #define DPAA2_EV_TX_RETRY_COUNT 10000
 
 static uint16_t
@@ -133,8 +132,9 @@ skip_linking:
 			qbman_eq_desc_set_response(&eqdesc[loop], 0, 0);
 
 			if (event->sched_type == RTE_SCHED_TYPE_ATOMIC
-				&& event->mbuf->seqn) {
-				uint8_t dqrr_index = event->mbuf->seqn - 1;
+				&& *dpaa2_seqn(event->mbuf)) {
+				uint8_t dqrr_index =
+					*dpaa2_seqn(event->mbuf) - 1;
 
 				qbman_eq_desc_set_dca(&eqdesc[loop], 1,
 						      dqrr_index, 0);
@@ -176,7 +176,7 @@ send_partial:
 				if (retry_count > DPAA2_EV_TX_RETRY_COUNT) {
 					num_tx += loop;
 					nb_events -= loop;
-					return num_tx + loop;
+					return num_tx;
 				}
 			} else {
 				loop += ret;
@@ -251,7 +251,7 @@ static void dpaa2_eventdev_process_atomic(struct qbman_swp *swp,
 
 	rte_memcpy(ev, ev_temp, sizeof(struct rte_event));
 	rte_free(ev_temp);
-	ev->mbuf->seqn = dqrr_index + 1;
+	*dpaa2_seqn(ev->mbuf) = dqrr_index + 1;
 	DPAA2_PER_LCORE_DQRR_SIZE++;
 	DPAA2_PER_LCORE_DQRR_HELD |= 1 << dqrr_index;
 	DPAA2_PER_LCORE_DQRR_MBUF(dqrr_index) = ev->mbuf;
@@ -316,7 +316,7 @@ skip_linking:
 		if (DPAA2_PER_LCORE_DQRR_HELD & (1 << i)) {
 			qbman_swp_dqrr_idx_consume(swp, i);
 			DPAA2_PER_LCORE_DQRR_SIZE--;
-			DPAA2_PER_LCORE_DQRR_MBUF(i)->seqn =
+			*dpaa2_seqn(DPAA2_PER_LCORE_DQRR_MBUF(i)) =
 				DPAA2_INVALID_MBUF_SEQN;
 		}
 		i++;
@@ -404,11 +404,16 @@ dpaa2_eventdev_info_get(struct rte_eventdev *dev,
 		DPAA2_EVENT_MAX_PORT_ENQUEUE_DEPTH;
 	dev_info->max_num_events = DPAA2_EVENT_MAX_NUM_EVENTS;
 	dev_info->event_dev_cap = RTE_EVENT_DEV_CAP_DISTRIBUTED_SCHED |
+		RTE_EVENT_DEV_CAP_ATOMIC |
+		RTE_EVENT_DEV_CAP_PARALLEL |
 		RTE_EVENT_DEV_CAP_BURST_MODE|
 		RTE_EVENT_DEV_CAP_RUNTIME_PORT_LINK |
 		RTE_EVENT_DEV_CAP_MULTIPLE_QUEUE_PORT |
-		RTE_EVENT_DEV_CAP_NONSEQ_MODE;
-
+		RTE_EVENT_DEV_CAP_NONSEQ_MODE |
+		RTE_EVENT_DEV_CAP_QUEUE_ALL_TYPES |
+		RTE_EVENT_DEV_CAP_CARRY_FLOW_ID |
+		RTE_EVENT_DEV_CAP_MAINTENANCE_FREE;
+	dev_info->max_profiles_per_port = 1;
 }
 
 static int
@@ -537,7 +542,7 @@ dpaa2_eventdev_port_def_conf(struct rte_eventdev *dev, uint8_t port_id,
 		DPAA2_EVENT_MAX_PORT_DEQUEUE_DEPTH;
 	port_conf->enqueue_depth =
 		DPAA2_EVENT_MAX_PORT_ENQUEUE_DEPTH;
-	port_conf->disable_implicit_release = 0;
+	port_conf->event_port_cfg = 0;
 }
 
 static int
@@ -570,14 +575,14 @@ dpaa2_eventdev_port_release(void *port)
 
 	EVENTDEV_INIT_FUNC_TRACE();
 
+	if (portal == NULL)
+		return;
+
 	/* TODO: Cleanup is required when ports are in linked state. */
 	if (portal->is_port_linked)
 		DPAA2_EVENTDEV_WARN("Event port must be unlinked before release");
 
-	if (portal)
-		rte_free(portal);
-
-	portal = NULL;
+	rte_free(portal);
 }
 
 static int
@@ -863,10 +868,10 @@ static int
 dpaa2_eventdev_crypto_queue_add(const struct rte_eventdev *dev,
 		const struct rte_cryptodev *cryptodev,
 		int32_t rx_queue_id,
-		const struct rte_event *ev)
+		const struct rte_event_crypto_adapter_queue_conf *conf)
 {
 	struct dpaa2_eventdev *priv = dev->data->dev_private;
-	uint8_t ev_qid = ev->queue_id;
+	uint8_t ev_qid = conf->ev.queue_id;
 	struct dpaa2_dpcon_dev *dpcon = priv->evq_info[ev_qid].dpcon;
 	int ret;
 
@@ -874,10 +879,10 @@ dpaa2_eventdev_crypto_queue_add(const struct rte_eventdev *dev,
 
 	if (rx_queue_id == -1)
 		return dpaa2_eventdev_crypto_queue_add_all(dev,
-				cryptodev, ev);
+				cryptodev, &conf->ev);
 
 	ret = dpaa2_sec_eventq_attach(cryptodev, rx_queue_id,
-				      dpcon, ev);
+				      dpcon, &conf->ev);
 	if (ret) {
 		DPAA2_EVENTDEV_ERR(
 			"dpaa2_sec_eventq_attach failed: ret: %d\n", ret);
@@ -1001,20 +1006,22 @@ dpaa2_eventdev_txa_enqueue(void *port,
 			   struct rte_event ev[],
 			   uint16_t nb_events)
 {
-	struct rte_mbuf *m = (struct rte_mbuf *)ev[0].mbuf;
+	void *txq[DPAA2_EVENT_MAX_PORT_ENQUEUE_DEPTH];
+	struct rte_mbuf *m[DPAA2_EVENT_MAX_PORT_ENQUEUE_DEPTH];
 	uint8_t qid, i;
 
 	RTE_SET_USED(port);
 
 	for (i = 0; i < nb_events; i++) {
-		qid = rte_event_eth_tx_adapter_txq_get(m);
-		rte_eth_tx_burst(m->port, qid, &m, 1);
+		m[i] = (struct rte_mbuf *)ev[i].mbuf;
+		qid = rte_event_eth_tx_adapter_txq_get(m[i]);
+		txq[i] = rte_eth_devices[m[i]->port].data->tx_queues[qid];
 	}
 
-	return nb_events;
+	return dpaa2_dev_tx_multi_txq_ordered(txq, m, nb_events);
 }
 
-static struct rte_eventdev_ops dpaa2_eventdev_ops = {
+static struct eventdev_ops dpaa2_eventdev_ops = {
 	.dev_infos_get    = dpaa2_eventdev_info_get,
 	.dev_configure    = dpaa2_eventdev_configure,
 	.dev_start        = dpaa2_eventdev_start,
@@ -1081,7 +1088,7 @@ dpaa2_eventdev_setup_dpci(struct dpaa2_dpci_dev *dpci_dev,
 }
 
 static int
-dpaa2_eventdev_create(const char *name)
+dpaa2_eventdev_create(const char *name, struct rte_vdev_device *vdev)
 {
 	struct rte_eventdev *eventdev;
 	struct dpaa2_eventdev *priv;
@@ -1091,7 +1098,7 @@ dpaa2_eventdev_create(const char *name)
 
 	eventdev = rte_event_pmd_vdev_init(name,
 					   sizeof(struct dpaa2_eventdev),
-					   rte_socket_id());
+					   rte_socket_id(), vdev);
 	if (eventdev == NULL) {
 		DPAA2_EVENTDEV_ERR("Failed to create Event device %s", name);
 		goto fail;
@@ -1109,7 +1116,7 @@ dpaa2_eventdev_create(const char *name)
 
 	/* For secondary processes, the primary has done all the work */
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
-		return 0;
+		goto done;
 
 	priv = eventdev->data->dev_private;
 	priv->max_event_queues = 0;
@@ -1136,8 +1143,10 @@ dpaa2_eventdev_create(const char *name)
 		priv->max_event_queues++;
 	} while (dpcon_dev && dpci_dev);
 
-	RTE_LOG(INFO, PMD, "%s eventdev created\n", name);
+	DPAA2_EVENTDEV_INFO("%s eventdev created", name);
 
+done:
+	event_dev_probing_finish(eventdev);
 	return 0;
 fail:
 	return -EFAULT;
@@ -1171,7 +1180,7 @@ dpaa2_eventdev_destroy(const char *name)
 	}
 	priv->max_event_queues = 0;
 
-	RTE_LOG(INFO, PMD, "%s eventdev cleaned\n", name);
+	DPAA2_EVENTDEV_INFO("%s eventdev cleaned", name);
 	return 0;
 }
 
@@ -1183,7 +1192,7 @@ dpaa2_eventdev_probe(struct rte_vdev_device *vdev)
 
 	name = rte_vdev_device_name(vdev);
 	DPAA2_EVENTDEV_INFO("Initializing %s", name);
-	return dpaa2_eventdev_create(name);
+	return dpaa2_eventdev_create(name, vdev);
 }
 
 static int
@@ -1205,10 +1214,4 @@ static struct rte_vdev_driver vdev_eventdev_dpaa2_pmd = {
 };
 
 RTE_PMD_REGISTER_VDEV(EVENTDEV_NAME_DPAA2_PMD, vdev_eventdev_dpaa2_pmd);
-
-RTE_INIT(dpaa2_eventdev_init_log)
-{
-	dpaa2_logtype_event = rte_log_register("pmd.event.dpaa2");
-	if (dpaa2_logtype_event >= 0)
-		rte_log_set_level(dpaa2_logtype_event, RTE_LOG_NOTICE);
-}
+RTE_LOG_REGISTER_DEFAULT(dpaa2_logtype_event, NOTICE);

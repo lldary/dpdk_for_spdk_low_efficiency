@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-3-Clause
- * Copyright 2018 NXP
+ * Copyright 2018-2021 NXP
  */
 
 #ifndef _DPAAX_IOVA_TABLE_H_
@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <arpa/inet.h>
 
+#include <rte_compat.h>
 #include <rte_eal.h>
 #include <rte_branch_prediction.h>
 #include <rte_memory.h>
@@ -32,7 +33,7 @@ struct dpaax_iovat_element {
 
 struct dpaax_iova_table {
 	unsigned int count; /**< No. of blocks of contiguous physical pages */
-	struct dpaax_iovat_element entries[0];
+	struct dpaax_iovat_element entries[];
 };
 
 /* Pointer to the table, which is common for DPAA/DPAA2 and only a single
@@ -101,6 +102,12 @@ dpaax_iova_table_get_va(phys_addr_t paddr) {
 
 		/* paddr > entry->start && paddr <= entry->(start+len) */
 		index = (paddr_align - entry[i].start)/DPAAX_MEM_SPLIT;
+		/* paddr is within range, but no vaddr entry ever written
+		 * at index
+		 */
+		if ((void *)(uintptr_t)entry[i].pages[index] == NULL)
+			return NULL;
+
 		vaddr = (void *)((uintptr_t)entry[i].pages[index] + offset);
 		break;
 	} while (1);

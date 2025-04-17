@@ -35,21 +35,65 @@ gen_key_snow3g(const uint8_t *ck, uint32_t *keyx)
 	}
 }
 
+static __rte_always_inline int
+cpt_mac_len_verify(struct rte_crypto_auth_xform *auth)
+{
+	uint16_t mac_len = auth->digest_length;
+	int ret;
+
+	if ((auth->algo != RTE_CRYPTO_AUTH_NULL) && (mac_len == 0))
+		return -1;
+
+	switch (auth->algo) {
+	case RTE_CRYPTO_AUTH_MD5:
+	case RTE_CRYPTO_AUTH_MD5_HMAC:
+		ret = (mac_len <= 16) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_SHA1:
+	case RTE_CRYPTO_AUTH_SHA1_HMAC:
+		ret = (mac_len <= 20) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_SHA224:
+	case RTE_CRYPTO_AUTH_SHA224_HMAC:
+		ret = (mac_len <= 28) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_SHA256:
+	case RTE_CRYPTO_AUTH_SHA256_HMAC:
+		ret = (mac_len <= 32) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_SHA384:
+	case RTE_CRYPTO_AUTH_SHA384_HMAC:
+		ret = (mac_len <= 48) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_SHA512:
+	case RTE_CRYPTO_AUTH_SHA512_HMAC:
+		ret = (mac_len <= 64) ? 0 : -1;
+		break;
+	case RTE_CRYPTO_AUTH_NULL:
+		ret = 0;
+		break;
+	default:
+		ret = -1;
+	}
+
+	return ret;
+}
+
 static __rte_always_inline void
-cpt_fc_salt_update(void *ctx,
+cpt_fc_salt_update(struct cpt_ctx *cpt_ctx,
 		   uint8_t *salt)
 {
-	struct cpt_ctx *cpt_ctx = ctx;
-	memcpy(&cpt_ctx->fctx.enc.encr_iv, salt, 4);
+	mc_fc_context_t *fctx = &cpt_ctx->mc_ctx.fctx;
+	memcpy(fctx->enc.encr_iv, salt, 4);
 }
 
 static __rte_always_inline int
 cpt_fc_ciph_validate_key_aes(uint16_t key_len)
 {
 	switch (key_len) {
-	case CPT_BYTE_16:
-	case CPT_BYTE_24:
-	case CPT_BYTE_32:
+	case 16:
+	case 24:
+	case 32:
 		return 0;
 	default:
 		return -1;
@@ -77,9 +121,12 @@ cpt_fc_ciph_set_type(cipher_type_t type, struct cpt_ctx *ctx, uint16_t key_len)
 			return -1;
 		fc_type = FC_GEN;
 		break;
+	case CHACHA20:
+		fc_type = FC_GEN;
+		break;
 	case AES_XTS:
 		key_len = key_len / 2;
-		if (unlikely(key_len == CPT_BYTE_24)) {
+		if (unlikely(key_len == 24)) {
 			CPT_LOG_DP_ERR("Invalid AES key len for XTS");
 			return -1;
 		}
@@ -125,13 +172,13 @@ cpt_fc_ciph_set_key_set_aes_key_type(mc_fc_context_t *fctx, uint16_t key_len)
 {
 	mc_aes_type_t aes_key_type = 0;
 	switch (key_len) {
-	case CPT_BYTE_16:
+	case 16:
 		aes_key_type = AES_128_BIT;
 		break;
-	case CPT_BYTE_24:
+	case 24:
 		aes_key_type = AES_192_BIT;
 		break;
-	case CPT_BYTE_32:
+	case 32:
 		aes_key_type = AES_256_BIT;
 		break;
 	default:
@@ -146,10 +193,12 @@ static __rte_always_inline void
 cpt_fc_ciph_set_key_snow3g_uea2(struct cpt_ctx *cpt_ctx, const uint8_t *key,
 		uint16_t key_len)
 {
+	mc_zuc_snow3g_ctx_t *zs_ctx = &cpt_ctx->mc_ctx.zs_ctx;
 	uint32_t keyx[4];
+
 	cpt_ctx->snow3g = 1;
 	gen_key_snow3g(key, keyx);
-	memcpy(cpt_ctx->zs_ctx.ci_key, keyx, key_len);
+	memcpy(zs_ctx->ci_key, keyx, key_len);
 	cpt_ctx->zsk_flags = 0;
 }
 
@@ -157,9 +206,11 @@ static __rte_always_inline void
 cpt_fc_ciph_set_key_zuc_eea3(struct cpt_ctx *cpt_ctx, const uint8_t *key,
 		uint16_t key_len)
 {
+	mc_zuc_snow3g_ctx_t *zs_ctx = &cpt_ctx->mc_ctx.zs_ctx;
+
 	cpt_ctx->snow3g = 0;
-	memcpy(cpt_ctx->zs_ctx.ci_key, key, key_len);
-	memcpy(cpt_ctx->zs_ctx.zuc_const, zuc_d, 32);
+	memcpy(zs_ctx->ci_key, key, key_len);
+	memcpy(zs_ctx->zuc_const, zuc_d, 32);
 	cpt_ctx->zsk_flags = 0;
 }
 
@@ -167,8 +218,10 @@ static __rte_always_inline void
 cpt_fc_ciph_set_key_kasumi_f8_ecb(struct cpt_ctx *cpt_ctx, const uint8_t *key,
 		uint16_t key_len)
 {
+	mc_kasumi_ctx_t *k_ctx = &cpt_ctx->mc_ctx.k_ctx;
+
 	cpt_ctx->k_ecb = 1;
-	memcpy(cpt_ctx->k_ctx.ci_key, key, key_len);
+	memcpy(k_ctx->ci_key, key, key_len);
 	cpt_ctx->zsk_flags = 0;
 }
 
@@ -176,16 +229,17 @@ static __rte_always_inline void
 cpt_fc_ciph_set_key_kasumi_f8_cbc(struct cpt_ctx *cpt_ctx, const uint8_t *key,
 		uint16_t key_len)
 {
-	memcpy(cpt_ctx->k_ctx.ci_key, key, key_len);
+	mc_kasumi_ctx_t *k_ctx = &cpt_ctx->mc_ctx.k_ctx;
+
+	memcpy(k_ctx->ci_key, key, key_len);
 	cpt_ctx->zsk_flags = 0;
 }
 
 static __rte_always_inline int
-cpt_fc_ciph_set_key(void *ctx, cipher_type_t type, const uint8_t *key,
-		    uint16_t key_len, uint8_t *salt)
+cpt_fc_ciph_set_key(struct cpt_ctx *cpt_ctx, cipher_type_t type,
+		    const uint8_t *key, uint16_t key_len, uint8_t *salt)
 {
-	struct cpt_ctx *cpt_ctx = ctx;
-	mc_fc_context_t *fctx = &cpt_ctx->fctx;
+	mc_fc_context_t *fctx = &cpt_ctx->mc_ctx.fctx;
 	int ret;
 
 	ret = cpt_fc_ciph_set_type(type, cpt_ctx, key_len);
@@ -195,7 +249,7 @@ cpt_fc_ciph_set_key(void *ctx, cipher_type_t type, const uint8_t *key,
 	if (cpt_ctx->fc_type == FC_GEN) {
 		/*
 		 * We need to always say IV is from DPTR as user can
-		 * sometimes iverride IV per operation.
+		 * sometimes override IV per operation.
 		 */
 		fctx->enc.iv_source = CPT_FROM_DPTR;
 
@@ -229,6 +283,7 @@ cpt_fc_ciph_set_key(void *ctx, cipher_type_t type, const uint8_t *key,
 	case AES_ECB:
 	case AES_CFB:
 	case AES_CTR:
+	case CHACHA20:
 		cpt_fc_ciph_set_key_set_aes_key_type(fctx, key_len);
 		break;
 	case AES_GCM:
@@ -342,27 +397,26 @@ fill_sg_comp_from_iov(sg_comp_t *list,
 	int32_t j;
 	uint32_t extra_len = extra_buf ? extra_buf->size : 0;
 	uint32_t size = *psize;
-	buf_ptr_t *bufs;
 
-	bufs = from->bufs;
 	for (j = 0; (j < from->buf_cnt) && size; j++) {
+		phys_addr_t dma_addr = from->bufs[j].dma_addr;
+		uint32_t buf_sz = from->bufs[j].size;
+		sg_comp_t *to = &list[i >> 2];
 		phys_addr_t e_dma_addr;
 		uint32_t e_len;
-		sg_comp_t *to = &list[i >> 2];
 
 		if (unlikely(from_offset)) {
-			if (from_offset >= bufs[j].size) {
-				from_offset -= bufs[j].size;
+			if (from_offset >= buf_sz) {
+				from_offset -= buf_sz;
 				continue;
 			}
-			e_dma_addr = bufs[j].dma_addr + from_offset;
-			e_len = (size > (bufs[j].size - from_offset)) ?
-				(bufs[j].size - from_offset) : size;
+			e_dma_addr = dma_addr + from_offset;
+			e_len = (size > (buf_sz - from_offset)) ?
+				(buf_sz - from_offset) : size;
 			from_offset = 0;
 		} else {
-			e_dma_addr = bufs[j].dma_addr;
-			e_len = (size > bufs[j].size) ?
-				bufs[j].size : size;
+			e_dma_addr = dma_addr;
+			e_len = (size > buf_sz) ? buf_sz : size;
 		}
 
 		to->u.s.len[i % 4] = rte_cpu_to_be_16(e_len);
@@ -435,10 +489,8 @@ cpt_digest_gen_prep(uint32_t flags,
 	uint32_t g_size_bytes, s_size_bytes;
 	uint64_t dptr_dma, rptr_dma;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
 	void *c_vaddr, *m_vaddr;
 	uint64_t c_dma, m_dma;
-	opcode_info_t opcode;
 
 	ctx = params->ctx_buf.vaddr;
 	meta_p = &params->meta_buf;
@@ -473,30 +525,26 @@ cpt_digest_gen_prep(uint32_t flags,
 	data_len = AUTH_DLEN(d_lens);
 
 	/*GP op header */
-	vq_cmd_w0.u64 = 0;
-	vq_cmd_w0.s.param2 = ((uint16_t)hash_type << 8);
+	vq_cmd_w0.s.opcode.minor = 0;
+	vq_cmd_w0.s.param2 = ((uint16_t)hash_type << 8) | mac_len;
 	if (ctx->hmac) {
-		opcode.s.major = CPT_MAJOR_OP_HMAC | CPT_DMA_MODE;
+		vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_HMAC | CPT_DMA_MODE;
 		vq_cmd_w0.s.param1 = key_len;
-		vq_cmd_w0.s.dlen = data_len + ROUNDUP8(key_len);
+		vq_cmd_w0.s.dlen = data_len + RTE_ALIGN_CEIL(key_len, 8);
 	} else {
-		opcode.s.major = CPT_MAJOR_OP_HASH | CPT_DMA_MODE;
+		vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_HASH | CPT_DMA_MODE;
 		vq_cmd_w0.s.param1 = 0;
 		vq_cmd_w0.s.dlen = data_len;
 	}
 
-	opcode.s.minor = 0;
-
 	/* Null auth only case enters the if */
 	if (unlikely(!hash_type && !ctx->enc_cipher)) {
-		opcode.s.major = CPT_MAJOR_OP_MISC;
+		vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_MISC;
 		/* Minor op is passthrough */
-		opcode.s.minor = 0x03;
+		vq_cmd_w0.s.opcode.minor = 0x03;
 		/* Send out completion code only */
 		vq_cmd_w0.s.param2 = 0x1;
 	}
-
-	vq_cmd_w0.s.opcode = opcode.flags;
 
 	/* DPTR has SG list */
 	in_buffer = m_vaddr;
@@ -515,10 +563,10 @@ cpt_digest_gen_prep(uint32_t flags,
 	i = 0;
 
 	if (ctx->hmac) {
-		uint64_t k_dma = params->ctx_buf.dma_addr +
-			offsetof(struct cpt_ctx, auth_key);
+		uint64_t k_dma = ctx->auth_key_iova;
 		/* Key */
-		i = fill_sg_comp(gather_comp, i, k_dma, ROUNDUP8(key_len));
+		i = fill_sg_comp(gather_comp, i, k_dma,
+				 RTE_ALIGN_CEIL(key_len, 8));
 	}
 
 	/* input data */
@@ -588,9 +636,6 @@ cpt_digest_gen_prep(uint32_t flags,
 	req->ist.ei1 = dptr_dma;
 	req->ist.ei2 = rptr_dma;
 
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
 	*req->completion_addr = COMPLETION_CODE_INIT;
@@ -598,7 +643,6 @@ cpt_digest_gen_prep(uint32_t flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -626,12 +670,10 @@ cpt_enc_hmac_prep(uint32_t flags,
 	uint32_t encr_data_len, auth_data_len, aad_len = 0;
 	uint32_t passthrough_len = 0;
 	void *m_vaddr, *offset_vaddr;
-	uint64_t m_dma, offset_dma, ctx_dma;
+	uint64_t m_dma, offset_dma;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
 	void *c_vaddr;
 	uint64_t c_dma;
-	opcode_info_t opcode;
 
 	meta_p = &fc_params->meta_buf;
 	m_vaddr = meta_p->vaddr;
@@ -682,9 +724,6 @@ cpt_enc_hmac_prep(uint32_t flags,
 	m_vaddr = (uint8_t *)m_vaddr + size;
 	m_dma += size;
 
-	if (hash_type == GMAC_TYPE)
-		encr_data_len = 0;
-
 	if (unlikely(!(flags & VALID_IV_BUF))) {
 		iv_len = 0;
 		iv_offset = ENCR_IV_OFFSET(d_offs);
@@ -713,22 +752,26 @@ cpt_enc_hmac_prep(uint32_t flags,
 	}
 
 	/* Encryption */
-	opcode.s.major = CPT_MAJOR_OP_FC;
-	opcode.s.minor = 0;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_FC;
+	vq_cmd_w0.s.opcode.minor = CPT_FC_MINOR_OP_ENCRYPT;
+	vq_cmd_w0.s.opcode.minor |= (cpt_ctx->auth_enc <<
+					CPT_HMAC_FIRST_BIT_POS);
+
+	if (hash_type == GMAC_TYPE) {
+		encr_offset = 0;
+		encr_data_len = 0;
+	}
 
 	auth_dlen = auth_offset + auth_data_len;
 	enc_dlen = encr_data_len + encr_offset;
 	if (unlikely(encr_data_len & 0xf)) {
 		if ((cipher_type == DES3_CBC) || (cipher_type == DES3_ECB))
-			enc_dlen = ROUNDUP8(encr_data_len) + encr_offset;
+			enc_dlen = RTE_ALIGN_CEIL(encr_data_len, 8) +
+					encr_offset;
 		else if (likely((cipher_type == AES_CBC) ||
 				(cipher_type == AES_ECB)))
-			enc_dlen = ROUNDUP16(encr_data_len) + encr_offset;
-	}
-
-	if (unlikely(hash_type == GMAC_TYPE)) {
-		encr_offset = auth_dlen;
-		enc_dlen = 0;
+			enc_dlen = RTE_ALIGN_CEIL(encr_data_len, 8) +
+					encr_offset;
 	}
 
 	if (unlikely(auth_dlen > enc_dlen)) {
@@ -739,8 +782,10 @@ cpt_enc_hmac_prep(uint32_t flags,
 		outputlen = enc_dlen + mac_len;
 	}
 
+	if (cpt_ctx->auth_enc != 0)
+		outputlen = enc_dlen;
+
 	/* GP op header */
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
 	vq_cmd_w0.s.param2 = auth_data_len;
 	/*
@@ -771,8 +816,6 @@ cpt_enc_hmac_prep(uint32_t flags,
 
 		vq_cmd_w0.s.dlen = inputlen + OFF_CTRL_LEN;
 
-		vq_cmd_w0.s.opcode = opcode.flags;
-
 		if (likely(iv_len)) {
 			uint64_t *dest = (uint64_t *)((uint8_t *)offset_vaddr
 						      + OFF_CTRL_LEN);
@@ -801,9 +844,7 @@ cpt_enc_hmac_prep(uint32_t flags,
 		m_vaddr = (uint8_t *)m_vaddr + size;
 		m_dma += size;
 
-		opcode.s.major |= CPT_DMA_MODE;
-
-		vq_cmd_w0.s.opcode = opcode.flags;
+		vq_cmd_w0.s.opcode.major |= CPT_DMA_MODE;
 
 		if (likely(iv_len)) {
 			uint64_t *dest = (uint64_t *)((uint8_t *)offset_vaddr
@@ -961,12 +1002,15 @@ cpt_enc_hmac_prep(uint32_t flags,
 		req->ist.ei2 = rptr_dma;
 	}
 
-	ctx_dma = fc_params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, fctx);
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = ctx_dma;
+	if (unlikely((encr_offset >> 16) ||
+		     (iv_offset >> 8) ||
+		     (auth_offset >> 8))) {
+		CPT_LOG_DP_ERR("Offset not supported");
+		CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+		CPT_LOG_DP_ERR("iv_offset : %d", iv_offset);
+		CPT_LOG_DP_ERR("auth_offset: %d", auth_offset);
+		return;
+	}
 
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
@@ -975,7 +1019,6 @@ cpt_enc_hmac_prep(uint32_t flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op  = op;
 
@@ -1002,10 +1045,8 @@ cpt_dec_hmac_prep(uint32_t flags,
 	uint32_t encr_data_len, auth_data_len, aad_len = 0;
 	uint32_t passthrough_len = 0;
 	void *m_vaddr, *offset_vaddr;
-	uint64_t m_dma, offset_dma, ctx_dma;
-	opcode_info_t opcode;
+	uint64_t m_dma, offset_dma;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
 	void *c_vaddr;
 	uint64_t c_dma;
 
@@ -1032,9 +1073,6 @@ cpt_dec_hmac_prep(uint32_t flags,
 	cpt_ctx = fc_params->ctx_buf.vaddr;
 	hash_type = cpt_ctx->hash_type;
 	mac_len = cpt_ctx->mac_len;
-
-	if (hash_type == GMAC_TYPE)
-		encr_data_len = 0;
 
 	if (unlikely(!(flags & VALID_IV_BUF))) {
 		iv_len = 0;
@@ -1089,8 +1127,15 @@ cpt_dec_hmac_prep(uint32_t flags,
 	m_dma += size;
 
 	/* Decryption */
-	opcode.s.major = CPT_MAJOR_OP_FC;
-	opcode.s.minor = 1;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_FC;
+	vq_cmd_w0.s.opcode.minor = CPT_FC_MINOR_OP_DECRYPT;
+	vq_cmd_w0.s.opcode.minor |= (cpt_ctx->dec_auth <<
+					CPT_HMAC_FIRST_BIT_POS);
+
+	if (hash_type == GMAC_TYPE) {
+		encr_offset = 0;
+		encr_data_len = 0;
+	}
 
 	enc_dlen = encr_offset + encr_data_len;
 	auth_dlen = auth_offset + auth_data_len;
@@ -1103,10 +1148,9 @@ cpt_dec_hmac_prep(uint32_t flags,
 		outputlen = enc_dlen;
 	}
 
-	if (hash_type == GMAC_TYPE)
-		encr_offset = inputlen;
+	if (cpt_ctx->dec_auth != 0)
+		outputlen = inputlen = enc_dlen;
 
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
 	vq_cmd_w0.s.param2 = auth_data_len;
 
@@ -1143,14 +1187,22 @@ cpt_dec_hmac_prep(uint32_t flags,
 
 		vq_cmd_w0.s.dlen = inputlen + OFF_CTRL_LEN;
 
-		vq_cmd_w0.s.opcode = opcode.flags;
-
 		if (likely(iv_len)) {
 			uint64_t *dest = (uint64_t *)((uint8_t *)offset_vaddr +
 						      OFF_CTRL_LEN);
 			uint64_t *src = fc_params->iv_buf;
 			dest[0] = src[0];
 			dest[1] = src[1];
+		}
+
+		if (unlikely((encr_offset >> 16) ||
+			     (iv_offset >> 8) ||
+			     (auth_offset >> 8))) {
+			CPT_LOG_DP_ERR("Offset not supported");
+			CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+			CPT_LOG_DP_ERR("iv_offset : %d", iv_offset);
+			CPT_LOG_DP_ERR("auth_offset: %d", auth_offset);
+			return;
 		}
 
 		*(uint64_t *)offset_vaddr =
@@ -1174,9 +1226,7 @@ cpt_dec_hmac_prep(uint32_t flags,
 		m_vaddr = (uint8_t *)m_vaddr + size;
 		m_dma += size;
 
-		opcode.s.major |= CPT_DMA_MODE;
-
-		vq_cmd_w0.s.opcode = opcode.flags;
+		vq_cmd_w0.s.opcode.major |= CPT_DMA_MODE;
 
 		if (likely(iv_len)) {
 			uint64_t *dest = (uint64_t *)((uint8_t *)offset_vaddr +
@@ -1184,6 +1234,16 @@ cpt_dec_hmac_prep(uint32_t flags,
 			uint64_t *src = fc_params->iv_buf;
 			dest[0] = src[0];
 			dest[1] = src[1];
+		}
+
+		if (unlikely((encr_offset >> 16) ||
+			     (iv_offset >> 8) ||
+			     (auth_offset >> 8))) {
+			CPT_LOG_DP_ERR("Offset not supported");
+			CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+			CPT_LOG_DP_ERR("iv_offset : %d", iv_offset);
+			CPT_LOG_DP_ERR("auth_offset: %d", auth_offset);
+			return;
 		}
 
 		*(uint64_t *)offset_vaddr =
@@ -1347,13 +1407,6 @@ cpt_dec_hmac_prep(uint32_t flags,
 		req->ist.ei2 = rptr_dma;
 	}
 
-	ctx_dma = fc_params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, fctx);
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = ctx_dma;
-
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
 	*req->completion_addr = COMPLETION_CODE_INIT;
@@ -1361,7 +1414,6 @@ cpt_dec_hmac_prep(uint32_t flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -1392,8 +1444,6 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 	uint64_t *offset_vaddr, offset_dma;
 	uint32_t *iv_s, iv[4];
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
-	opcode_info_t opcode;
 
 	buf_p = &params->meta_buf;
 	m_vaddr = buf_p->vaddr;
@@ -1427,11 +1477,11 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 	m_vaddr = (uint8_t *)m_vaddr + size;
 	m_dma += size;
 
-	opcode.s.major = CPT_MAJOR_OP_ZUC_SNOW3G;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_ZUC_SNOW3G;
 
 	/* indicates CPTR ctx, operation type, KEY & IV mode from DPTR */
 
-	opcode.s.minor = ((1 << 7) | (snow3g << 5) | (0 << 4) |
+	vq_cmd_w0.s.opcode.minor = ((1 << 7) | (snow3g << 5) | (0 << 4) |
 			  (0 << 3) | (flags & 0x7));
 
 	if (flags == 0x1) {
@@ -1473,6 +1523,14 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 		offset_ctrl = rte_cpu_to_be_64((uint64_t)encr_offset << 16);
 	}
 
+	if (unlikely((encr_offset >> 16) ||
+		     (auth_offset >> 8))) {
+		CPT_LOG_DP_ERR("Offset not supported");
+		CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+		CPT_LOG_DP_ERR("auth_offset: %d", auth_offset);
+		return;
+	}
+
 	/* IV */
 	iv_s = (flags == 0x1) ? params->auth_iv_buf :
 		params->iv_buf;
@@ -1494,7 +1552,6 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 	/*
 	 * GP op header, lengths are expected in bits.
 	 */
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
 	vq_cmd_w0.s.param2 = auth_data_len;
 
@@ -1527,8 +1584,6 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 
 		vq_cmd_w0.s.dlen = inputlen + OFF_CTRL_LEN;
 
-		vq_cmd_w0.s.opcode = opcode.flags;
-
 		if (likely(iv_len)) {
 			uint32_t *iv_d = (uint32_t *)((uint8_t *)offset_vaddr
 						      + OFF_CTRL_LEN);
@@ -1551,9 +1606,7 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 		m_vaddr = (uint8_t *)m_vaddr + OFF_CTRL_LEN + iv_len;
 		m_dma += OFF_CTRL_LEN + iv_len;
 
-		opcode.s.major |= CPT_DMA_MODE;
-
-		vq_cmd_w0.s.opcode = opcode.flags;
+		vq_cmd_w0.s.opcode.major |= CPT_DMA_MODE;
 
 		/* DPTR has SG list */
 		in_buffer = m_vaddr;
@@ -1669,12 +1722,6 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 		req->ist.ei2 = rptr_dma;
 	}
 
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, zs_ctx);
-
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
 	*req->completion_addr = COMPLETION_CODE_INIT;
@@ -1682,7 +1729,6 @@ cpt_zuc_snow3g_enc_prep(uint32_t req_flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -1712,8 +1758,6 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 	uint64_t *offset_vaddr, offset_dma;
 	uint32_t *iv_s, iv[4], j;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
-	opcode_info_t opcode;
 
 	buf_p = &params->meta_buf;
 	m_vaddr = buf_p->vaddr;
@@ -1752,11 +1796,12 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 	m_vaddr = (uint8_t *)m_vaddr + size;
 	m_dma += size;
 
-	opcode.s.major = CPT_MAJOR_OP_ZUC_SNOW3G;
+	vq_cmd_w0.u64 = 0;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_ZUC_SNOW3G;
 
 	/* indicates CPTR ctx, operation type, KEY & IV mode from DPTR */
 
-	opcode.s.minor = ((1 << 7) | (snow3g << 5) | (0 << 4) |
+	vq_cmd_w0.s.opcode.minor = ((1 << 7) | (snow3g << 5) | (0 << 4) |
 			  (0 << 3) | (flags & 0x7));
 
 	/* consider iv len */
@@ -1785,7 +1830,6 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 	/*
 	 * GP op header, lengths are expected in bits.
 	 */
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
 
 	/*
@@ -1817,8 +1861,6 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 
 		vq_cmd_w0.s.dlen = inputlen + OFF_CTRL_LEN;
 
-		vq_cmd_w0.s.opcode = opcode.flags;
-
 		if (likely(iv_len)) {
 			uint32_t *iv_d = (uint32_t *)((uint8_t *)offset_vaddr
 						      + OFF_CTRL_LEN);
@@ -1842,9 +1884,7 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 		m_vaddr = (uint8_t *)m_vaddr + OFF_CTRL_LEN + iv_len;
 		m_dma += OFF_CTRL_LEN + iv_len;
 
-		opcode.s.major |= CPT_DMA_MODE;
-
-		vq_cmd_w0.s.opcode = opcode.flags;
+		vq_cmd_w0.s.opcode.major |= CPT_DMA_MODE;
 
 		/* DPTR has SG list */
 		in_buffer = m_vaddr;
@@ -1933,11 +1973,11 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 		req->ist.ei2 = rptr_dma;
 	}
 
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, zs_ctx);
+	if (unlikely((encr_offset >> 16))) {
+		CPT_LOG_DP_ERR("Offset not supported");
+		CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+		return;
+	}
 
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
@@ -1946,7 +1986,6 @@ cpt_zuc_snow3g_dec_prep(uint32_t req_flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -1978,8 +2017,6 @@ cpt_kasumi_enc_prep(uint32_t req_flags,
 	uint64_t m_dma, c_dma;
 	uint64_t *offset_vaddr, offset_dma;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
-	opcode_info_t opcode;
 	uint8_t *in_buffer;
 	uint32_t g_size_bytes, s_size_bytes;
 	uint64_t dptr_dma, rptr_dma;
@@ -2029,19 +2066,17 @@ cpt_kasumi_enc_prep(uint32_t req_flags,
 	m_vaddr = (uint8_t *)m_vaddr + size;
 	m_dma += size;
 
-	opcode.s.major = CPT_MAJOR_OP_KASUMI | CPT_DMA_MODE;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_KASUMI | CPT_DMA_MODE;
 
 	/* indicates ECB/CBC, direction, ctx from cptr, iv from dptr */
-	opcode.s.minor = ((1 << 6) | (cpt_ctx->k_ecb << 5) |
+	vq_cmd_w0.s.opcode.minor = ((1 << 6) | (cpt_ctx->k_ecb << 5) |
 			  (dir << 4) | (0 << 3) | (flags & 0x7));
 
 	/*
 	 * GP op header, lengths are expected in bits.
 	 */
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
 	vq_cmd_w0.s.param2 = auth_data_len;
-	vq_cmd_w0.s.opcode = opcode.flags;
 
 	/* consider iv len */
 	if (flags == 0x0) {
@@ -2078,11 +2113,21 @@ cpt_kasumi_enc_prep(uint32_t req_flags,
 		outputlen = inputlen;
 		/* iv offset is 0 */
 		*offset_vaddr = rte_cpu_to_be_64((uint64_t)encr_offset << 16);
+		if (unlikely((encr_offset >> 16))) {
+			CPT_LOG_DP_ERR("Offset not supported");
+			CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+			return;
+		}
 	} else {
 		inputlen = auth_offset + (RTE_ALIGN(auth_data_len, 8) / 8);
 		outputlen = mac_len;
 		/* iv offset is 0 */
 		*offset_vaddr = rte_cpu_to_be_64((uint64_t)auth_offset);
+		if (unlikely((auth_offset >> 8))) {
+			CPT_LOG_DP_ERR("Offset not supported");
+			CPT_LOG_DP_ERR("auth_offset: %d", auth_offset);
+			return;
+		}
 	}
 
 	i = fill_sg_comp(gather_comp, i, offset_dma, OFF_CTRL_LEN + iv_len);
@@ -2180,12 +2225,6 @@ cpt_kasumi_enc_prep(uint32_t req_flags,
 	req->ist.ei1 = dptr_dma;
 	req->ist.ei2 = rptr_dma;
 
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, k_ctx);
-
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
 	*req->completion_addr = COMPLETION_CODE_INIT;
@@ -2193,7 +2232,6 @@ cpt_kasumi_enc_prep(uint32_t req_flags,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -2222,8 +2260,6 @@ cpt_kasumi_dec_prep(uint64_t d_offs,
 	uint64_t m_dma, c_dma;
 	uint64_t *offset_vaddr, offset_dma;
 	vq_cmd_word0_t vq_cmd_w0;
-	vq_cmd_word3_t vq_cmd_w3;
-	opcode_info_t opcode;
 	uint8_t *in_buffer;
 	uint32_t g_size_bytes, s_size_bytes;
 	uint64_t dptr_dma, rptr_dma;
@@ -2262,23 +2298,22 @@ cpt_kasumi_dec_prep(uint64_t d_offs,
 	m_vaddr = (uint8_t *)m_vaddr + size;
 	m_dma += size;
 
-	opcode.s.major = CPT_MAJOR_OP_KASUMI | CPT_DMA_MODE;
+	vq_cmd_w0.u64 = 0;
+	vq_cmd_w0.s.opcode.major = CPT_MAJOR_OP_KASUMI | CPT_DMA_MODE;
 
 	/* indicates ECB/CBC, direction, ctx from cptr, iv from dptr */
-	opcode.s.minor = ((1 << 6) | (cpt_ctx->k_ecb << 5) |
+	vq_cmd_w0.s.opcode.minor = ((1 << 6) | (cpt_ctx->k_ecb << 5) |
 			  (dir << 4) | (0 << 3) | (flags & 0x7));
 
 	/*
 	 * GP op header, lengths are expected in bits.
 	 */
-	vq_cmd_w0.u64 = 0;
 	vq_cmd_w0.s.param1 = encr_data_len;
-	vq_cmd_w0.s.opcode = opcode.flags;
 
 	/* consider iv len */
 	encr_offset += iv_len;
 
-	inputlen = iv_len + (RTE_ALIGN(encr_data_len, 8) / 8);
+	inputlen = encr_offset + (RTE_ALIGN(encr_data_len, 8) / 8);
 	outputlen = inputlen;
 
 	/* save space for offset ctrl & iv */
@@ -2305,6 +2340,11 @@ cpt_kasumi_dec_prep(uint64_t d_offs,
 
 	/* Offset control word followed by iv */
 	*offset_vaddr = rte_cpu_to_be_64((uint64_t)encr_offset << 16);
+	if (unlikely((encr_offset >> 16))) {
+		CPT_LOG_DP_ERR("Offset not supported");
+		CPT_LOG_DP_ERR("enc_offset: %d", encr_offset);
+		return;
+	}
 
 	i = fill_sg_comp(gather_comp, i, offset_dma, OFF_CTRL_LEN + iv_len);
 
@@ -2370,12 +2410,6 @@ cpt_kasumi_dec_prep(uint64_t d_offs,
 	req->ist.ei1 = dptr_dma;
 	req->ist.ei2 = rptr_dma;
 
-	/* vq command w3 */
-	vq_cmd_w3.u64 = 0;
-	vq_cmd_w3.s.grp = 0;
-	vq_cmd_w3.s.cptr = params->ctx_buf.dma_addr +
-		offsetof(struct cpt_ctx, k_ctx);
-
 	/* 16 byte aligned cpt res address */
 	req->completion_addr = (uint64_t *)((uint8_t *)c_vaddr);
 	*req->completion_addr = COMPLETION_CODE_INIT;
@@ -2383,7 +2417,6 @@ cpt_kasumi_dec_prep(uint64_t d_offs,
 
 	/* Fill microcode part of instruction */
 	req->ist.ei0 = vq_cmd_w0.u64;
-	req->ist.ei3 = vq_cmd_w3.u64;
 
 	req->op = op;
 
@@ -2451,11 +2484,12 @@ cpt_fc_enc_hmac_prep(uint32_t flags, uint64_t d_offs, uint64_t d_lens,
 }
 
 static __rte_always_inline int
-cpt_fc_auth_set_key(void *ctx, auth_type_t type, const uint8_t *key,
-		    uint16_t key_len, uint16_t mac_len)
+cpt_fc_auth_set_key(struct cpt_ctx *cpt_ctx, auth_type_t type,
+		    const uint8_t *key, uint16_t key_len, uint16_t mac_len)
 {
-	struct cpt_ctx *cpt_ctx = ctx;
-	mc_fc_context_t *fctx = &cpt_ctx->fctx;
+	mc_fc_context_t *fctx = &cpt_ctx->mc_ctx.fctx;
+	mc_zuc_snow3g_ctx_t *zs_ctx = &cpt_ctx->mc_ctx.zs_ctx;
+	mc_kasumi_ctx_t *k_ctx = &cpt_ctx->mc_ctx.k_ctx;
 
 	if ((type >= ZUC_EIA3) && (type <= KASUMI_F9_ECB)) {
 		uint32_t keyx[4];
@@ -2470,26 +2504,26 @@ cpt_fc_auth_set_key(void *ctx, auth_type_t type, const uint8_t *key,
 		case SNOW3G_UIA2:
 			cpt_ctx->snow3g = 1;
 			gen_key_snow3g(key, keyx);
-			memcpy(cpt_ctx->zs_ctx.ci_key, keyx, key_len);
+			memcpy(zs_ctx->ci_key, keyx, key_len);
 			cpt_ctx->fc_type = ZUC_SNOW3G;
 			cpt_ctx->zsk_flags = 0x1;
 			break;
 		case ZUC_EIA3:
 			cpt_ctx->snow3g = 0;
-			memcpy(cpt_ctx->zs_ctx.ci_key, key, key_len);
-			memcpy(cpt_ctx->zs_ctx.zuc_const, zuc_d, 32);
+			memcpy(zs_ctx->ci_key, key, key_len);
+			memcpy(zs_ctx->zuc_const, zuc_d, 32);
 			cpt_ctx->fc_type = ZUC_SNOW3G;
 			cpt_ctx->zsk_flags = 0x1;
 			break;
 		case KASUMI_F9_ECB:
 			/* Kasumi ECB mode */
 			cpt_ctx->k_ecb = 1;
-			memcpy(cpt_ctx->k_ctx.ci_key, key, key_len);
+			memcpy(k_ctx->ci_key, key, key_len);
 			cpt_ctx->fc_type = KASUMI;
 			cpt_ctx->zsk_flags = 0x1;
 			break;
 		case KASUMI_F9_CBC:
-			memcpy(cpt_ctx->k_ctx.ci_key, key, key_len);
+			memcpy(k_ctx->ci_key, key, key_len);
 			cpt_ctx->fc_type = KASUMI;
 			cpt_ctx->zsk_flags = 0x1;
 			break;
@@ -2518,7 +2552,12 @@ cpt_fc_auth_set_key(void *ctx, auth_type_t type, const uint8_t *key,
 
 	if (key_len) {
 		cpt_ctx->hmac = 1;
-		memset(cpt_ctx->auth_key, 0, sizeof(cpt_ctx->auth_key));
+
+		cpt_ctx->auth_key = rte_zmalloc(NULL, key_len, 8);
+		if (cpt_ctx->auth_key == NULL)
+			return -1;
+
+		cpt_ctx->auth_key_iova = rte_mem_virt2iova(cpt_ctx->auth_key);
 		memcpy(cpt_ctx->auth_key, key, key_len);
 		cpt_ctx->auth_key_len = key_len;
 		memset(fctx->hmac.ipad, 0, sizeof(fctx->hmac.ipad));
@@ -2543,16 +2582,14 @@ fill_sess_aead(struct rte_crypto_sym_xform *xform,
 	aead_form = &xform->aead;
 	void *ctx = SESS_PRIV(sess);
 
-	if (aead_form->op == RTE_CRYPTO_AEAD_OP_ENCRYPT &&
-	   aead_form->algo == RTE_CRYPTO_AEAD_AES_GCM) {
+	if (aead_form->op == RTE_CRYPTO_AEAD_OP_ENCRYPT) {
 		sess->cpt_op |= CPT_OP_CIPHER_ENCRYPT;
 		sess->cpt_op |= CPT_OP_AUTH_GENERATE;
-	} else if (aead_form->op == RTE_CRYPTO_AEAD_OP_DECRYPT &&
-		aead_form->algo == RTE_CRYPTO_AEAD_AES_GCM) {
+	} else if (aead_form->op == RTE_CRYPTO_AEAD_OP_DECRYPT) {
 		sess->cpt_op |= CPT_OP_CIPHER_DECRYPT;
 		sess->cpt_op |= CPT_OP_AUTH_VERIFY;
 	} else {
-		CPT_LOG_DP_ERR("Unknown cipher operation\n");
+		CPT_LOG_DP_ERR("Unknown aead operation\n");
 		return -1;
 	}
 	switch (aead_form->algo) {
@@ -2565,6 +2602,12 @@ fill_sess_aead(struct rte_crypto_sym_xform *xform,
 		CPT_LOG_DP_ERR("Crypto: Unsupported cipher algo %u",
 			       aead_form->algo);
 		return -1;
+	case RTE_CRYPTO_AEAD_CHACHA20_POLY1305:
+		enc_type = CHACHA20;
+		auth_type = POLY1305;
+		cipher_key_len = 32;
+		sess->chacha_poly = 1;
+		break;
 	default:
 		CPT_LOG_DP_ERR("Crypto: Undefined cipher algo %u specified",
 			       aead_form->algo);
@@ -2598,6 +2641,7 @@ fill_sess_cipher(struct rte_crypto_sym_xform *xform,
 		 struct cpt_sess_misc *sess)
 {
 	struct rte_crypto_cipher_xform *c_form;
+	struct cpt_ctx *ctx = SESS_PRIV(sess);
 	cipher_type_t enc_type = 0; /* NULL Cipher type */
 	uint32_t cipher_key_len = 0;
 	uint8_t zsk_flag = 0, aes_ctr = 0, is_null = 0;
@@ -2606,9 +2650,14 @@ fill_sess_cipher(struct rte_crypto_sym_xform *xform,
 
 	if (c_form->op == RTE_CRYPTO_CIPHER_OP_ENCRYPT)
 		sess->cpt_op |= CPT_OP_CIPHER_ENCRYPT;
-	else if (c_form->op == RTE_CRYPTO_CIPHER_OP_DECRYPT)
+	else if (c_form->op == RTE_CRYPTO_CIPHER_OP_DECRYPT) {
 		sess->cpt_op |= CPT_OP_CIPHER_DECRYPT;
-	else {
+		if (xform->next != NULL &&
+		    xform->next->type == RTE_CRYPTO_SYM_XFORM_AUTH) {
+			/* Perform decryption followed by auth verify */
+			ctx->dec_auth = 1;
+		}
+	} else {
 		CPT_LOG_DP_ERR("Unknown cipher operation\n");
 		return -1;
 	}
@@ -2699,9 +2748,17 @@ static __rte_always_inline int
 fill_sess_auth(struct rte_crypto_sym_xform *xform,
 	       struct cpt_sess_misc *sess)
 {
+	struct cpt_ctx *ctx = SESS_PRIV(sess);
 	struct rte_crypto_auth_xform *a_form;
 	auth_type_t auth_type = 0; /* NULL Auth type */
 	uint8_t zsk_flag = 0, aes_gcm = 0, is_null = 0;
+
+	if (xform->next != NULL &&
+	    xform->next->type == RTE_CRYPTO_SYM_XFORM_CIPHER &&
+	    xform->next->cipher.op == RTE_CRYPTO_CIPHER_OP_ENCRYPT) {
+		/* Perform auth followed by encryption */
+		ctx->auth_enc = 1;
+	}
 
 	a_form = &xform->auth;
 
@@ -2858,7 +2915,7 @@ alloc_op_meta(struct rte_mbuf *m_src,
 		tailroom = rte_pktmbuf_tailroom(m_src);
 		if (likely(tailroom > len + 8)) {
 			mdata = (uint8_t *)m_src->buf_addr + m_src->buf_len;
-			mphys = m_src->buf_physaddr + m_src->buf_len;
+			mphys = m_src->buf_iova + m_src->buf_len;
 			mdata -= len;
 			mphys -= len;
 			buf->vaddr = mdata;
@@ -2914,7 +2971,7 @@ prepare_iov_from_pkt(struct rte_mbuf *pkt,
 
 	if (!start_offset) {
 		seg_data = rte_pktmbuf_mtod(pkt, void *);
-		seg_phys = rte_pktmbuf_mtophys(pkt);
+		seg_phys = rte_pktmbuf_iova(pkt);
 		seg_size = pkt->data_len;
 	} else {
 		while (start_offset >= pkt->data_len) {
@@ -2923,7 +2980,7 @@ prepare_iov_from_pkt(struct rte_mbuf *pkt,
 		}
 
 		seg_data = rte_pktmbuf_mtod_offset(pkt, void *, start_offset);
-		seg_phys = rte_pktmbuf_mtophys_offset(pkt, start_offset);
+		seg_phys = rte_pktmbuf_iova_offset(pkt, start_offset);
 		seg_size = pkt->data_len - start_offset;
 		if (!seg_size)
 			return 1;
@@ -2938,7 +2995,7 @@ prepare_iov_from_pkt(struct rte_mbuf *pkt,
 
 	while (unlikely(pkt != NULL)) {
 		seg_data = rte_pktmbuf_mtod(pkt, void *);
-		seg_phys = rte_pktmbuf_mtophys(pkt);
+		seg_phys = rte_pktmbuf_iova(pkt);
 		seg_size = pkt->data_len;
 		if (!seg_size)
 			break;
@@ -2968,7 +3025,7 @@ prepare_iov_from_pkt_inplace(struct rte_mbuf *pkt,
 	iov_ptr_t *iovec;
 
 	seg_data = rte_pktmbuf_mtod(pkt, void *);
-	seg_phys = rte_pktmbuf_mtophys(pkt);
+	seg_phys = rte_pktmbuf_iova(pkt);
 	seg_size = pkt->data_len;
 
 	/* first seg */
@@ -2980,7 +3037,7 @@ prepare_iov_from_pkt_inplace(struct rte_mbuf *pkt,
 		tailroom = rte_pktmbuf_tailroom(pkt);
 		if (likely((headroom >= 24) &&
 		    (tailroom >= 8))) {
-			/* In 83XX this is prerequivisit for Direct mode */
+			/* In 83XX this is prerequisite for Direct mode */
 			*flags |= SINGLE_BUF_HEADTAILROOM;
 		}
 		param->bufs[0].vaddr = seg_data;
@@ -2997,7 +3054,7 @@ prepare_iov_from_pkt_inplace(struct rte_mbuf *pkt,
 
 	while (unlikely(pkt != NULL)) {
 		seg_data = rte_pktmbuf_mtod(pkt, void *);
-		seg_phys = rte_pktmbuf_mtophys(pkt);
+		seg_phys = rte_pktmbuf_iova(pkt);
 		seg_size = pkt->data_len;
 
 		if (!seg_size)
@@ -3025,6 +3082,7 @@ fill_fc_params(struct rte_crypto_op *cop,
 {
 	uint32_t space = 0;
 	struct rte_crypto_sym_op *sym_op = cop->sym;
+	struct cpt_ctx *ctx = SESS_PRIV(sess_misc);
 	void *mdata = NULL;
 	uintptr_t *op;
 	uint32_t mc_hash_off;
@@ -3067,7 +3125,7 @@ fill_fc_params(struct rte_crypto_op *cop,
 	m_src = sym_op->m_src;
 	m_dst = sym_op->m_dst;
 
-	if (sess_misc->aes_gcm) {
+	if (sess_misc->aes_gcm || sess_misc->chacha_poly) {
 		uint8_t *salt;
 		uint8_t *aad_data;
 		uint16_t aad_len;
@@ -3109,9 +3167,8 @@ fill_fc_params(struct rte_crypto_op *cop,
 				m = m_src;
 
 			/* hmac immediately following data is best case */
-			if (unlikely(rte_pktmbuf_mtod(m, uint8_t *) +
-			    mc_hash_off !=
-			    (uint8_t *)sym_op->aead.digest.data)) {
+			if (unlikely(rte_pktmbuf_mtod_offset(m, uint8_t *, mc_hash_off) !=
+				     (uint8_t *)sym_op->aead.digest.data)) {
 				flags |= VALID_MAC_BUF;
 				fc_params.mac_buf.size = sess_misc->mac_len;
 				fc_params.mac_buf.vaddr =
@@ -3152,9 +3209,9 @@ fill_fc_params(struct rte_crypto_op *cop,
 				m = m_src;
 
 			/* hmac immediately following data is best case */
-			if (unlikely(rte_pktmbuf_mtod(m, uint8_t *) +
-			    mc_hash_off !=
-			     (uint8_t *)sym_op->auth.digest.data)) {
+			if (!ctx->dec_auth && !ctx->auth_enc &&
+				 (unlikely(rte_pktmbuf_mtod_offset(m, uint8_t *, mc_hash_off) !=
+					   (uint8_t *)sym_op->auth.digest.data))) {
 				flags |= VALID_MAC_BUF;
 				fc_params.mac_buf.size =
 					sess_misc->mac_len;
@@ -3169,7 +3226,9 @@ fill_fc_params(struct rte_crypto_op *cop,
 	fc_params.ctx_buf.vaddr = SESS_PRIV(sess_misc);
 	fc_params.ctx_buf.dma_addr = sess_misc->ctx_dma_addr;
 
-	if (unlikely(sess_misc->is_null || sess_misc->cpt_op == CPT_OP_DECODE))
+	if (!ctx->dec_auth &&
+		  unlikely(sess_misc->is_null ||
+		  sess_misc->cpt_op == CPT_OP_DECODE))
 		inplace = 0;
 
 	if (likely(!m_dst && inplace)) {
@@ -3459,7 +3518,7 @@ fill_digest_params(struct rte_crypto_op *cop,
 			params.mac_buf.vaddr =
 				rte_pktmbuf_mtod_offset(m_dst, void *, off);
 			params.mac_buf.dma_addr =
-				rte_pktmbuf_mtophys_offset(m_dst, off);
+				rte_pktmbuf_iova_offset(m_dst, off);
 			params.mac_buf.size = mac_len;
 		}
 	} else {

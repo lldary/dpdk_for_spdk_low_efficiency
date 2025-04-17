@@ -7,8 +7,8 @@
 #include <rte_common.h>
 #include <rte_hexdump.h>
 #include <rte_cryptodev.h>
-#include <rte_cryptodev_pmd.h>
-#include <rte_bus_vdev.h>
+#include <cryptodev_pmd.h>
+#include <bus_vdev_driver.h>
 #include <rte_malloc.h>
 #include <rte_cpuflags.h>
 
@@ -139,11 +139,12 @@ crypto_chain_order[] = {
  * Extract particular combined mode crypto function from the 3D array.
  */
 #define CRYPTO_GET_ALGO(order, cop, calg, aalg, keyl)			\
-({									\
+__extension__ ({							\
 	crypto_func_tbl_t *func_tbl =					\
 				(crypto_chain_order[(order)])[(cop)];	\
 									\
-	((*func_tbl)[(calg)][(aalg)][KEYL(keyl)]);		\
+	((calg >= CRYPTO_CIPHER_MAX) || (aalg >= CRYPTO_AUTH_MAX)) ?	\
+		NULL : ((*func_tbl)[(calg)][(aalg)][KEYL(keyl)]);	\
 })
 
 /*----------------------------------------------------------------------------*/
@@ -185,10 +186,11 @@ crypto_key_sched_dir[] = {
  * Extract particular combined mode crypto function from the 3D array.
  */
 #define CRYPTO_GET_KEY_SCHED(cop, calg, keyl)				\
-({									\
+__extension__ ({							\
 	crypto_key_sched_tbl_t *ks_tbl = crypto_key_sched_dir[(cop)];	\
 									\
-	((*ks_tbl)[(calg)][KEYL(keyl)]);				\
+	(calg >= CRYPTO_CIPHER_MAX) ?					\
+		NULL : ((*ks_tbl)[(calg)][KEYL(keyl)]);			\
 })
 
 /*----------------------------------------------------------------------------*/
@@ -436,7 +438,8 @@ armv8_crypto_set_session_chained_parameters(struct armv8_crypto_session *sess,
 		return -ENOTSUP;
 	}
 
-	if (unlikely(sess->crypto_func == NULL)) {
+	if (unlikely(sess->crypto_func == NULL ||
+		sess->cipher.key_sched == NULL)) {
 		/*
 		 * If we got here that means that there must be a bug
 		 * in the algorithms selection above. Nevertheless keep
@@ -518,34 +521,23 @@ get_session(struct armv8_crypto_qp *qp, struct rte_crypto_op *op)
 	if (op->sess_type == RTE_CRYPTO_OP_WITH_SESSION) {
 		/* get existing session */
 		if (likely(op->sym->session != NULL)) {
-			sess = (struct armv8_crypto_session *)
-					get_sym_session_private_data(
-					op->sym->session,
-					cryptodev_driver_id);
+			sess = CRYPTODEV_GET_SYM_SESS_PRIV(op->sym->session);
 		}
 	} else {
 		/* provide internal session */
-		void *_sess = NULL;
-		void *_sess_private_data = NULL;
+		struct rte_cryptodev_sym_session *_sess = NULL;
 
 		if (rte_mempool_get(qp->sess_mp, (void **)&_sess))
 			return NULL;
 
-		if (rte_mempool_get(qp->sess_mp_priv,
-				(void **)&_sess_private_data))
-			return NULL;
-
-		sess = (struct armv8_crypto_session *)_sess_private_data;
+		sess = (struct armv8_crypto_session *)_sess->driver_priv_data;
 
 		if (unlikely(armv8_crypto_set_session_parameters(sess,
 				op->sym->xform) != 0)) {
 			rte_mempool_put(qp->sess_mp, _sess);
-			rte_mempool_put(qp->sess_mp_priv, _sess_private_data);
 			sess = NULL;
 		}
 		op->sym->session = (struct rte_cryptodev_sym_session *)_sess;
-		set_sym_session_private_data(op->sym->session,
-				cryptodev_driver_id, _sess_private_data);
 	}
 
 	if (unlikely(sess == NULL))
@@ -630,7 +622,7 @@ process_armv8_chained_op(struct armv8_crypto_qp *qp, struct rte_crypto_op *op,
 	arg.cipher.key = sess->cipher.key.data;
 	/* Acquire combined mode function */
 	crypto_func = sess->crypto_func;
-	ARMV8_CRYPTO_ASSERT(crypto_func != NULL);
+	RTE_VERIFY(crypto_func != NULL);
 	error = crypto_func(csrc, cdst, clen, asrc, adst, alen, &arg);
 	if (error != 0) {
 		op->status = RTE_CRYPTO_OP_STATUS_INVALID_ARGS;
@@ -671,11 +663,7 @@ process_op(struct armv8_crypto_qp *qp, struct rte_crypto_op *op,
 	/* Free session if a session-less crypto op */
 	if (op->sess_type == RTE_CRYPTO_OP_SESSIONLESS) {
 		memset(sess, 0, sizeof(struct armv8_crypto_session));
-		memset(op->sym->session, 0,
-			rte_cryptodev_sym_get_existing_header_session_size(
-				op->sym->session));
-		rte_mempool_put(qp->sess_mp, sess);
-		rte_mempool_put(qp->sess_mp_priv, op->sym->session);
+		rte_mempool_put(qp->sess_mp, op->sym->session);
 		op->sym->session = NULL;
 	}
 
@@ -799,6 +787,8 @@ cryptodev_armv8_crypto_create(const char *name,
 
 	internals->max_nb_qpairs = init_params->max_nb_queue_pairs;
 
+	rte_cryptodev_pmd_probing_finish(dev);
+
 	return 0;
 
 init_error:
@@ -843,8 +833,8 @@ cryptodev_armv8_crypto_uninit(struct rte_vdev_device *vdev)
 	if (name == NULL)
 		return -EINVAL;
 
-	RTE_LOG(INFO, PMD,
-		"Closing ARMv8 crypto device %s on numa socket %u\n",
+	ARMV8_CRYPTO_LOG_INFO(
+		"Closing ARMv8 crypto device %s on numa socket %u",
 		name, rte_socket_id());
 
 	cryptodev = rte_cryptodev_pmd_get_named_dev(name);
@@ -860,6 +850,8 @@ static struct rte_vdev_driver armv8_crypto_pmd_drv = {
 };
 
 static struct cryptodev_driver armv8_crypto_drv;
+
+RTE_LOG_REGISTER_DEFAULT(crypto_armv8_log_type, ERR);
 
 RTE_PMD_REGISTER_VDEV(CRYPTODEV_NAME_ARMV8_PMD, armv8_crypto_pmd_drv);
 RTE_PMD_REGISTER_ALIAS(CRYPTODEV_NAME_ARMV8_PMD, cryptodev_armv8_pmd);

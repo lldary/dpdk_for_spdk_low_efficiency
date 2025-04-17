@@ -15,15 +15,15 @@ More information about SoC can be found at `Cavium, Inc Official Website
 Common Offload HW Block Drivers
 -------------------------------
 
-1. **Crypto Driver**
+#. **Crypto Driver**
    See :doc:`../cryptodevs/octeontx` for octeontx crypto driver
    information.
 
-2. **Eventdev Driver**
+#. **Eventdev Driver**
    See :doc:`../eventdevs/octeontx` for octeontx ssovf eventdev driver
    information.
 
-3. **Mempool Driver**
+#. **Mempool Driver**
    See :doc:`../mempool/octeontx` for octeontx fpavf mempool driver
    information.
 
@@ -33,24 +33,24 @@ Steps To Setup Platform
 There are three main pre-prerequisites for setting up Platform drivers on
 OCTEON TX compatible board:
 
-1. **OCTEON TX Linux kernel PF driver for Network acceleration HW blocks**
+#. **OCTEON TX Linux kernel PF driver for Network acceleration HW blocks**
 
    The OCTEON TX Linux kernel drivers (includes the required PF driver for the
    Platform drivers) are available on Github at `octeontx-kmod <https://github.com/caviumnetworks/octeontx-kmod>`_
    along with build, install and dpdk usage instructions.
 
-.. note::
+   .. note::
 
-   The PF driver and the required microcode for the crypto offload block will be
-   available with OCTEON TX SDK only. So for using crypto offload, follow the steps
-   mentioned in :ref:`setup_platform_using_OCTEON_TX_SDK`.
+      The PF driver and the required microcode for the crypto offload block will be
+      available with OCTEON TX SDK only. So for using crypto offload, follow the steps
+      mentioned in :ref:`setup_platform_using_OCTEON_TX_SDK`.
 
-2. **ARM64 Tool Chain**
+#. **ARM64 Tool Chain**
 
    For example, the *aarch64* Linaro Toolchain, which can be obtained from
    `here <https://releases.linaro.org/components/toolchain/binaries/4.9-2017.01/aarch64-linux-gnu>`_.
 
-3. **Rootfile system**
+#. **Rootfile system**
 
    Any *aarch64* supporting filesystem can be used. For example,
    Ubuntu 15.10 (Wily) or 16.04 LTS (Xenial) userland which can be obtained
@@ -60,7 +60,7 @@ OCTEON TX compatible board:
    as part of SDK from Cavium. The SDK includes all the above prerequisites necessary
    to bring up a OCTEON TX board. Please refer :ref:`setup_platform_using_OCTEON_TX_SDK`.
 
-- Follow the DPDK :doc:`../linux_gsg/index` to setup the basic DPDK environment.
+#. Follow the DPDK :doc:`../linux_gsg/index` to setup the basic DPDK environment.
 
 .. _setup_platform_using_OCTEON_TX_SDK:
 
@@ -94,19 +94,15 @@ drivers can be compiled with the following steps,
 
 .. code-block:: console
 
-        cd <dpdk directory>
-        make config T=arm64-thunderx-linux-gcc
-        make
+        meson setup build -Dexamples=<application>
+        ninja -C build
 
 The example applications can be compiled using the following:
 
 .. code-block:: console
 
-        cd <dpdk directory>
-        export RTE_SDK=$PWD
-        export RTE_TARGET=build
-        cd examples/<application>
-        make
+        meson setup build -Dexamples=<application>
+        ninja -C build
 
 Cross Compilation
 ~~~~~~~~~~~~~~~~~
@@ -115,10 +111,7 @@ The DPDK applications can be cross-compiled on any x86 based platform. The
 OCTEON TX SDK need to be installed on the build system. The SDK package will
 provide the required toolchain etc.
 
-Refer to :doc:`../linux_gsg/cross_build_dpdk_for_arm64` for further steps on
-compilation. The 'host' & 'CC' to be used in the commands would change,
-in addition to the paths to which libnuma related files have to be
-copied.
+Refer to :doc:`../linux_gsg/cross_build_dpdk_for_arm64` for generic arm64 details.
 
 The following steps can be used to perform cross-compilation with OCTEON TX
 SDK 6.2.0 patch 3:
@@ -128,34 +121,28 @@ SDK 6.2.0 patch 3:
         cd <sdk_install_dir>
         source env-setup
 
-        git clone https://github.com/numactl/numactl.git
-        cd numactl
-        git checkout v2.0.11 -b v2.0.11
-        ./autogen.sh
-        autoconf -i
-        ./configure --host=aarch64-thunderx-linux CC=aarch64-thunderx-linux-gnu-gcc --prefix=<numa install dir>
-        make install
-
-The above steps will prepare build system with numa additions. Now this build system can be used
-to build applications for **OCTEON TX** :sup:`®` platforms.
+The above steps will prepare build system with required toolchain.
+Now this build system can be used to build applications for **OCTEON TX** :sup:`®` platforms.
 
 .. code-block:: console
 
         cd <dpdk directory>
-        export RTE_SDK=$PWD
-        export RTE_KERNELDIR=$THUNDER_ROOT/linux/kernel/linux
-        make config T=arm64-thunderx-linux-gcc
-        make -j CROSS=aarch64-thunderx-linux-gnu- CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_EAL_IGB_UIO=n EXTRA_CFLAGS="-isystem <numa_install_dir>/include" EXTRA_LDFLAGS="-L<numa_install_dir>/lib -lnuma"
+        meson setup build --cross-file config/arm/arm64_thunderx_linux_gcc
+        ninja -C build
 
-If NUMA support is not required, it can be disabled as explained in
-:doc:`../linux_gsg/cross_build_dpdk_for_arm64`.
-
-Following steps could be used in that case.
+The example applications can be compiled using the following:
 
 .. code-block:: console
 
-        make config T=arm64-thunderx-linux-gcc
-        make CROSS=aarch64-thunderx-linux-gnu-
+        cd <dpdk directory>
+        meson setup build --cross-file config/arm/arm64_thunderx_linux_gcc -Dexamples=<application>
+        ninja -C build
 
+.. note::
+
+   By default, meson cross compilation uses ``aarch64-linux-gnu-gcc`` toolchain,
+   if OCTEON TX SDK 6.2.0 patch 3 is available then it can be used by
+   overriding the c, cpp, ar, strip ``binaries`` attributes to respective thunderx
+   toolchain binaries in ``config/arm/arm64_thunderx_linux_gcc`` file.
 
 SDK and related information can be obtained from: `Cavium support site <https://support.cavium.com/>`_.

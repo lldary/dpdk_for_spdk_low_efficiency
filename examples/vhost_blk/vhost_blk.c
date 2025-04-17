@@ -2,7 +2,12 @@
  * Copyright(c) 2010-2019 Intel Corporation
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdint.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <signal.h>
@@ -80,9 +85,9 @@ enqueue_task(struct vhost_blk_task *task)
 	 */
 	used->ring[used->idx & (vq->vring.size - 1)].id = task->req_idx;
 	used->ring[used->idx & (vq->vring.size - 1)].len = task->data_len;
-	rte_smp_mb();
+	rte_atomic_thread_fence(__ATOMIC_SEQ_CST);
 	used->idx++;
-	rte_smp_mb();
+	rte_atomic_thread_fence(__ATOMIC_SEQ_CST);
 
 	rte_vhost_clr_inflight_desc_split(task->ctrlr->vid,
 		vq->id, used->idx, task->req_idx);
@@ -106,12 +111,12 @@ enqueue_task_packed(struct vhost_blk_task *task)
 	desc->id = task->buffer_id;
 	desc->addr = 0;
 
-	rte_smp_mb();
+	rte_atomic_thread_fence(__ATOMIC_SEQ_CST);
 	if (vq->used_wrap_counter)
 		desc->flags |= VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED;
 	else
 		desc->flags &= ~(VIRTQ_DESC_F_AVAIL | VIRTQ_DESC_F_USED);
-	rte_smp_mb();
+	rte_atomic_thread_fence(__ATOMIC_SEQ_CST);
 
 	rte_vhost_clr_inflight_desc_packed(task->ctrlr->vid, vq->id,
 					   task->inflight_idx);
@@ -522,12 +527,10 @@ process_vq(struct vhost_blk_queue *vq)
 	}
 }
 
-static void *
+static uint32_t
 ctrlr_worker(void *arg)
 {
 	struct vhost_blk_ctrlr *ctrlr = (struct vhost_blk_ctrlr *)arg;
-	cpu_set_t cpuset;
-	pthread_t thread;
 	int i;
 
 	fprintf(stdout, "Ctrlr Worker Thread start\n");
@@ -539,11 +542,6 @@ ctrlr_worker(void *arg)
 		exit(0);
 	}
 
-	thread = pthread_self();
-	CPU_ZERO(&cpuset);
-	CPU_SET(0, &cpuset);
-	pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-
 	for (i = 0; i < NUM_OF_BLK_QUEUES; i++)
 		submit_inflight_vq(&ctrlr->queues[i]);
 
@@ -553,7 +551,7 @@ ctrlr_worker(void *arg)
 
 	fprintf(stdout, "Ctrlr Worker Thread Exiting\n");
 	sem_post(&exit_sem);
-	return NULL;
+	return 0;
 }
 
 static int
@@ -597,10 +595,10 @@ new_device(int vid)
 	struct vhost_blk_ctrlr *ctrlr;
 	struct vhost_blk_queue *vq;
 	char path[PATH_MAX];
-	uint64_t features;
-	pthread_t tid;
+	uint64_t features, protocol_features;
+	rte_thread_t tid;
 	int i, ret;
-	bool packed_ring;
+	bool packed_ring, inflight_shmfd;
 
 	ret = rte_vhost_get_ifname(vid, path, PATH_MAX);
 	if (ret) {
@@ -625,6 +623,16 @@ new_device(int vid)
 	}
 	packed_ring = !!(features & (1ULL << VIRTIO_F_RING_PACKED));
 
+	ret = rte_vhost_get_negotiated_protocol_features(
+		vid, &protocol_features);
+	if (ret) {
+		fprintf(stderr,
+			"Failed to get the negotiated protocol features\n");
+		return -1;
+	}
+	inflight_shmfd = !!(features &
+			    (1ULL << VHOST_USER_PROTOCOL_F_INFLIGHT_SHMFD));
+
 	/* Disable Notifications and init last idx */
 	for (i = 0; i < NUM_OF_BLK_QUEUES; i++) {
 		vq = &ctrlr->queues[i];
@@ -635,10 +643,13 @@ new_device(int vid)
 		assert(rte_vhost_get_vring_base(ctrlr->vid, i,
 					       &vq->last_avail_idx,
 					       &vq->last_used_idx) == 0);
-		assert(rte_vhost_get_vhost_ring_inflight(ctrlr->vid, i,
-						&vq->inflight_ring) == 0);
 
-		if (packed_ring) {
+		if (inflight_shmfd)
+			assert(rte_vhost_get_vhost_ring_inflight(
+				       ctrlr->vid, i,
+				       &vq->inflight_ring) == 0);
+
+		if (packed_ring && inflight_shmfd) {
 			/* for the reconnection */
 			assert(rte_vhost_get_vring_base_from_inflight(
 				ctrlr->vid, i,
@@ -666,14 +677,15 @@ new_device(int vid)
 	/* start polling vring */
 	worker_thread_status = WORKER_STATE_START;
 	fprintf(stdout, "New Device %s, Device ID %d\n", path, vid);
-	if (pthread_create(&tid, NULL, &ctrlr_worker, ctrlr) < 0) {
+	if (rte_thread_create_control(&tid, "dpdk-vhost-blk",
+			&ctrlr_worker, ctrlr) != 0) {
 		fprintf(stderr, "Worker Thread Started Failed\n");
 		return -1;
 	}
 
 	/* device has been started */
 	ctrlr->started = 1;
-	pthread_detach(tid);
+	rte_thread_detach(tid);
 	return 0;
 }
 
@@ -733,7 +745,7 @@ new_connection(int vid)
 	return 0;
 }
 
-struct vhost_device_ops vhost_blk_device_ops = {
+struct rte_vhost_device_ops vhost_blk_device_ops = {
 	.new_device =  new_device,
 	.destroy_device = destroy_device,
 	.new_connection = new_connection,
@@ -829,8 +841,7 @@ static void
 vhost_blk_ctrlr_destroy(struct vhost_blk_ctrlr *ctrlr)
 {
 	if (ctrlr->bdev != NULL) {
-		if (ctrlr->bdev->data != NULL)
-			rte_free(ctrlr->bdev->data);
+		rte_free(ctrlr->bdev->data);
 
 		rte_free(ctrlr->bdev);
 	}
@@ -877,11 +888,18 @@ int main(int argc, char *argv[])
 
 	signal(SIGINT, signal_handler);
 
-	rte_vhost_driver_start(dev_pathname);
+	ret = rte_vhost_driver_start(dev_pathname);
+	if (ret < 0) {
+		fprintf(stderr, "Failed to start vhost driver.\n");
+		return -1;
+	}
 
 	/* loop for exit the application */
 	while (1)
 		sleep(1);
+
+	/* clean up the EAL */
+	rte_eal_cleanup();
 
 	return 0;
 }
