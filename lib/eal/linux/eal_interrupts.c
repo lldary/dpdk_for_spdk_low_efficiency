@@ -499,8 +499,8 @@ index:
 	ret = ioctl(vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
 
 	if (ret) {
-		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d index %d",
-			rte_intr_fd_get(intr_handle), index);
+		EAL_LOG(ERR, "Error enabling MSI-X interrupts for fd %d index %d ret %d",
+			rte_intr_fd_get(intr_handle), index, ret);
 		return -1;
 	}
 
