@@ -84,19 +84,6 @@ int rte_pci_write_config(const struct rte_pci_device *dev __rte_unused,
 	return 0;
 }
 
-int rte_pci_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable)
-{
-	int ret = -1;
-
-	RTE_LOG(DEBUG, EAL, "  Not managed by a supported kernel driver, skipped\n");
-	/* This function is not implemented on Windows.
-	 * We really should short-circuit the call to these functions by
-	 * clearing the RTE_PCI_DRV_NEED_MAPPING flag
-	 * in the rte_pci_driver flags.
-	 */
-	return ret;
-}
-
 /* Read PCI MMIO space. */
 int rte_pci_mmio_read(const struct rte_pci_device *dev, int bar,
 					  void *buf, size_t len, off_t offset)

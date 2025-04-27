@@ -86,11 +86,6 @@ int rte_pci_map_device(struct rte_pci_device *dev)
 	return ret;
 }
 
-int rte_pci_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable)
-{
-	return -1;
-}
-
 /* Unmap pci device */
 void rte_pci_unmap_device(struct rte_pci_device *dev)
 {

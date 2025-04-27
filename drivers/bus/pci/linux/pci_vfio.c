@@ -1150,11 +1150,6 @@ int pci_vfio_map_resource(struct rte_pci_device *dev)
 		return pci_vfio_map_resource_secondary(dev);
 }
 
-int pci_vfio_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable)
-{
-	return 0; // TODO: 废弃
-}
-
 static struct mapped_pci_resource *
 find_and_unmap_vfio_resource(struct mapped_pci_res_list *vfio_res_list,
 							 struct rte_pci_device *dev,

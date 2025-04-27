@@ -402,15 +402,6 @@ error:
 	return -1;
 }
 
-int rte_pci_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable)
-{
-	int ret = -1;
-
-	RTE_LOG(DEBUG, EAL, "  Not managed by a supported kernel driver, skipped\n");
-
-	return ret;
-}
-
 bool pci_device_iommu_support_va(__rte_unused const struct rte_pci_device *dev)
 {
 	return false;

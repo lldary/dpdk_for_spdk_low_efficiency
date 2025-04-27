@@ -52,8 +52,6 @@ extern "C"
 	 */
 	int rte_pci_map_device(struct rte_pci_device *dev);
 
-	int rte_pci_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable);
-
 	/**
 	 * Unmap this device
 	 *
