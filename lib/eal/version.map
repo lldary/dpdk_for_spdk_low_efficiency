@@ -142,6 +142,7 @@ DPDK_24 {
 	rte_intr_disable;
 	rte_intr_enable;
 	rte_intr_fd_get;
+	rte_intr_control_int_mask;
 	rte_intr_fd_set;
 	rte_intr_instance_alloc;
 	rte_intr_instance_free;

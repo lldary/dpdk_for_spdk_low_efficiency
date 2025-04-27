@@ -10,8 +10,8 @@
 #include "private.h"
 
 /** IO resource type: */
-#define IORESOURCE_IO         0x00000100
-#define IORESOURCE_MEM        0x00000200
+#define IORESOURCE_IO 0x00000100
+#define IORESOURCE_MEM 0x00000200
 
 /*
  * Helper function to map PCI resources right after hugepages in virtual memory
@@ -23,56 +23,57 @@ void *pci_find_max_end_va(void);
  * string is modified)
  */
 int pci_parse_one_sysfs_resource(char *line, size_t len, uint64_t *phys_addr,
-	uint64_t *end_addr, uint64_t *flags);
+								 uint64_t *end_addr, uint64_t *flags);
 
 int pci_uio_alloc_resource(struct rte_pci_device *dev,
-		struct mapped_pci_resource **uio_res);
+						   struct mapped_pci_resource **uio_res);
 void pci_uio_free_resource(struct rte_pci_device *dev,
-		struct mapped_pci_resource *uio_res);
+						   struct mapped_pci_resource *uio_res);
 int pci_uio_map_resource_by_index(struct rte_pci_device *dev, int res_idx,
-		struct mapped_pci_resource *uio_res, int map_idx);
+								  struct mapped_pci_resource *uio_res, int map_idx);
 
 int pci_uio_read_config(const struct rte_intr_handle *intr_handle,
-			void *buf, size_t len, off_t offs);
+						void *buf, size_t len, off_t offs);
 int pci_uio_write_config(const struct rte_intr_handle *intr_handle,
-			 const void *buf, size_t len, off_t offs);
+						 const void *buf, size_t len, off_t offs);
 
 int pci_uio_mmio_read(const struct rte_pci_device *dev, int bar,
-			void *buf, size_t len, off_t offset);
+					  void *buf, size_t len, off_t offset);
 int pci_uio_mmio_write(const struct rte_pci_device *dev, int bar,
-			const void *buf, size_t len, off_t offset);
+					   const void *buf, size_t len, off_t offset);
 
 int pci_uio_ioport_map(struct rte_pci_device *dev, int bar,
-		       struct rte_pci_ioport *p);
+					   struct rte_pci_ioport *p);
 void pci_uio_ioport_read(struct rte_pci_ioport *p,
-			 void *data, size_t len, off_t offset);
+						 void *data, size_t len, off_t offset);
 void pci_uio_ioport_write(struct rte_pci_ioport *p,
-			  const void *data, size_t len, off_t offset);
+						  const void *data, size_t len, off_t offset);
 int pci_uio_ioport_unmap(struct rte_pci_ioport *p);
 
 #ifdef VFIO_PRESENT
 
 /* access config space */
 int pci_vfio_read_config(const struct rte_pci_device *dev,
-			 void *buf, size_t len, off_t offs);
+						 void *buf, size_t len, off_t offs);
 int pci_vfio_write_config(const struct rte_pci_device *dev,
-			  const void *buf, size_t len, off_t offs);
+						  const void *buf, size_t len, off_t offs);
 
 int pci_vfio_mmio_read(const struct rte_pci_device *dev, int bar,
-			void *buf, size_t len, off_t offset);
+					   void *buf, size_t len, off_t offset);
 int pci_vfio_mmio_write(const struct rte_pci_device *dev, int bar,
-			const void *buf, size_t len, off_t offset);
+						const void *buf, size_t len, off_t offset);
 
 int pci_vfio_ioport_map(struct rte_pci_device *dev, int bar,
-		        struct rte_pci_ioport *p);
+						struct rte_pci_ioport *p);
 void pci_vfio_ioport_read(struct rte_pci_ioport *p,
-			  void *data, size_t len, off_t offset);
+						  void *data, size_t len, off_t offset);
 void pci_vfio_ioport_write(struct rte_pci_ioport *p,
-			   const void *data, size_t len, off_t offset);
+						   const void *data, size_t len, off_t offset);
 int pci_vfio_ioport_unmap(struct rte_pci_ioport *p);
 
 /* map/unmap VFIO resource prototype */
 int pci_vfio_map_resource(struct rte_pci_device *dev);
+int pci_vfio_control_spec_interrupt(struct rte_pci_device *dev, uint32_t index, bool enable);
 int pci_vfio_unmap_resource(struct rte_pci_device *dev);
 
 int pci_vfio_is_enabled(void);
